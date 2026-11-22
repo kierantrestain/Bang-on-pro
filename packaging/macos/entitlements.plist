@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+    SPDX-FileCopyrightText: 2026 Bang On Pro Contributors
+    SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
+
+    Hardened Runtime entitlements for Bang On Pro (Apple Silicon arm64).
+
+    Security posture:
+    - JIT-free execution: com.apple.security.cs.allow-jit and
+      com.apple.security.cs.allow-unsigned-executable-memory are intentionally
+      OMITTED to preserve W^X memory protection.
+    - No UI scripting / AppleEvents automation: AI agents mutate timelines
+      strictly via BangOnPro::TimelineCommandEngine (native C++ API), never
+      via macOS Accessibility or AppleEvents injection.
+    - Library validation is relaxed solely to allow dynamic loading of MLT,
+      frei0r, FFmpeg, and user-installed open-source Python extension wheels.
+-->
+<plist version="1.0">
+<dict>
+    <!-- Capture & voiceover hardware access (prompted by TCC at runtime) -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+    <key>com.apple.security.device.camera</key>
+    <true/>
+
+    <!-- User-selected files & media import/export -->
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
+    <key>com.apple.security.files.downloads.read-only</key>
+    <true/>
+
+    <!-- Required for dynamic loading of MLT, frei0r, and FFmpeg plugin dylibs -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+
+    <!-- Outbound client access for optional user-triggered KNewStuff/model downloads -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+</dict>
+</plist>

@@ -1,0 +1,226 @@
+# SPDX-FileCopyrightText: 2026 Bang On Pro Contributors
+# SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
+
+name: CI Linux (Build, CTest, Security & Compliance)
+
+on:
+  push:
+    branches:
+      - main
+      - "bangonpro/**"
+      - "feat/**"
+  pull_request:
+    branches:
+      - main
+      - "bangonpro/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-linux-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  qa-security-compliance:
+    name: QA, Security, Licence & Project Integrity (Python + MLT)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install MLT, FFmpeg, frei0r & YAML tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            melt \
+            ffmpeg \
+            frei0r-plugins \
+            python3-yaml
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: "requirements-bangonpro.txt"
+
+      - name: Install pinned Bang On Pro Python dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -r requirements-bangonpro.txt PyYAML
+
+      - name: Validate packaging scripts & workflow YAML syntax
+        run: |
+          bash -n packaging/macos/build_macos_arm64.sh
+          python3 -m py_compile packaging/macos/craft_blueprint.py
+          python3 -c '
+          import glob, yaml
+          for path in sorted(glob.glob(".github/workflows/*.yml")):
+              with open(path, "r", encoding="utf-8") as fh:
+                  doc = yaml.safe_load(fh)
+              assert isinstance(doc, dict) and "jobs" in doc, f"Invalid workflow: {path}"
+              print(f"YAML OK: {path}")
+          '
+
+      - name: Run full Bang On Pro QA, Security & Project Integrity suite
+        run: |
+          mkdir -p reports/qa
+          python3 tests/bangonpro/run_all_checks.py \
+            --report-dir reports/qa \
+            --verbose
+
+      - name: Upload QA & Security Compliance test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bangonpro-qa-security-reports
+          path: reports/qa/
+          retention-days: 14
+
+  cpp-build-and-ctest:
+    name: Linux C++ Build (Qt5/KF5/MLT) + CTest + Full Suite
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 2G
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Qt5, KF5, MLT, FFmpeg, frei0r & build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            ninja-build \
+            ccache \
+            extra-cmake-modules \
+            pkg-config \
+            gettext \
+            libsm-dev \
+            libv4l-dev \
+            xvfb \
+            qtbase5-dev \
+            qtdeclarative5-dev \
+            libqt5svg5-dev \
+            libqt5networkauth5-dev \
+            qtmultimedia5-dev \
+            qtquickcontrols2-5-dev \
+            qttools5-dev \
+            qml-module-qtquick2 \
+            qml-module-qtquick-controls2 \
+            qml-module-qtquick-layouts \
+            qml-module-qtquick-window2 \
+            qml-module-qtqml-models2 \
+            qml-module-org-kde-kquickcontrolsaddons \
+            libkf5archive-dev \
+            libkf5bookmarks-dev \
+            libkf5codecs-dev \
+            libkf5coreaddons-dev \
+            libkf5config-dev \
+            libkf5configwidgets-dev \
+            libkf5dbusaddons-dev \
+            libkf5declarative-dev \
+            libkf5filemetadata-dev \
+            libkf5guiaddons-dev \
+            libkf5i18n-dev \
+            libkf5iconthemes-dev \
+            libkf5kio-dev \
+            libkf5newstuff-dev \
+            libkf5notifications-dev \
+            libkf5notifyconfig-dev \
+            libkf5purpose-dev \
+            libkf5solid-dev \
+            libkf5textwidgets-dev \
+            libkf5widgetsaddons-dev \
+            libkf5xmlgui-dev \
+            libkf5crash-dev \
+            kio \
+            breeze-icon-theme \
+            libmlt++-dev \
+            libmlt-dev \
+            melt \
+            ffmpeg \
+            frei0r-plugins \
+            libavcodec-dev \
+            libavformat-dev \
+            libswscale-dev
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: "requirements-bangonpro.txt"
+
+      - name: Install pinned Bang On Pro Python dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -r requirements-bangonpro.txt PyYAML
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-ubuntu2404-qt5-${{ github.ref_name }}-${{ hashFiles('CMakeLists.txt', 'src/CMakeLists.txt', 'tests/CMakeLists.txt') }}
+          restore-keys: |
+            ccache-ubuntu2404-qt5-${{ github.ref_name }}-
+            ccache-ubuntu2404-qt5-
+
+      - name: Configure Bang On Pro with CMake + Ninja + ccache
+        run: |
+          ccache --zero-stats || true
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_INSTALL_PREFIX="${PWD}/install-prefix" \
+            -DKDE_INSTALL_USE_QT_SYS_PATHS=OFF \
+            -DQT_MAJOR_VERSION=5 \
+            -DBUILD_WITH_QT6=OFF \
+            -DBUILD_TESTING=ON \
+            -DRELEASE_BUILD=OFF \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+
+      - name: Build Bang On Pro C++ binary & unit tests
+        run: |
+          cmake --build build --parallel "$(nproc)"
+          cmake --install build
+          ccache --show-stats || true
+
+      - name: Verify compiled binary launches (--version)
+        run: |
+          mkdir -p reports/cpp
+          XDG_DATA_DIRS="${PWD}/install-prefix/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}" \
+          QT_QPA_PLATFORM=offscreen \
+          "${PWD}/install-prefix/bin/kdenlive" --version | tee reports/cpp/binary-version.txt
+
+      - name: Run CTest C++ unit tests
+        run: |
+          mkdir -p reports/cpp
+          XDG_DATA_DIRS="${PWD}/install-prefix/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}" \
+          SDL_AUDIODRIVER=dummy \
+          xvfb-run -a ctest \
+            --test-dir build \
+            --output-on-failure \
+            --timeout 120 \
+            --output-junit "${PWD}/reports/cpp/ctest-junit.xml"
+
+      - name: Run full Bang On Pro pytest & compliance verification
+        run: |
+          mkdir -p reports/cpp/pytest
+          python3 tests/bangonpro/run_all_checks.py \
+            --report-dir reports/cpp/pytest \
+            --verbose
+
+      - name: Upload C++ CTest & pytest reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bangonpro-linux-build-and-test-reports
+          path: reports/cpp/
+          retention-days: 14
