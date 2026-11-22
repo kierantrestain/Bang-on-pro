@@ -1,0 +1,80 @@
+{
+  "schema_version": "1.0",
+  "profile_id": "gameshow_multicam",
+  "display_name": "Gameshow 4-Camera Fast-Paced",
+  "format_type": "gameshow",
+  "video_spec": {
+    "width": 1920,
+    "height": 1080,
+    "fps_num": 25,
+    "fps_den": 1,
+    "color_space": "bt709"
+  },
+  "cameras": [
+    {
+      "camera_id": "cam_wide",
+      "role": "wide",
+      "speaker_label": null,
+      "priority": 1
+    },
+    {
+      "camera_id": "cam_host",
+      "role": "host",
+      "speaker_label": "Host",
+      "priority": 2
+    },
+    {
+      "camera_id": "cam_panel",
+      "role": "panel",
+      "speaker_label": "Panel",
+      "priority": 2
+    },
+    {
+      "camera_id": "cam_reaction",
+      "role": "reaction",
+      "speaker_label": "Contestant",
+      "priority": 3
+    }
+  ],
+  "editing_rules": {
+    "min_shot_sec": 1.2,
+    "max_shot_sec": 6.5,
+    "reaction_cut_interval_sec": 3.5,
+    "silence_threshold_db": -34.0,
+    "min_silence_sec": 0.55,
+    "keep_padding_sec": 0.15,
+    "trim_setup_delay": true,
+    "review_confidence_threshold": 0.75
+  },
+  "audio_rules": {
+    "target_lufs": -16.0,
+    "true_peak_dbtp": -1.5,
+    "enable_denoise": true,
+    "enable_compressor": true,
+    "music_duck_db": -16.0
+  },
+  "graphics_rules": {
+    "enable_captions": true,
+    "enable_lower_thirds": true,
+    "lower_third_duration_sec": 3.5,
+    "brand_accent_hex": "#FFB800"
+  },
+  "export_presets": [
+    {
+      "name": "gameshow_1080p_master",
+      "container": "mp4",
+      "video_codec": "libx264",
+      "audio_codec": "aac",
+      "video_bitrate": "14M",
+      "audio_bitrate": "192k"
+    },
+    {
+      "name": "gameshow_social_fast",
+      "container": "mp4",
+      "video_codec": "libx264",
+      "audio_codec": "aac",
+      "video_bitrate": "8M",
+      "audio_bitrate": "160k"
+    }
+  ]
+}
