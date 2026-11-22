@@ -1,0 +1,80 @@
+"""Apple Silicon macOS performance, proxy/cache management, remote offload, and benchmark suite.
+
+SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
+"""
+
+from .benchmark import BenchmarkReport, StageBenchmark, run_full_benchmark
+from .hardware_profiles import (
+    HardwareCapabilities,
+    HardwareProfile,
+    MetalMltAssessment,
+    assess_metal_mlt_support,
+    generate_decode_args,
+    generate_export_profile,
+    list_profile_names,
+    probe_hardware_capabilities,
+    validate_profile_against_capabilities,
+)
+from .proxy_cache_manager import (
+    CacheBudgetManager,
+    EvictionReport,
+    MediaProbeInfo,
+    ProxyDecision,
+    ProxyPolicy,
+    ProxyResult,
+    StorageBudgetConfig,
+    evaluate_proxy_policy,
+    generate_proxy,
+    probe_media,
+)
+from .remote_gpu_offload import (
+    ConsentExpiredError,
+    ConsentRequiredError,
+    InsecureTransportError,
+    OffloadJobRequest,
+    OffloadJobResponse,
+    RawMediaUploadDeniedError,
+    RemoteGpuEndpointConfig,
+    RemoteGpuOffloadClient,
+    RemoteOffloadConsent,
+    RemoteOffloadError,
+    build_scrubbed_manifest,
+    scrub_metadata_dict,
+)
+
+__all__ = [
+    "BenchmarkReport",
+    "CacheBudgetManager",
+    "ConsentExpiredError",
+    "ConsentRequiredError",
+    "EvictionReport",
+    "HardwareCapabilities",
+    "HardwareProfile",
+    "InsecureTransportError",
+    "MediaProbeInfo",
+    "MetalMltAssessment",
+    "OffloadJobRequest",
+    "OffloadJobResponse",
+    "ProxyDecision",
+    "ProxyPolicy",
+    "ProxyResult",
+    "RawMediaUploadDeniedError",
+    "RemoteGpuEndpointConfig",
+    "RemoteGpuOffloadClient",
+    "RemoteOffloadConsent",
+    "RemoteOffloadError",
+    "StageBenchmark",
+    "StorageBudgetConfig",
+    "assess_metal_mlt_support",
+    "build_scrubbed_manifest",
+    "evaluate_proxy_policy",
+    "generate_decode_args",
+    "generate_export_profile",
+    "generate_proxy",
+    "list_profile_names",
+    "probe_hardware_capabilities",
+    "probe_media",
+    "run_full_benchmark",
+    "scrub_metadata_dict",
+    "validate_profile_against_capabilities",
+]
