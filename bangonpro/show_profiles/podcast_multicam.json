@@ -1,0 +1,80 @@
+{
+  "schema_version": "1.0",
+  "profile_id": "podcast_multicam",
+  "display_name": "Podcast 4-Camera Studio",
+  "format_type": "podcast",
+  "video_spec": {
+    "width": 1920,
+    "height": 1080,
+    "fps_num": 25,
+    "fps_den": 1,
+    "color_space": "bt709"
+  },
+  "cameras": [
+    {
+      "camera_id": "cam_wide",
+      "role": "wide",
+      "speaker_label": null,
+      "priority": 1
+    },
+    {
+      "camera_id": "cam_host",
+      "role": "host",
+      "speaker_label": "Host",
+      "priority": 2
+    },
+    {
+      "camera_id": "cam_guest",
+      "role": "guest",
+      "speaker_label": "Guest",
+      "priority": 2
+    },
+    {
+      "camera_id": "cam_reaction",
+      "role": "reaction",
+      "speaker_label": "Guest",
+      "priority": 3
+    }
+  ],
+  "editing_rules": {
+    "min_shot_sec": 2.0,
+    "max_shot_sec": 12.0,
+    "reaction_cut_interval_sec": 6.0,
+    "silence_threshold_db": -36.0,
+    "min_silence_sec": 0.8,
+    "keep_padding_sec": 0.2,
+    "trim_setup_delay": true,
+    "review_confidence_threshold": 0.72
+  },
+  "audio_rules": {
+    "target_lufs": -16.0,
+    "true_peak_dbtp": -1.5,
+    "enable_denoise": true,
+    "enable_compressor": true,
+    "music_duck_db": -18.0
+  },
+  "graphics_rules": {
+    "enable_captions": true,
+    "enable_lower_thirds": true,
+    "lower_third_duration_sec": 4.5,
+    "brand_accent_hex": "#FF5A1F"
+  },
+  "export_presets": [
+    {
+      "name": "youtube_1080p_master",
+      "container": "mp4",
+      "video_codec": "libx264",
+      "audio_codec": "aac",
+      "video_bitrate": "12M",
+      "audio_bitrate": "192k"
+    },
+    {
+      "name": "podcast_review_proxy",
+      "container": "mp4",
+      "video_codec": "libx264",
+      "audio_codec": "aac",
+      "video_bitrate": "4M",
+      "audio_bitrate": "128k"
+    }
+  ]
+}
