@@ -85,6 +85,13 @@ list(APPEND kdenlive_SRCS
     undohelper.cpp
     glaxnimatelauncher.cpp
     filefilter.cpp
+    bangonpro/BangOnProIntegration.cpp
+    bangonpro/timeline_api/TimelineCommandEngine.cpp
+    bangonpro/timeline_api/TimelineCommandServer.cpp
+    bangonpro/timeline_api/KdenliveTimelineBridge.cpp
+    bangonpro/effects_browser/PremierePresetBrowser.cpp
+    bangonpro/ui/AiAssistantDock.cpp
+    bangonpro/ui/BangOnProWorkspace.cpp
 )
 
 if(CRASH_AUTO_TEST)
@@ -123,6 +130,20 @@ endif()
 set_property(SOURCE definitions.h PROPERTY SKIP_AUTOMOC ON)
 
 add_library(kdenliveLib STATIC ${kdenlive_SRCS} ${kdenlive_UIS} ${kdenlive_MOC} lib/localeHandling.cpp lib/localeHandling.h)
+set_source_files_properties(
+    mainwindow.cpp
+    bangonpro/BangOnProIntegration.cpp
+    bangonpro/timeline_api/TimelineCommandEngine.cpp
+    bangonpro/timeline_api/TimelineCommandServer.cpp
+    bangonpro/timeline_api/KdenliveTimelineBridge.cpp
+    bangonpro/effects_browser/PremierePresetBrowser.cpp
+    bangonpro/ui/AiAssistantDock.cpp
+    bangonpro/ui/BangOnProWorkspace.cpp
+    "${CMAKE_CURRENT_BINARY_DIR}/kdenliveLib_autogen/mocs_compilation.cpp"
+    PROPERTIES
+        COMPILE_OPTIONS "-std=gnu++17"
+        COMPILE_DEFINITIONS "BANGONPRO_WITH_KDENLIVE_CORE;BANGONPRO_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\""
+)
 
 if(USE_VERSIONLESS_TARGETS)
     qt_add_resources(kdenlive_extra_SRCS icons.qrc uiresources.qrc)

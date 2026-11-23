@@ -478,7 +478,9 @@ void PremierePresetBrowser::populatePackFilter()
             const QString label = QStringLiteral("Folder: ") + item.mid(7);
             m_packFilterCombo->addItem(label, item);
         } else {
-            m_packFilterCombo->addItem(QStringLiteral("Pack: ") + item, QStringLiteral("pack:") + item);
+            const QString label = QStringLiteral("Pack: ") + item;
+            const QString data = QStringLiteral("pack:") + item;
+            m_packFilterCombo->addItem(label, data);
         }
     }
     m_packFilterCombo->blockSignals(false);
