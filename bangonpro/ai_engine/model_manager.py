@@ -70,6 +70,9 @@ class HardwareCapabilities:
         return asdict(self)
 
 
+FASTER_WHISPER_COMPANIONS: tuple[str, ...] = ("config.json", "tokenizer.json", "vocabulary.txt")
+
+
 @dataclass(frozen=True)
 class ModelCatalogEntry:
     """Declarative metadata for a supported open-source local AI model."""
@@ -91,6 +94,9 @@ class ModelCatalogEntry:
     sha256: str | None = None
     recommended_for_apple_silicon: bool = False
     notes: str = ""
+    # Additional files that must sit beside the artifact for the runtime to load it
+    # (V1.2 fix: CTranslate2 faster-whisper models need config/tokenizer/vocabulary).
+    companion_files: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -143,6 +149,7 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         cpu_compatible=True,
         download_url="https://huggingface.co/Systran/faster-whisper-tiny/resolve/main/model.bin",
         artifact_filename="model.bin",
+        companion_files=FASTER_WHISPER_COMPANIONS,
         recommended_for_apple_silicon=False,
         notes="Fastest CPU CTranslate2 Whisper model; suitable for 8 GB systems and quick rough transcripts.",
     ),
@@ -161,6 +168,7 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         cpu_compatible=True,
         download_url="https://huggingface.co/Systran/faster-whisper-small/resolve/main/model.bin",
         artifact_filename="model.bin",
+        companion_files=FASTER_WHISPER_COMPANIONS,
         recommended_for_apple_silicon=False,
         notes="Balanced CPU accuracy/speed for studio podcast and interview transcription.",
     ),
@@ -179,6 +187,7 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         cpu_compatible=True,
         download_url="https://huggingface.co/Systran/faster-whisper-medium/resolve/main/model.bin",
         artifact_filename="model.bin",
+        companion_files=FASTER_WHISPER_COMPANIONS,
         recommended_for_apple_silicon=False,
         notes="High-accuracy multilingual CTranslate2 Whisper for 16 GB+ workstations.",
     ),
@@ -197,6 +206,7 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         cpu_compatible=True,
         download_url="https://huggingface.co/Systran/faster-whisper-large-v3/resolve/main/model.bin",
         artifact_filename="model.bin",
+        companion_files=FASTER_WHISPER_COMPANIONS,
         recommended_for_apple_silicon=False,
         notes="Maximum accuracy Whisper ASR; requires 24-32 GB+ RAM or CUDA GPU.",
     ),
@@ -271,6 +281,7 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         cpu_compatible=True,
         download_url="https://huggingface.co/Acly/MobileSAM/resolve/main/mobile_sam_image_encoder.onnx",
         artifact_filename="mobile_sam_image_encoder.onnx",
+        companion_files=("sam_mask_decoder_single.onnx",),
         recommended_for_apple_silicon=True,
         notes="Lightweight ONNX segmentation encoder ideal for CoreML on Apple Silicon and CPU rotoscoping.",
     ),
@@ -679,7 +690,7 @@ class ModelManager:
                     )
                 req = urllib.request.Request(
                     url,
-                    headers={"User-Agent": "BangOnPro-ModelManager/1.1.0"},
+                    headers={"User-Agent": "BangOnPro-ModelManager/1.2.0"},
                 )
                 with urllib.request.urlopen(req, timeout=timeout_sec) as resp:  # noqa: S310
                     content_len = resp.headers.get("Content-Length")
@@ -714,6 +725,9 @@ class ModelManager:
             target_dir.mkdir(parents=True, exist_ok=True)
             final_artifact = target_dir / entry.artifact_filename
             shutil.move(str(staging_file), str(final_artifact))
+            companions_installed, companions_missing = self._install_companions(
+                entry, target_dir, source_path=source_path, source_url=source_url, timeout_sec=timeout_sec
+            )
 
             manifest = {
                 "model_id": entry.model_id,
@@ -726,6 +740,9 @@ class ModelManager:
                 "checksum_verified": expected_hash is not None,
                 "size_bytes": bytes_written,
                 "installed_at_utc": datetime.now(UTC).isoformat(),
+                "companion_files": companions_installed,
+                "companion_files_missing": companions_missing,
+                "runtime_loadable": not companions_missing,
             }
             (target_dir / "manifest.json").write_text(
                 json.dumps(manifest, indent=2) + "\n",
@@ -745,6 +762,45 @@ class ModelManager:
         except (PipelineCancelledError, ModelChecksumError, OSError, ModelManagerError):
             staging_file.unlink(missing_ok=True)
             raise
+
+    def _install_companions(
+        self,
+        entry: ModelCatalogEntry,
+        target_dir: Path,
+        *,
+        source_path: str | Path | None,
+        source_url: str | None,
+        timeout_sec: float,
+    ) -> tuple[list[str], list[str]]:
+        """Fetch companion files next to the artifact (local sibling copy, else HTTPS from the artifact's base URL)."""
+        installed: list[str] = []
+        missing: list[str] = []
+        for name in entry.companion_files:
+            dest = target_dir / name
+            try:
+                if source_path is not None:
+                    sibling = Path(source_path).expanduser().resolve().parent / name
+                    if not sibling.is_file():
+                        missing.append(name)
+                        continue
+                    shutil.copyfile(sibling, dest)
+                else:
+                    base = (source_url or entry.download_url).strip().rsplit("/", 1)[0]
+                    url = f"{base}/{name}"
+                    if urllib.parse.urlparse(url).scheme != "https":
+                        missing.append(name)
+                        continue
+                    req = urllib.request.Request(url, headers={"User-Agent": "BangOnPro-ModelManager/1.2.0"})
+                    with urllib.request.urlopen(req, timeout=timeout_sec) as resp:  # noqa: S310 - https enforced above
+                        dest.write_bytes(resp.read())
+                if dest.stat().st_size <= 0:
+                    dest.unlink(missing_ok=True)
+                    missing.append(name)
+                    continue
+                installed.append(name)
+            except OSError:
+                missing.append(name)
+        return installed, missing
 
     def remove_model(self, model_id: str) -> dict[str, Any]:
         """Safely remove a managed model directory from ``BANGONPRO_MODEL_DIR`` without touching user media/projects."""

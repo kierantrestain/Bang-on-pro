@@ -79,6 +79,7 @@ class JobOptions:
     min_free_bytes: int = 512 * 1024 * 1024
     enabled_overrides: dict[str, bool] = field(default_factory=dict)
     provider_config: dict[str, Any] | None = None
+    asr_model_id: str | None = None
 
 
 @dataclass
@@ -140,6 +141,23 @@ _BRIEF_PATTERNS: dict[str, str] = {
     "audio": r"\b(audio|sound|loudness|lufs|denoise|noise|levels?|mix)\b",
     "export": r"\b(export|render|master|deliver\w*)\b",
 }
+
+
+_ASR_PREFERENCE = ("faster-whisper-small", "faster-whisper-medium", "faster-whisper-tiny", "faster-whisper-large-v3", "openai-whisper-small", "openai-whisper-tiny")
+
+
+def select_local_asr_model(model_dir: str | None, requested: str | None = None) -> str | None:
+    """Pick an installed, runnable local Whisper model (neural when sufficient; never downloads)."""
+    from bangonpro.ai_engine.model_manager import ModelManager
+
+    mgr = ModelManager(model_dir=model_dir)
+    ready = {m.model_id for m in mgr.list_models(family="asr_whisper") if m.model_available_on_disk and m.backend_package_installed}
+    if requested:
+        return requested if requested in ready else None
+    for mid in _ASR_PREFERENCE:
+        if mid in ready:
+            return mid
+    return next(iter(sorted(ready)), None)
 
 
 def parse_brief_flags(brief: str) -> dict[str, bool]:

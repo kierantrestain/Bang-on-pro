@@ -224,7 +224,15 @@ def _generate_synthetic_4cam_studio(base_dir: Path) -> dict[str, Path]:
     }
 
     camera_paths: dict[str, Path] = {}
-    font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+    font_candidates = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/Library/Fonts/Arial.ttf",
+    ]
+    font_path = next((f for f in font_candidates if Path(f).is_file()), None)
+    has_drawtext = font_path is not None and "drawtext" in subprocess.run(
+        ["ffmpeg", "-hide_banner", "-filters"], capture_output=True, text=True, check=False
+    ).stdout
 
     for idx, (cam_id, offset_sec) in enumerate(EXPECTED_CAMERA_OFFSETS_SEC.items()):
         h_g, g_g, s_g = mix_weights[cam_id]
@@ -245,13 +253,16 @@ def _generate_synthetic_4cam_studio(base_dir: Path) -> dict[str, Path]:
         cam_dur = total_cam_samples / float(sr)
         color = CAMERA_COLORS[cam_id]
 
-        vf = (
-            f"drawbox=x=24:y=24:w=592:h=72:color=black@0.65:t=fill,"
-            f"drawtext=fontfile={font_path}:text='{cam_id.upper()} ({cam_fps}fps off=+{offset_sec:.2f}s)':"
-            f"fontcolor=white:fontsize=26:x=40:y=46,"
-            f"drawtext=fontfile={font_path}:text='TC %{{pts\\:hms}}':"
-            f"fontcolor=yellow:fontsize=24:x=40:y=300"
-        )
+        if has_drawtext:
+            vf = (
+                f"drawbox=x=24:y=24:w=592:h=72:color=black@0.65:t=fill,"
+                f"drawtext=fontfile={font_path}:text='{cam_id.upper()} ({cam_fps}fps off=+{offset_sec:.2f}s)':"
+                f"fontcolor=white:fontsize=26:x=40:y=46,"
+                f"drawtext=fontfile={font_path}:text='TC %{{pts\\:hms}}':"
+                f"fontcolor=yellow:fontsize=24:x=40:y=300"
+            )
+        else:  # macOS bundles / FFmpeg builds without freetype: identical footage minus the burnt-in labels
+            vf = "drawbox=x=24:y=24:w=592:h=72:color=black@0.65:t=fill"
 
         cmd = [
             "ffmpeg",

@@ -1,4 +1,4 @@
-# Bang On Pro — Apple Silicon (macOS `arm64`) Build & Installation Guide (V1.1.0)
+# Bang On Pro — Apple Silicon (macOS `arm64`) Build & Installation Guide (V1.2.0)
 
 This guide covers installing **Bang On Pro** on Apple Silicon Macs (M1, M2, M3, M4) from versioned GitHub Releases / GitHub Actions builds, or compiling a reproducible, fully self-contained native `arm64` `.app` bundle and `.dmg` installer locally.
 
@@ -97,7 +97,7 @@ chmod +x packaging/macos/build_macos_arm64.sh packaging/macos/bootstrap_ai_runti
 ./packaging/macos/build_macos_arm64.sh \
   --mode craft \
   --craft-root "$HOME/CraftRoot/macos-arm-clang" \
-  --version 1.1.0 \
+  --version 1.2.0 \
   --output-dir dist/macos-arm64
 ```
 *(Note: `--craft-root "$HOME/CraftRoot"` is also accepted — the script automatically detects the `macos-arm-clang` CraftMaster target subdirectory.)*
@@ -120,7 +120,7 @@ If you hold an Apple Developer Program membership (`Developer ID Application` ce
 ./packaging/macos/build_macos_arm64.sh \
   --mode craft \
   --craft-root "$HOME/CraftRoot/macos-arm-clang" \
-  --version 1.1.0 \
+  --version 1.2.0 \
   --sign-identity "Developer ID Application: Your Name (TEAMID1234)" \
   --notary-profile "bangonpro-notary" \
   --output-dir dist/macos-arm64

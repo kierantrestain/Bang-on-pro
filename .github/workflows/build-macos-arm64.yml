@@ -13,9 +13,9 @@ on:
   workflow_dispatch:
     inputs:
       release_version:
-        description: "Release version label (defaults to 1.1.0 or git tag)"
+        description: "Release version label (defaults to 1.2.0 or git tag)"
         required: false
-        default: "1.1.0"
+        default: "1.2.0"
       build_mode:
         description: "Dependency resolution mode (craft uses KDE CraftMaster Qt6/KF6 binary cache)"
         required: false
@@ -68,7 +68,7 @@ jobs:
           elif [[ -n "${INPUT_RELEASE_VERSION:-}" ]]; then
             VER="${INPUT_RELEASE_VERSION}"
           else
-            VER="1.1.0"
+            VER="1.2.0"
           fi
           echo "app_version=${VER}" >> "$GITHUB_OUTPUT"
           echo "Resolved Bang On Pro version: ${VER}"
@@ -234,7 +234,22 @@ jobs:
             "${BUNDLED_PY}" -m pytest -v \
             tests/bangonpro/test_security_and_compliance.py \
             tests/bangonpro/test_project_integrity.py \
-            tests/bangonpro/test_macos_perf.py
+            tests/bangonpro/test_macos_perf.py \
+            tests/bangonpro/test_v12_department.py
+
+          # V1.2: run a full production-department job INSIDE the packaged app's bundled runtime
+          # (synthetic generated footage; virtualised Apple Silicon runner) and keep the evidence.
+          mkdir -p dist/macos-arm64/department_evidence
+          PATH="${APP_ABS}/Contents/MacOS:${CRAFT_PREFIX}/bin:${PATH}" \
+          MLT_REPOSITORY="${APP_ABS}/Contents/PlugIns/mlt" \
+          MLT_DATA="${APP_ABS}/Contents/Resources/mlt" \
+          FREI0R_PATH="${APP_ABS}/Contents/PlugIns/frei0r-1" \
+          BANGONPRO_CACHE_DIR="${RUNNER_TEMP}/bop_cache" \
+          BANGONPRO_PREFS_DIR="${RUNNER_TEMP}/bop_prefs" \
+            "${BUNDLED_PY}" packaging/macos/verify_department_in_bundle.py \
+            --output-dir dist/macos-arm64/department_evidence
+          test -s dist/macos-arm64/department_evidence/department_verification.json
+          cat dist/macos-arm64/department_evidence/department_verification.json
 
           mkdir -p dist/macos-arm64/benchmarks
           PATH="${APP_ABS}/Contents/MacOS:${CRAFT_PREFIX}/bin:${PATH}" \
@@ -298,6 +313,7 @@ jobs:
             dist/macos-arm64/SIGNING_STATUS.txt
             dist/macos-arm64/BUILD_VERIFICATION.log
             dist/macos-arm64/benchmarks/
+            dist/macos-arm64/department_evidence/
           retention-days: 30
           if-no-files-found: warn
 
@@ -344,4 +360,6 @@ jobs:
             release-assets/BUILD_VERIFICATION.log
             release-assets/benchmarks/benchmark_report.md
             release-assets/benchmarks/benchmark_results.json
+            release-assets/department_evidence/department_verification.json
+            release-assets/department_evidence/summary.md
 

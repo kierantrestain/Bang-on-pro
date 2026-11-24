@@ -91,6 +91,7 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--episode-title", default="")
     r.add_argument("--budget-usd", type=float, default=0.0)
     r.add_argument("--model-dir", default=None)
+    r.add_argument("--asr-model", default=None, help="Installed Whisper model id (default: best installed)")
     r.add_argument("--prefs-root", default=None)
     r.add_argument("--enable", nargs="*", default=[])
     r.add_argument("--disable", nargs="*", default=[])
@@ -160,6 +161,7 @@ def main(argv: list[str] | None = None) -> int:
             series_id=a.series,
             episode_title=a.episode_title,
             model_dir=a.model_dir,
+            asr_model_id=a.asr_model,
             prefs_root=a.prefs_root,
             enabled_overrides=_parse_overrides(a.enable, a.disable),
         )

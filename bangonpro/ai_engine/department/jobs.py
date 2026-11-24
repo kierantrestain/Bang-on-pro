@@ -40,6 +40,7 @@ from bangonpro.ai_engine.department.agents import (
     JobOptions,
     compute_activation,
     parse_brief_flags,
+    select_local_asr_model,
     shape_intent_for_mode,
 )
 from bangonpro.ai_engine.department.cache import AnalysisCache
@@ -189,6 +190,12 @@ class ProductionJob:
         state.metadata["interpreter_backend"] = interp.interpreter_backend
         if opts.model_dir:
             state.metadata["model_dir"] = str(Path(opts.model_dir).expanduser().resolve())
+        # Use genuine local neural ASR whenever a runnable Whisper model is installed (no downloads here).
+        asr_model = select_local_asr_model(opts.model_dir, opts.asr_model_id)
+        if asr_model:
+            state.metadata["asr_model_id"] = asr_model
+            state.metadata["enable_whisper"] = True
+            state.metadata["whisper_model"] = asr_model.rsplit("-", 1)[-1] if asr_model.startswith("faster-whisper-") else "tiny"
 
         plan = {
             "job_id": jid,
@@ -210,6 +217,7 @@ class ProductionJob:
             "budget_usd": opts.budget_usd,
             "executive_llm_cost_usd": 0.0,
             "interpreter_backend": interp.interpreter_backend,
+            "asr_model_id": state.metadata.get("asr_model_id"),
             "needs_clarification": bool(intent.needs_clarification),
             "clarification_question": intent.clarification_question,
             "plan_path": str(job.plan_path),
