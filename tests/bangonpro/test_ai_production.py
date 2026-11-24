@@ -583,9 +583,10 @@ def test_end_to_end_4cam_pipeline_and_melt_render(
 
     # D. Verify audio restoration chain, captions (.srt/.ass), lower thirds & QC
     mlt_services = {f.mlt_service for f in state.audio_filters}
-    assert {"avfilter.highpass", "avfilter.afftdn", "avfilter.acompressor", "avfilter.loudnorm"}.issubset(
-        mlt_services
-    )
+    # V1.2: Kdenlive-native, frame-accurate equivalents (afftdn/acompressor/loudnorm are in Kdenlive's
+    # excluded_effects.txt and were stripped when the generated project was opened for editing).
+    assert {"avfilter.highpass", "avfilter.compand", "dynamic_loudness"}.issubset(mlt_services)
+    assert not mlt_services & {"avfilter.afftdn", "avfilter.acompressor", "avfilter.loudnorm"}
     assert "loudnorm=I=-16.0:TP=-1.5:LRA=7" in state.ffmpeg_audio_filtergraph
 
     srt_path = Path(state.artifacts["captions_srt"])

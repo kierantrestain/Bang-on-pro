@@ -22,6 +22,7 @@ class EffectListWidget;
 
 namespace BangOnPro {
 
+class AgentControlCentre;
 class AiAssistantDock;
 class PremierePresetBrowser;
 class RotoStudioDock;
@@ -70,6 +71,7 @@ public:
 private:
     void setupEngine();
     void setupAiDock();
+    void setupAgentControlCentre();
     void setupTranscriptDock();
     void setupPresetBrowser();
     void setupRotoStudioDock();
@@ -89,6 +91,12 @@ private:
     void clearTemporaryCaches();
 
     void startProposal(const QString &instruction, const QString &profileId, const QString &customProfilePath);
+    // V1.2 AI Production Department (Agent Control Centre)
+    void startDepartmentJob(const QStringList &runArguments);
+    void runDepartmentCommand(const QStringList &subcommandArgs, const QString &jobDir, const QString &description);
+    void stageDepartmentDraft(const QString &jobDir);
+    void promoteDepartmentDraft(const QString &jobDir);
+    static QString departmentJobsRoot();
     void handleProposalFinished(int exitCode, int exitStatus);
     void approveBatch(const TimelineCommandBatch &batch);
     void approveBatchSelection(const QString &requestId, const QStringList &selectedOpIds, bool rebaseToCurrentRevision);
@@ -120,6 +128,12 @@ private:
     std::unique_ptr<ShortcutPresetManager> m_shortcutManager;
     AiAssistantDock *m_aiWidget{nullptr};
     QDockWidget *m_aiDock{nullptr};
+    AgentControlCentre *m_agentCentre{nullptr};
+    QDockWidget *m_agentDock{nullptr};
+    QPointer<QProcess> m_deptProcess;
+    qint64 m_deptBaseRevision{0};
+    QString m_deptBaseProjectId;
+    QString m_deptBaseSequenceId;
     TranscriptEditorWidget *m_transcriptWidget{nullptr};
     QDockWidget *m_transcriptDock{nullptr};
     PremierePresetBrowser *m_presetWidget{nullptr};

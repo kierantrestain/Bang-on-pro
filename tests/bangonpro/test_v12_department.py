@@ -287,3 +287,44 @@ def test_cli_agents_and_plan_only(tmp_path: Path) -> None:
     payload = json.loads(out.stdout)
     assert payload["status"] == "planned_manual"
     assert [a for a, r in payload["agents"].items() if r["active"]] == ["executive"]
+
+
+@needs_media
+def test_draft_is_native_kdenlive_compatible(full_job: ProductionJob) -> None:
+    """Regression for defects found by opening drafts in the real Kdenlive build (V1.2).
+
+    1. Every emitted effect must be one Kdenlive keeps (not in data/excluded_effects.txt) and
+       must resolve to a Kdenlive effect definition (data/effects XML id or included_effects.txt).
+    2. ``kdenlive:file_hash`` must follow ProjectClip::calculateHash (MD5, 1 MB head+tail > 2 MB),
+       otherwise Kdenlive flags every generated clip as changed on open.
+    """
+    import hashlib
+    import re
+    import xml.etree.ElementTree as ET
+
+    repo = Path(__file__).resolve().parents[2]
+    excluded = {ln.strip() for ln in (repo / "data/excluded_effects.txt").read_text().splitlines() if ln.strip() and not ln.startswith("#")}
+    included = {ln.strip() for ln in (repo / "data/included_effects.txt").read_text().splitlines() if ln.strip() and not ln.startswith("#")}
+    xml_ids: set[str] = set()
+    for f in (repo / "data/effects").rglob("*.xml"):
+        m = re.search(r"<effect[^>]*?\bid=\"([^\"]+)\"", f.read_text(errors="ignore")) or re.search(r"<effect[^>]*?\btag=\"([^\"]+)\"", f.read_text(errors="ignore"))
+        if m:
+            xml_ids.add(m.group(1))
+    root = ET.parse(full_job.doc["artifacts"]["kdenlive_project"]).getroot()
+    seen = set()
+    for flt in root.iter("filter"):
+        props = {p.get("name"): (p.text or "") for p in flt.findall("property")}
+        eid = props.get("kdenlive_id") or props.get("mlt_service")
+        seen.add(eid)
+        assert eid not in excluded, f"{eid} is stripped by Kdenlive on open"
+        assert eid in xml_ids or eid in included, f"{eid} has no Kdenlive effect definition"
+    assert {"lift_gamma_gain", "mask_start-shape", "dynamic_loudness", "avfilter.compand"} <= seen
+    assert not seen & {"avfilter.afwtdn", "avfilter.loudnorm", "avfilter.afftdn"}  # non 1:1 in MLT realtime
+    chains = [c for c in root.iter("chain") if any(p.get("name") == "kdenlive:file_hash" for p in c.findall("property"))]
+    assert chains
+    for c in chains:
+        props = {p.get("name"): (p.text or "") for p in c.findall("property")}
+        data = Path(props["resource"]).read_bytes()
+        expected = hashlib.md5(data if len(data) <= 2_000_000 else data[:1_000_000] + data[-1_000_000:]).hexdigest()
+        assert props["kdenlive:file_hash"] == expected
+        assert int(props["kdenlive:file_size"]) == len(data)

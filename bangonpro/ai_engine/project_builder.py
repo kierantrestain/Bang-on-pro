@@ -12,6 +12,7 @@ SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -274,6 +275,25 @@ def compile_command_batches(command_batches: list[dict[str, Any]]) -> CompiledTi
     return compiled
 
 
+def kdenlive_file_hash(path: str | Path) -> tuple[str, int] | None:
+    """Replicate Kdenlive ``ProjectClip::calculateHash``: MD5 of the whole file when <= 2 MB,
+    otherwise MD5 of the first 1 MB + last 1 MB; returns ``(hex digest, file size)``."""
+    try:
+        p = Path(path)
+        size = p.stat().st_size
+        md5 = hashlib.md5()  # noqa: S324 - identity hash mandated by Kdenlive's project format, not security
+        with p.open("rb") as fh:
+            if size > 2_000_000:
+                md5.update(fh.read(1_000_000))
+                fh.seek(size - 1_000_000)
+                md5.update(fh.read())
+            else:
+                md5.update(fh.read())
+        return md5.hexdigest(), size
+    except OSError:
+        return None
+
+
 def _find_compiled_clip(compiled: CompiledTimeline, clip_id: str) -> CompiledClip | None:
     for lst in (compiled.v1_clips, compiled.v2_clips, compiled.a1_clips, compiled.a2_clips):
         for clip in lst:
@@ -308,7 +328,7 @@ def _effect_op_to_filters(op_type: str, params: dict[str, Any]) -> list[dict[str
     filters: list[dict[str, Any]] = [
         {
             "mlt_service": "mask_start",
-            "kdenlive_id": "mask_start_shape",
+            "kdenlive_id": "mask_start-shape",
             "properties": {
                 "filter": "shape",
                 "filter.resource": str(matte),
@@ -472,8 +492,14 @@ def emit_kdenlive_xml(
             _add_prop(chain, "kdenlive:clipname", meta.get("camera_id", media_ref))
             _add_prop(chain, "kdenlive:folderid", -1)
             _add_prop(chain, "kdenlive:clip_type", 1 if is_audio_only else 0)
+            k_hash = kdenlive_file_hash(file_path)
+            if k_hash is not None:
+                # Kdenlive's own clip identity (ProjectClip::calculateHash); a SHA-256 here made Kdenlive
+                # flag every generated clip as "changed - reload" when the project was opened (V1.2 fix).
+                _add_prop(chain, "kdenlive:file_hash", k_hash[0])
+                _add_prop(chain, "kdenlive:file_size", k_hash[1])
             if meta.get("sha256"):
-                _add_prop(chain, "kdenlive:file_hash", meta["sha256"])
+                _add_prop(chain, "kdenlive:bangonpro_sha256", meta["sha256"])
             if kind == "audio":
                 _add_prop(chain, "video_index", -1)
                 _add_prop(chain, "set.test_audio", 0)
@@ -542,6 +568,7 @@ def emit_kdenlive_xml(
         if flt["track_id"] == "A2" and flt["mlt_service"]:
             f_el = ET.SubElement(tr_a2, "filter", {"id": flt["filter_id"]})
             _add_prop(f_el, "mlt_service", flt["mlt_service"])
+            _add_prop(f_el, "kdenlive_id", flt["mlt_service"])
             for k, v in flt["mlt_params"].items():
                 _add_prop(f_el, k, v)
 
@@ -563,6 +590,7 @@ def emit_kdenlive_xml(
         if flt["track_id"] == "A1" and flt["mlt_service"]:
             f_el = ET.SubElement(tr_a1, "filter", {"id": flt["filter_id"]})
             _add_prop(f_el, "mlt_service", flt["mlt_service"])
+            _add_prop(f_el, "kdenlive_id", flt["mlt_service"])
             for k, v in flt["mlt_params"].items():
                 _add_prop(f_el, k, v)
 

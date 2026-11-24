@@ -143,13 +143,22 @@ def build_audio_restoration_chain(
         else:
             filters.append(
                 AudioFilterSpec(
-                    filter_id=f"flt_{track_slug}_afftdn",
-                    mlt_service="avfilter.afftdn",
-                    mlt_params={"av.noise_reduction": 10.0, "av.nf": -35.0},
-                    ffmpeg_filter="afftdn=nr=10:nf=-35",
+                    filter_id=f"flt_{track_slug}_denoise",
+                    # V1.2: spectral avfilter.afftdn is excluded by Kdenlive and avfilter.afwtdn buffers frames
+                    # (MLT "Unexpected return format"). Without an RNNoise model we use a frame-accurate
+                    # downward expander (avfilter.compand) that lowers the room-noise floor between words.
+                    mlt_service="avfilter.compand",
+                    mlt_params={
+                        "av.attacks": 0.005,
+                        "av.decays": 0.25,
+                        "av.points": "-90/-110|-55/-75|-45/-45|0/0",
+                        "av.soft-knee": 6.0,
+                        "av.gain": 0.0,
+                    },
+                    ffmpeg_filter="compand=attacks=0.005:decays=0.25:points=-90/-110|-55/-75|-45/-45|0/0:soft-knee=6",
                     track_id=target_track_id,
                     enabled=True,
-                    rationale="Apply FFT spectral noise reduction (deterministic CPU fallback for RNNoise)",
+                    rationale="Reduce room-noise floor between words with a downward expander (non-neural; configure an RNNoise model for neural denoise)",
                 )
             )
 
@@ -157,15 +166,17 @@ def build_audio_restoration_chain(
         filters.append(
             AudioFilterSpec(
                 filter_id=f"flt_{track_slug}_compressor",
-                mlt_service="avfilter.acompressor",
+                # V1.2: avfilter.acompressor is excluded by Kdenlive; avfilter.compand is supported & editable.
+                # ~3:1 above -24 dBFS with +3 dB makeup, 10 ms attack / 120 ms release.
+                mlt_service="avfilter.compand",
                 mlt_params={
-                    "av.threshold": 0.125,
-                    "av.ratio": 3.0,
-                    "av.attack": 10.0,
-                    "av.release": 120.0,
-                    "av.makeup": 1.5,
+                    "av.attacks": 0.01,
+                    "av.decays": 0.12,
+                    "av.points": "-80/-80|-24/-24|0/-16",
+                    "av.soft-knee": 6.0,
+                    "av.gain": 3.0,
                 },
-                ffmpeg_filter="acompressor=threshold=0.125:ratio=3:attack=10:release=120:makeup=1.5",
+                ffmpeg_filter="compand=attacks=0.01:decays=0.12:points=-80/-80|-24/-24|0/-16:soft-knee=6:gain=3",
                 track_id=target_track_id,
                 enabled=True,
                 rationale="Level studio vocal dynamics across multiple microphones",
@@ -175,11 +186,16 @@ def build_audio_restoration_chain(
     filters.append(
         AudioFilterSpec(
             filter_id=f"flt_{track_slug}_loudnorm",
-            mlt_service="avfilter.loudnorm",
+            # V1.2: avfilter.loudnorm is excluded by Kdenlive; MLT dynamic_loudness is the supported,
+            # editable EBU R128 equivalent. Distribution verifies the rendered master and applies a
+            # measured second-pass gain when needed.
+            mlt_service="dynamic_loudness",
             mlt_params={
-                "av.I": target_lufs,
-                "av.TP": true_peak,
-                "av.LRA": 7.0,
+                "target_loudness": target_lufs,
+                "window": 3.0,
+                "max_gain": 15.0,
+                "min_gain": -15.0,
+                "max_rate": 3.0,
             },
             ffmpeg_filter=f"loudnorm=I={target_lufs:.1f}:TP={true_peak:.1f}:LRA=7",
             track_id=target_track_id,
