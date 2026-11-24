@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: 2026 Bang On Pro Contributors
 # SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
 #
-# Reproducible Apple Silicon (arm64) macOS build, .app bundle, code signing,
-# .dmg packaging, and launch smoke-test verification script for Bang On Pro.
+# Reproducible Apple Silicon (arm64) macOS build, self-contained .app bundle,
+# Mach-O dylib relocation, code signing, .dmg packaging, and smoke-test
+# verification script for Bang On Pro.
 #
 # Must be executed natively on Apple Silicon macOS (arm64, macOS 13.0+ / CI macos-15).
 # Cross-compiling Mach-O arm64 KDE/Qt6/MLT bundles from Linux is NOT supported.
@@ -15,14 +16,16 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 # Defaults
 BUILD_MODE="auto"          # auto | craft | homebrew
+BUILD_TYPE="RelWithDebInfo" # RelWithDebInfo | Release
 SOURCE_DIR="${REPO_ROOT}"
 BUILD_DIR="${REPO_ROOT}/build-macos-arm64"
 STAGE_DIR="${REPO_ROOT}/stage-macos-arm64"
 OUTPUT_DIR="${REPO_ROOT}/dist/macos-arm64"
 CRAFT_ROOT="${CRAFT_ROOT:-${HOME}/CraftRoot}"
+CRAFT_PREFIX=""
 APP_NAME="Bang On Pro"
 DMG_BASENAME="BangOnPro"
-APP_VERSION="${BANGONPRO_VERSION:-0.1.0-alpha}"
+APP_VERSION="${BANGONPRO_VERSION:-1.0.0}"
 MIN_MACOS="${MACOSX_DEPLOYMENT_TARGET:-13.0}"
 SIGN_IDENTITY="${APPLE_SIGNING_IDENTITY:-${MACOS_SIGNING_IDENTITY:-}}"
 NOTARY_PROFILE="${MACOS_NOTARY_PROFILE:-}"
@@ -31,21 +34,25 @@ NOTARY_KEY_ID="${MACOS_NOTARY_KEY_ID:-}"
 NOTARY_ISSUER_ID="${MACOS_NOTARY_ISSUER_ID:-}"
 SKIP_TESTS=0
 SKIP_DMG=0
+SKIP_PYTHON_VENV=0
 JOBS="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)"
 
 usage() {
     cat <<'EOF'
 Usage: packaging/macos/build_macos_arm64.sh [options]
 
-Build and package Bang On Pro natively for Apple Silicon (arm64) macOS.
+Build and package a fully self-contained Bang On Pro.app and .dmg natively
+for Apple Silicon (arm64) macOS.
 
 Options:
   --mode <auto|craft|homebrew>  Dependency prefix discovery mode (default: auto)
+  --build-type <type>           CMake build type: RelWithDebInfo|Release (default: RelWithDebInfo)
   --source-dir <path>           Repository source directory (default: repo root)
   --build-dir <path>            CMake build directory (default: ./build-macos-arm64)
   --output-dir <path>           Output directory for .app/.dmg/logs (default: ./dist/macos-arm64)
-  --craft-root <path>           KDE Craft root prefix (default: $HOME/CraftRoot)
-  --version <ver>               Release version string (default: 0.1.0-alpha)
+  --craft-root <path>           KDE Craft root or CraftMaster target prefix
+                                (auto-detects <root>/macos-arm-clang if present)
+  --version <ver>               Release version string (default: 1.0.0)
   --min-macos <ver>             MACOSX_DEPLOYMENT_TARGET (default: 13.0)
   --sign-identity <id>          Developer ID Application signing identity
                                 (omit to fall back cleanly to ad-hoc signing)
@@ -53,6 +60,7 @@ Options:
   --jobs <n>                    Parallel Ninja build jobs
   --skip-tests                  Skip CTest/pytest verification steps
   --skip-dmg                    Build & sign .app bundle only (skip .dmg creation)
+  --skip-python-venv            Skip bundling self-contained Python 3.12 virtualenv
   -h, --help                    Show this help text
 
 Environment variables:
@@ -79,6 +87,8 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --mode)
             BUILD_MODE="$2"; shift 2 ;;
+        --build-type)
+            BUILD_TYPE="$2"; shift 2 ;;
         --source-dir)
             SOURCE_DIR="$2"; shift 2 ;;
         --build-dir)
@@ -101,6 +111,8 @@ while [[ $# -gt 0 ]]; do
             SKIP_TESTS=1; shift ;;
         --skip-dmg)
             SKIP_DMG=1; shift ;;
+        --skip-python-venv)
+            SKIP_PYTHON_VENV=1; shift ;;
         -h|--help)
             usage; exit 0 ;;
         *)
@@ -133,14 +145,23 @@ verify_host_platform() {
 resolve_prefixes() {
     local prefix_paths=()
 
-    if [[ "${BUILD_MODE}" == "craft" || ( "${BUILD_MODE}" == "auto" && -d "${CRAFT_ROOT}" ) ]]; then
-        if [[ -d "${CRAFT_ROOT}" ]]; then
-            log "Using KDE Craft Qt6/KF6 prefix: ${CRAFT_ROOT}"
-            prefix_paths+=("${CRAFT_ROOT}")
-            export PATH="${CRAFT_ROOT}/bin:${CRAFT_ROOT}/dev-utils/bin:${PATH}"
-            export PKG_CONFIG_PATH="${CRAFT_ROOT}/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+    # Auto-detect CraftMaster target subdirectory (e.g., $CRAFT_ROOT/macos-arm-clang)
+    if [[ -d "${CRAFT_ROOT}/macos-arm-clang/lib/cmake/Qt6" || -d "${CRAFT_ROOT}/macos-arm-clang/lib" ]]; then
+        CRAFT_PREFIX="${CRAFT_ROOT}/macos-arm-clang"
+    elif [[ -d "${CRAFT_ROOT}" ]]; then
+        CRAFT_PREFIX="${CRAFT_ROOT}"
+    fi
+
+    if [[ "${BUILD_MODE}" == "craft" || ( "${BUILD_MODE}" == "auto" && -n "${CRAFT_PREFIX}" && -d "${CRAFT_PREFIX}" ) ]]; then
+        if [[ -n "${CRAFT_PREFIX}" && -d "${CRAFT_PREFIX}" ]]; then
+            log "Using KDE Craft Qt6/KF6 prefix: ${CRAFT_PREFIX}"
+            prefix_paths+=("${CRAFT_PREFIX}")
+            [[ -d "${CRAFT_PREFIX}/dev-utils/bin" ]] && export PATH="${CRAFT_PREFIX}/dev-utils/bin:${PATH}"
+            [[ -d "${CRAFT_PREFIX}/bin" ]] && export PATH="${CRAFT_PREFIX}/bin:${PATH}"
+            export PKG_CONFIG_PATH="${CRAFT_PREFIX}/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+            export XDG_DATA_DIRS="${CRAFT_PREFIX}/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
         elif [[ "${BUILD_MODE}" == "craft" ]]; then
-            die "KDE Craft prefix not found at ${CRAFT_ROOT}. See docs/MACOS_BUILD_AND_INSTALL.md."
+            die "KDE Craft prefix not found at ${CRAFT_ROOT} (or ${CRAFT_ROOT}/macos-arm-clang). See docs/MACOS_BUILD_AND_INSTALL.md."
         fi
     fi
 
@@ -150,13 +171,19 @@ resolve_prefixes() {
             brew_prefix="$(brew --prefix)"
             log "Detected Homebrew prefix: ${brew_prefix}"
             prefix_paths+=("${brew_prefix}")
+            local keg keg_path
             for keg in qt qt@6 mlt ffmpeg frei0r extra-cmake-modules; do
-                local keg_path
                 keg_path="$(brew --prefix "${keg}" 2>/dev/null || true)"
                 if [[ -n "${keg_path}" && -d "${keg_path}" ]]; then
                     prefix_paths+=("${keg_path}")
-                    [[ -d "${keg_path}/bin" ]] && export PATH="${keg_path}/bin:${PATH}"
-                    [[ -d "${keg_path}/lib/pkgconfig" ]] && export PKG_CONFIG_PATH="${keg_path}/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+                    if [[ "${BUILD_MODE}" == "homebrew" ]]; then
+                        [[ -d "${keg_path}/bin" ]] && export PATH="${keg_path}/bin:${PATH}"
+                        [[ -d "${keg_path}/lib/pkgconfig" ]] && export PKG_CONFIG_PATH="${keg_path}/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+                    else
+                        # Keep Craft ahead of Homebrew in auto mode
+                        [[ -d "${keg_path}/bin" ]] && export PATH="${PATH}:${keg_path}/bin"
+                        [[ -d "${keg_path}/lib/pkgconfig" ]] && export PKG_CONFIG_PATH="${PKG_CONFIG_PATH:-}:${keg_path}/lib/pkgconfig"
+                    fi
                 fi
             done
         elif [[ "${BUILD_MODE}" == "homebrew" ]]; then
@@ -195,6 +222,7 @@ verify_dependencies() {
 
     # Check Qt6
     local qt6_config=""
+    local p
     IFS=';' read -r -a _prefixes <<< "${CMAKE_PREFIX_PATH}"
     for p in "${_prefixes[@]}"; do
         if [[ -f "${p}/lib/cmake/Qt6/Qt6Config.cmake" ]]; then
@@ -212,7 +240,7 @@ verify_dependencies() {
         [[ -f "${p}/lib/cmake/KF6CoreAddons/KF6CoreAddonsConfig.cmake" ]] && kf6_config="${p}/lib/cmake/KF6CoreAddons/KF6CoreAddonsConfig.cmake"
         [[ -f "${p}/share/ECM/cmake/ECMConfig.cmake" ]] && ecm_config="${p}/share/ECM/cmake/ECMConfig.cmake"
     done
-    [[ -n "${kf6_config}" ]] || die "KF6CoreAddonsConfig.cmake not found. Install KDE Frameworks 6 via KDE Craft (packaging/macos/craft_blueprint.py)."
+    [[ -n "${kf6_config}" ]] || die "KF6CoreAddonsConfig.cmake not found. Bootstrap KDE Frameworks 6 via CraftMaster + packaging/macos/CraftConfig.ini."
     [[ -n "${ecm_config}" ]] || die "ECMConfig.cmake not found in CMAKE_PREFIX_PATH."
     log "Found KF6: ${kf6_config}"
     log "Found ECM: ${ecm_config}"
@@ -241,14 +269,14 @@ verify_dependencies() {
 # 3. CMake Configure, Compile & Stage Install (Native arm64 Qt6/KF6)
 # ---------------------------------------------------------------------------
 build_application() {
-    log "Configuring Bang On Pro with CMake + Ninja (Qt6/KF6, arm64, macOS >= ${MIN_MACOS})..."
+    log "Configuring Bang On Pro with CMake + Ninja (Qt6/KF6, ${BUILD_TYPE}, arm64, macOS >= ${MIN_MACOS})..."
     mkdir -p "${BUILD_DIR}" "${STAGE_DIR}" "${OUTPUT_DIR}"
 
     local cmake_args=(
         -S "${SOURCE_DIR}"
         -B "${BUILD_DIR}"
         -G Ninja
-        -DCMAKE_BUILD_TYPE=Release
+        -DCMAKE_BUILD_TYPE="${BUILD_TYPE}"
         -DCMAKE_INSTALL_PREFIX="${STAGE_DIR}"
         -DCMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH}"
         -DCMAKE_OSX_ARCHITECTURES=arm64
@@ -274,12 +302,14 @@ build_application() {
     fi
 
     cmake "${cmake_args[@]}"
-    log "Compiling with ${JOBS} parallel Ninja jobs..."
+    log "Compiling kdenlive, kdenlive_render, and Bang On Pro targets with ${JOBS} parallel Ninja jobs..."
     cmake --build "${BUILD_DIR}" --parallel "${JOBS}"
 
     if [[ "${SKIP_TESTS}" -eq 0 ]]; then
-        log "Running CTest C++ unit tests (offscreen Qt platform)..."
-        QT_QPA_PLATFORM=offscreen ctest --test-dir "${BUILD_DIR}" --output-on-failure --timeout 120 || warn "One or more upstream CTest suites failed on macOS offscreen runner; check logs."
+        log "Running Bang On Pro C++ CTest unit tests (offscreen Qt platform)..."
+        QT_QPA_PLATFORM=offscreen SDL_AUDIODRIVER=dummy \
+            ctest --test-dir "${BUILD_DIR}" -R "^bangonpro_" --output-on-failure --timeout 120 || \
+            die "One or more Bang On Pro C++ CTest suites failed."
     fi
 
     log "Staging install tree into ${STAGE_DIR}..."
@@ -287,8 +317,168 @@ build_application() {
 }
 
 # ---------------------------------------------------------------------------
-# 4. Assemble Native arm64 Bang On Pro.app Bundle
+# 4. Recursive Mach-O Dylib Relocator (Zero Leaked Build/Runner/Homebrew Paths)
 # ---------------------------------------------------------------------------
+resolve_external_lib_path() {
+    local dep="$1"
+    if [[ -f "${dep}" ]]; then
+        printf '%s\n' "${dep}"
+        return 0
+    fi
+    local base
+    base="$(basename "${dep}")"
+    local search_dirs=()
+    [[ -n "${CRAFT_PREFIX}" && -d "${CRAFT_PREFIX}/lib" ]] && search_dirs+=("${CRAFT_PREFIX}/lib")
+    [[ -d "${STAGE_DIR}/lib" ]] && search_dirs+=("${STAGE_DIR}/lib")
+    if command -v brew >/dev/null 2>&1; then
+        search_dirs+=("$(brew --prefix)/lib")
+    fi
+    local d
+    for d in "${search_dirs[@]}"; do
+        if [[ -f "${d}/${base}" ]]; then
+            printf '%s\n' "${d}/${base}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+ensure_rpath() {
+    local macho="$1"
+    local rpath="$2"
+    if ! otool -l "${macho}" 2>/dev/null | grep -A 2 "cmd LC_RPATH" | grep -Fq "path ${rpath} "; then
+        install_name_tool -add_rpath "${rpath}" "${macho}" 2>/dev/null || true
+    fi
+}
+
+relocate_macho_deps() {
+    local app_bundle="$1"
+    local frameworks_dir="${app_bundle}/Contents/Frameworks"
+    local queue_file="${BUILD_DIR}/macho_reloc_queue.txt"
+    local seen_file="${BUILD_DIR}/macho_reloc_seen.txt"
+
+    log "Relocating all non-system Mach-O dylib dependencies into Contents/Frameworks/..."
+    mkdir -p "${frameworks_dir}"
+    : > "${queue_file}"
+    : > "${seen_file}"
+
+    # Seed queue with main executables, bundled tools, frameworks, and plugins
+    find "${app_bundle}/Contents/MacOS" "${app_bundle}/Contents/Frameworks" "${app_bundle}/Contents/PlugIns" \
+        -type f \( -perm -111 -o -name "*.dylib" -o -name "*.so" \) 2>/dev/null | \
+        while IFS= read -r candidate; do
+            if file -b "${candidate}" 2>/dev/null | grep -q "Mach-O"; then
+                printf '%s\n' "${candidate}" >> "${queue_file}"
+            fi
+        done
+
+    local pass=0
+    while [[ -s "${queue_file}" ]]; do
+        pass=$((pass + 1))
+        if [[ ${pass} -gt 20 ]]; then
+            warn "Mach-O relocation reached maximum pass depth (20); stopping."
+            break
+        fi
+
+        local next_queue="${BUILD_DIR}/macho_reloc_next.txt"
+        : > "${next_queue}"
+
+        while IFS= read -r target; do
+            [[ -n "${target}" && -f "${target}" ]] || continue
+            if grep -Fxq "${target}" "${seen_file}" 2>/dev/null; then
+                continue
+            fi
+            printf '%s\n' "${target}" >> "${seen_file}"
+            chmod u+w "${target}" 2>/dev/null || true
+
+            # Ensure appropriate @rpath entries based on Mach-O location inside .app
+            case "${target}" in
+                "${app_bundle}/Contents/MacOS/"*)
+                    ensure_rpath "${target}" "@executable_path/../Frameworks"
+                    ;;
+                "${app_bundle}/Contents/Frameworks/"*)
+                    ensure_rpath "${target}" "@loader_path"
+                    ensure_rpath "${target}" "@executable_path/../Frameworks"
+                    ;;
+                "${app_bundle}/Contents/PlugIns/"*)
+                    ensure_rpath "${target}" "@loader_path/../Frameworks"
+                    ensure_rpath "${target}" "@loader_path/../../Frameworks"
+                    ensure_rpath "${target}" "@executable_path/../Frameworks"
+                    ;;
+            esac
+
+            local dep
+            while IFS= read -r dep; do
+                [[ -n "${dep}" ]] || continue
+                # Skip macOS system libraries and already-relocated paths
+                case "${dep}" in
+                    /System/Library/*|/usr/lib/*|@executable_path/*|@loader_path/*|@rpath/*)
+                        continue
+                        ;;
+                esac
+
+                # Handle non-system Qt/KF6 frameworks referenced by absolute path
+                if [[ "${dep}" == *".framework/"* ]]; then
+                    local fw_subpath fw_bundle_dir fw_bundle_name
+                    fw_subpath="$(printf '%s' "${dep}" | sed -E 's|.*/([^/]+\.framework/.*)|\1|')"
+                    fw_bundle_name="${fw_subpath%%/*}"
+                    fw_bundle_dir="$(printf '%s' "${dep}" | sed -E 's|(.*\.framework)/.*|\1|')"
+                    if [[ ! -d "${frameworks_dir}/${fw_bundle_name}" && -d "${fw_bundle_dir}" ]]; then
+                        cp -R "${fw_bundle_dir}" "${frameworks_dir}/${fw_bundle_name}"
+                        if [[ -f "${frameworks_dir}/${fw_subpath}" ]]; then
+                            chmod u+w "${frameworks_dir}/${fw_subpath}" 2>/dev/null || true
+                            install_name_tool -id "@rpath/${fw_subpath}" "${frameworks_dir}/${fw_subpath}" 2>/dev/null || true
+                            printf '%s\n' "${frameworks_dir}/${fw_subpath}" >> "${next_queue}"
+                        fi
+                    fi
+                    if [[ -e "${frameworks_dir}/${fw_subpath}" ]]; then
+                        install_name_tool -change "${dep}" "@rpath/${fw_subpath}" "${target}" 2>/dev/null || true
+                        continue
+                    fi
+                fi
+
+                local resolved_dep=""
+                resolved_dep="$(resolve_external_lib_path "${dep}" || true)"
+                if [[ -z "${resolved_dep}" || ! -f "${resolved_dep}" ]]; then
+                    warn "Could not resolve external Mach-O dependency '${dep}' referenced by '${target}'"
+                    continue
+                fi
+
+                local dep_base
+                dep_base="$(basename "${dep}")"
+                local bundled_lib="${frameworks_dir}/${dep_base}"
+
+                if [[ ! -f "${bundled_lib}" ]]; then
+                    cp -L -f "${resolved_dep}" "${bundled_lib}"
+                    chmod 755 "${bundled_lib}"
+                    install_name_tool -id "@rpath/${dep_base}" "${bundled_lib}" 2>/dev/null || true
+                    printf '%s\n' "${bundled_lib}" >> "${next_queue}"
+                fi
+
+                install_name_tool -change "${dep}" "@rpath/${dep_base}" "${target}" 2>/dev/null || true
+            done < <(otool -L "${target}" 2>/dev/null | tail -n +2 | awk '{print $1}')
+        done < "${queue_file}"
+
+        mv -f "${next_queue}" "${queue_file}"
+    done
+
+    rm -f "${queue_file}" "${seen_file}"
+    log "Completed Mach-O dependency relocation in ${pass} pass(es)."
+}
+
+# ---------------------------------------------------------------------------
+# 5. Assemble Self-Contained Native arm64 Bang On Pro.app Bundle
+# ---------------------------------------------------------------------------
+copy_plugin_dir_if_exists() {
+    local src_dir="$1"
+    local dst_dir="$2"
+    if [[ -d "${src_dir}" ]]; then
+        mkdir -p "${dst_dir}"
+        cp -RL "${src_dir}/." "${dst_dir}/"
+        return 0
+    fi
+    return 1
+}
+
 assemble_app_bundle() {
     local app_bundle="${OUTPUT_DIR}/${APP_NAME}.app"
     local contents_dir="${app_bundle}/Contents"
@@ -296,12 +486,13 @@ assemble_app_bundle() {
     local frameworks_dir="${contents_dir}/Frameworks"
     local plugins_dir="${contents_dir}/PlugIns"
     local resources_dir="${contents_dir}/Resources"
+    local licenses_out="${resources_dir}/LICENSES"
 
-    log "Assembling ${app_bundle}..."
+    log "Assembling self-contained ${app_bundle}..."
     rm -rf "${app_bundle}"
-    mkdir -p "${macos_dir}" "${frameworks_dir}" "${plugins_dir}" "${resources_dir}"
+    mkdir -p "${macos_dir}" "${frameworks_dir}" "${plugins_dir}" "${resources_dir}" "${licenses_out}"
 
-    # Locate built Kdenlive/Bang On Pro executable
+    # 5.1 Locate and copy compiled Bang On Pro / Kdenlive Mach-O executable
     local built_bin=""
     if [[ -x "${STAGE_DIR}/Applications/KDE/kdenlive.app/Contents/MacOS/kdenlive" ]]; then
         built_bin="${STAGE_DIR}/Applications/KDE/kdenlive.app/Contents/MacOS/kdenlive"
@@ -322,31 +513,126 @@ assemble_app_bundle() {
     if [[ -x "${STAGE_DIR}/bin/kdenlive_render" ]]; then
         cp -f "${STAGE_DIR}/bin/kdenlive_render" "${macos_dir}/kdenlive_render"
         chmod 755 "${macos_dir}/kdenlive_render"
+    elif [[ -x "${BUILD_DIR}/bin/kdenlive_render" ]]; then
+        cp -f "${BUILD_DIR}/bin/kdenlive_render" "${macos_dir}/kdenlive_render"
+        chmod 755 "${macos_dir}/kdenlive_render"
     fi
 
-    # Bundle melt, ffmpeg, ffprobe for self-contained rendering
+    # 5.2 Bundle melt, ffmpeg, ffprobe for zero-setup self-contained rendering
     local media_bin
     for media_bin in melt ffmpeg ffprobe; do
         if command -v "${media_bin}" >/dev/null 2>&1; then
-            cp -f "$(command -v "${media_bin}")" "${macos_dir}/${media_bin}"
+            cp -L -f "$(command -v "${media_bin}")" "${macos_dir}/${media_bin}"
             chmod 755 "${macos_dir}/${media_bin}"
         fi
     done
 
-    # Copy staged share resources (effects, profiles, icons, KXMLGUI data)
+    # 5.3 Bundle staged Kdenlive/Bang On Pro share/ data, Breeze icons, MLT 7, and frei0r plugins
     if [[ -d "${STAGE_DIR}/share" ]]; then
-        cp -R "${STAGE_DIR}/share" "${resources_dir}/share"
+        cp -RL "${STAGE_DIR}/share" "${resources_dir}/share"
     fi
 
-    # Copy Bang On Pro Python modules, JSON schemas, and GPL-3.0 licence notices
+    # Bundle Breeze icons (directory and/or compiled .rcc icon theme)
+    local icon_src
+    for icon_src in \
+        "${CRAFT_PREFIX}/share/icons" \
+        "${STAGE_DIR}/share/icons" \
+        "/opt/homebrew/share/icons"; do
+        if [[ -d "${icon_src}" ]]; then
+            copy_plugin_dir_if_exists "${icon_src}" "${resources_dir}/icons" && break
+        fi
+    done
+    local rcc_file
+    for rcc_file in \
+        "${CRAFT_PREFIX}/bin/data/icontheme.rcc" \
+        "${CRAFT_PREFIX}/share/icons/breeze/breeze-icons.rcc" \
+        "${CRAFT_PREFIX}/share/icons/breeze-dark/breeze-icons-dark.rcc"; do
+        if [[ -f "${rcc_file}" ]]; then
+            cp -f "${rcc_file}" "${resources_dir}/$(basename "${rcc_file}")"
+        fi
+    done
+
+    # Bundle MLT 7 modules -> Contents/PlugIns/mlt-7/ and data/profiles/presets -> Contents/Resources/mlt-7/
+    local mlt_mod_dir mlt_data_dir
+    mlt_mod_dir="$(pkg-config --variable=moduledir mlt-framework-7 2>/dev/null || true)"
+    mlt_data_dir="$(pkg-config --variable=mltdatadir mlt-framework-7 2>/dev/null || true)"
+    if [[ -z "${mlt_mod_dir}" || ! -d "${mlt_mod_dir}" ]]; then
+        for cand in "${CRAFT_PREFIX}/lib/mlt-7" "/opt/homebrew/lib/mlt-7"; do
+            [[ -d "${cand}" ]] && mlt_mod_dir="${cand}" && break
+        done
+    fi
+    if [[ -z "${mlt_data_dir}" || ! -d "${mlt_data_dir}" ]]; then
+        for cand in "${CRAFT_PREFIX}/share/mlt-7" "/opt/homebrew/share/mlt-7"; do
+            [[ -d "${cand}" ]] && mlt_data_dir="${cand}" && break
+        done
+    fi
+    if [[ -n "${mlt_mod_dir}" && -d "${mlt_mod_dir}" ]]; then
+        log "Bundling MLT 7 modules from ${mlt_mod_dir}..."
+        copy_plugin_dir_if_exists "${mlt_mod_dir}" "${plugins_dir}/mlt-7"
+    else
+        warn "MLT 7 modules directory not found; bundled melt may have limited plugins."
+    fi
+    if [[ -n "${mlt_data_dir}" && -d "${mlt_data_dir}" ]]; then
+        log "Bundling MLT 7 profiles & presets from ${mlt_data_dir}..."
+        copy_plugin_dir_if_exists "${mlt_data_dir}" "${resources_dir}/mlt-7"
+    fi
+
+    # Bundle frei0r plugins -> Contents/PlugIns/frei0r-1/
+    local frei0r_dir=""
+    local cand
+    for cand in "${CRAFT_PREFIX}/lib/frei0r-1" "/opt/homebrew/lib/frei0r-1" "/usr/local/lib/frei0r-1"; do
+        if [[ -d "${cand}" ]]; then
+            frei0r_dir="${cand}"
+            break
+        fi
+    done
+    if [[ -n "${frei0r_dir}" ]]; then
+        log "Bundling frei0r plugins from ${frei0r_dir}..."
+        copy_plugin_dir_if_exists "${frei0r_dir}" "${plugins_dir}/frei0r-1"
+    fi
+
+    # 5.4 Bundle Bang On Pro Python modules & self-contained Python 3.12 virtualenv
     if [[ -d "${SOURCE_DIR}/bangonpro" ]]; then
         cp -R "${SOURCE_DIR}/bangonpro" "${resources_dir}/bangonpro"
+        find "${resources_dir}/bangonpro" -type d -name "__pycache__" -prune -exec rm -rf {} + 2>/dev/null || true
     fi
-    cp -f "${SOURCE_DIR}/COPYING" "${resources_dir}/COPYING"
-    cp -R "${SOURCE_DIR}/LICENSES" "${resources_dir}/LICENSES"
-    [[ -f "${SOURCE_DIR}/docs/OPEN_SOURCE_COMPONENTS.md" ]] && cp -f "${SOURCE_DIR}/docs/OPEN_SOURCE_COMPONENTS.md" "${resources_dir}/OPEN_SOURCE_COMPONENTS.md"
 
-    # Build .icns icon from repo PNG icon set if iconutil is available
+    if [[ "${SKIP_PYTHON_VENV}" -eq 0 && -x "${SCRIPT_DIR}/bootstrap_ai_runtime.sh" ]]; then
+        log "Building self-contained Python 3.12 runtime inside Contents/Resources/python-env/..."
+        "${SCRIPT_DIR}/bootstrap_ai_runtime.sh" \
+            --venv-dir "${resources_dir}/python-env" \
+            --requirements "${SOURCE_DIR}/requirements-bangonpro.txt"
+    elif [[ "${SKIP_PYTHON_VENV}" -eq 1 ]]; then
+        warn "Skipping bundled Python 3.12 virtualenv (--skip-python-venv specified)."
+    fi
+
+    # 5.5 Bundle GPL-3.0 licence files, component matrix, and ArtCraft attribution notice
+    cp -f "${SOURCE_DIR}/COPYING" "${resources_dir}/COPYING"
+    cp -f "${SOURCE_DIR}/COPYING" "${licenses_out}/COPYING"
+    if [[ -d "${SOURCE_DIR}/LICENSES" ]]; then
+        cp -RL "${SOURCE_DIR}/LICENSES/." "${licenses_out}/"
+    fi
+    if [[ -f "${SOURCE_DIR}/docs/OPEN_SOURCE_COMPONENTS.md" ]]; then
+        cp -f "${SOURCE_DIR}/docs/OPEN_SOURCE_COMPONENTS.md" "${resources_dir}/OPEN_SOURCE_COMPONENTS.md"
+        cp -f "${SOURCE_DIR}/docs/OPEN_SOURCE_COMPONENTS.md" "${licenses_out}/OPEN_SOURCE_COMPONENTS.md"
+    fi
+    cat > "${licenses_out}/ARTCRAFT_NOTICE.txt" <<'EOF'
+Bang On Pro — ArtCraft Selective Integration Attribution Notice
+===============================================================
+
+Selected architecture patterns and rotoscoping/node-workflow concepts in
+Bang On Pro draw inspiration from or selectively integrate open-source code
+from ArtCraft (https://github.com/storytold/artcraft), dual-licensed under
+the MIT License OR Apache License 2.0 (SPDX: MIT OR Apache-2.0).
+
+In compliance with both licences and Bang On Pro's GPL-3.0 distribution:
+- Full MIT and Apache-2.0 licence texts are preserved alongside this notice
+  in Contents/Resources/LICENSES/MIT.txt and Apache-2.0.txt.
+- Non-core third-party ArtCraft media assets (sound/, memes/, skybox/, pose/,
+  characters_gif/) are strictly excluded and are NOT bundled in Bang On Pro.
+EOF
+
+    # 5.6 Build .icns icon from repo PNG icon set if iconutil is available
     local icon_file="bangonpro.icns"
     if command -v iconutil >/dev/null 2>&1 && [[ -f "${SOURCE_DIR}/data/icons/128-apps-kdenlive.png" ]]; then
         local iconset_dir="${BUILD_DIR}/bangonpro.iconset"
@@ -363,7 +649,7 @@ assemble_app_bundle() {
         iconutil -c icns "${iconset_dir}" -o "${resources_dir}/${icon_file}" || warn "iconutil failed; continuing without custom .icns"
     fi
 
-    # Render Info.plist from template
+    # 5.7 Render Info.plist from template
     local git_sha build_number
     git_sha="$(git -C "${SOURCE_DIR}" rev-parse --short HEAD 2>/dev/null || echo "nogit")"
     build_number="${GITHUB_RUN_NUMBER:-$(date +%Y%m%d)}"
@@ -378,17 +664,53 @@ assemble_app_bundle() {
 
     plutil -lint "${contents_dir}/Info.plist"
 
-    # Deploy Qt6 frameworks & QML plugins via macdeployqt if available
+    # 5.8 Deploy Qt6 frameworks, QML modules, and Qt/KF6 plugins via macdeployqt
     if command -v macdeployqt >/dev/null 2>&1; then
-        log "Running macdeployqt to bundle Qt6 frameworks and QML modules..."
-        local qml_args=()
-        [[ -d "${SOURCE_DIR}/src/timeline2/view/qml" ]] && qml_args+=("-qmldir=${SOURCE_DIR}/src/timeline2/view/qml")
-        macdeployqt "${app_bundle}" "${qml_args[@]}" -verbose=1 || warn "macdeployqt reported warnings; verify dylib linkage below."
+        log "Running macdeployqt to bundle Qt6 frameworks, plugins, and QML modules..."
+        local deploy_args=()
+        [[ -d "${SOURCE_DIR}/src/timeline2/view/qml" ]] && deploy_args+=("-qmldir=${SOURCE_DIR}/src/timeline2/view/qml")
+        [[ -n "${CRAFT_PREFIX}" && -d "${CRAFT_PREFIX}/lib" ]] && deploy_args+=("-libpath=${CRAFT_PREFIX}/lib")
+        macdeployqt "${app_bundle}" "${deploy_args[@]}" -verbose=1 || warn "macdeployqt reported warnings; continuing with recursive Mach-O relocation."
     else
-        warn "macdeployqt not found; ensure Qt6 frameworks are bundled or Craft packager is used."
+        warn "macdeployqt not found; relying on recursive Mach-O relocation."
     fi
 
-    # Verify native arm64 Mach-O binary
+    # Ensure critical Qt6 & KF6 plugin subdirectories are present inside Contents/PlugIns/
+    local qt_plug_root=""
+    for cand in "${CRAFT_PREFIX}/plugins" "${CRAFT_PREFIX}/lib/qt6/plugins" "/opt/homebrew/opt/qt@6/share/qt/plugins"; do
+        if [[ -d "${cand}" ]]; then
+            qt_plug_root="${cand}"
+            break
+        fi
+    done
+    if [[ -n "${qt_plug_root}" ]]; then
+        local psub
+        for psub in platforms styles imageformats iconengines multimedia tls networkinformation kf6; do
+            if [[ -d "${qt_plug_root}/${psub}" ]]; then
+                copy_plugin_dir_if_exists "${qt_plug_root}/${psub}" "${plugins_dir}/${psub}"
+            fi
+        done
+    fi
+
+    # Copy QML modules from Craft prefix if present so QtQuick/KF6 QML imports work offline
+    if [[ -n "${CRAFT_PREFIX}" && -d "${CRAFT_PREFIX}/qml" ]]; then
+        mkdir -p "${resources_dir}/qml"
+        cp -RL "${CRAFT_PREFIX}/qml/." "${resources_dir}/qml/" 2>/dev/null || true
+    fi
+
+    # Ensure qt.conf points Qt to internal PlugIns and Resources/qml
+    cat > "${resources_dir}/qt.conf" <<'EOF'
+[Paths]
+Plugins = PlugIns
+Imports = Resources/qml
+Qml2Imports = Resources/qml
+QmlImports = Resources/qml
+EOF
+
+    # 5.9 Recursively relocate ALL remaining external Mach-O dependencies
+    relocate_macho_deps "${app_bundle}"
+
+    # 5.10 Verify native arm64 Mach-O binary
     local archs
     archs="$(lipo -archs "${macos_dir}/${APP_NAME}")"
     log "Mach-O architectures for '${APP_NAME}': ${archs}"
@@ -398,9 +720,51 @@ assemble_app_bundle() {
 }
 
 # ---------------------------------------------------------------------------
-# 5. Code Signing (Developer ID with Hardened Runtime, or Ad-Hoc Fallback)
+# 6. Code Signing (Developer ID with Hardened Runtime, or Ad-Hoc Fallback)
 # ---------------------------------------------------------------------------
 SIGNING_STATE="unknown"
+
+sign_nested_macho_objects() {
+    local app_bundle="$1"
+    local sign_identity="$2"
+    local hardened_flags="$3"
+
+    # Sign all nested .dylib and .so libraries inside-out
+    find "${app_bundle}/Contents" -type f \( -name "*.dylib" -o -name "*.so" \) -print0 | \
+        while IFS= read -r -d '' lib; do
+            if [[ "${hardened_flags}" == "hardened" ]]; then
+                codesign --force --options runtime --timestamp --sign "${sign_identity}" "${lib}"
+            else
+                codesign --force --sign - "${lib}"
+            fi
+        done
+
+    # Sign any Mach-O binaries inside embedded python-env/bin
+    if [[ -d "${app_bundle}/Contents/Resources/python-env/bin" ]]; then
+        find "${app_bundle}/Contents/Resources/python-env/bin" -type f -print0 | \
+            while IFS= read -r -d '' pybin; do
+                if file -b "${pybin}" 2>/dev/null | grep -q "Mach-O"; then
+                    if [[ "${hardened_flags}" == "hardened" ]]; then
+                        codesign --force --options runtime --timestamp --sign "${sign_identity}" "${pybin}"
+                    else
+                        codesign --force --sign - "${pybin}"
+                    fi
+                fi
+            done
+    fi
+
+    # Sign bundled frameworks
+    if [[ -d "${app_bundle}/Contents/Frameworks" ]]; then
+        find "${app_bundle}/Contents/Frameworks" -maxdepth 2 -name "*.framework" -print0 | \
+            while IFS= read -r -d '' fw; do
+                if [[ "${hardened_flags}" == "hardened" ]]; then
+                    codesign --force --options runtime --timestamp --sign "${sign_identity}" "${fw}"
+                else
+                    codesign --force --sign - "${fw}"
+                fi
+            done
+    fi
+}
 
 sign_app_bundle() {
     local app_bundle="${OUTPUT_DIR}/${APP_NAME}.app"
@@ -408,20 +772,9 @@ sign_app_bundle() {
 
     if [[ -n "${SIGN_IDENTITY}" ]] && security find-identity -v -p codesigning 2>/dev/null | grep -Fq "${SIGN_IDENTITY}"; then
         log "Developer ID signing identity found: ${SIGN_IDENTITY}"
-        log "Signing nested binaries, frameworks, and plugins with Hardened Runtime..."
+        log "Signing nested binaries, frameworks, Python native extensions, and plugins with Hardened Runtime..."
 
-        # Sign nested Mach-O libraries and plugins inside-out
-        find "${app_bundle}/Contents" -type f \( -name "*.dylib" -o -name "*.so" \) -print0 | \
-            while IFS= read -r -d '' lib; do
-                codesign --force --options runtime --timestamp --sign "${SIGN_IDENTITY}" "${lib}"
-            done
-
-        if [[ -d "${app_bundle}/Contents/Frameworks" ]]; then
-            find "${app_bundle}/Contents/Frameworks" -maxdepth 2 -name "*.framework" -print0 | \
-                while IFS= read -r -d '' fw; do
-                    codesign --force --options runtime --timestamp --sign "${SIGN_IDENTITY}" "${fw}"
-                done
-        fi
+        sign_nested_macho_objects "${app_bundle}" "${SIGN_IDENTITY}" "hardened"
 
         local helper
         for helper in kdenlive_render melt ffmpeg ffprobe; do
@@ -439,6 +792,7 @@ sign_app_bundle() {
             warn "Requested signing identity '${SIGN_IDENTITY}' was not found in the active keychain."
         fi
         warn "Developer ID signing credentials not configured; falling back to ad-hoc signing (not notarized)."
+        sign_nested_macho_objects "${app_bundle}" "-" "adhoc"
         codesign --force --deep --sign - --entitlements "${entitlements}" "${app_bundle}"
         codesign --verify --deep --strict --verbose=2 "${app_bundle}"
         SIGNING_STATE="adhoc_signed_not_notarized"
@@ -447,7 +801,7 @@ sign_app_bundle() {
 }
 
 # ---------------------------------------------------------------------------
-# 6. Package .dmg & Optional Apple Notarization
+# 7. Package .dmg & Optional Apple Notarization
 # ---------------------------------------------------------------------------
 package_dmg() {
     local app_bundle="${OUTPUT_DIR}/${APP_NAME}.app"
@@ -509,15 +863,39 @@ package_dmg() {
 }
 
 # ---------------------------------------------------------------------------
-# 7. Smoke-Test Launch Verification & Artifact Metadata
+# 8. Smoke-Test Launch Verification, Dylib Audit & Artifact Metadata
 # ---------------------------------------------------------------------------
+audit_no_leaked_dylib_paths() {
+    local app_bundle="$1"
+    local leaked=0
+    local bin
+    while IFS= read -r bin; do
+        [[ -n "${bin}" ]] || continue
+        local bad_deps
+        bad_deps="$(otool -L "${bin}" 2>/dev/null | tail -n +2 | awk '{print $1}' | \
+            grep -E '^(/Users/runner|/opt/homebrew|/usr/local/Cellar|'"${CRAFT_ROOT}"')' || true)"
+        if [[ -n "${bad_deps}" ]]; then
+            printf 'LEAKED DYLIB PATH in %s:\n%s\n' "${bin}" "${bad_deps}"
+            leaked=1
+        fi
+    done < <(find "${app_bundle}/Contents/MacOS" "${app_bundle}/Contents/Frameworks" "${app_bundle}/Contents/PlugIns" \
+        -type f \( -perm -111 -o -name "*.dylib" -o -name "*.so" \) 2>/dev/null)
+
+    if [[ "${leaked}" -ne 0 ]]; then
+        return 1
+    fi
+    echo "PASS: Zero leaked /Users/runner, /opt/homebrew, or CraftRoot paths detected by otool -L."
+    return 0
+}
+
 run_smoke_verification() {
     local app_bundle="${OUTPUT_DIR}/${APP_NAME}.app"
     local log_file="${OUTPUT_DIR}/BUILD_VERIFICATION.log"
     local status_file="${OUTPUT_DIR}/SIGNING_STATUS.txt"
+    local dylib_audit_ok=0
 
     {
-        echo "=== Bang On Pro Apple Silicon (arm64) Build Verification ==="
+        echo "=== Bang On Pro Apple Silicon (arm64) Self-Contained Build Verification ==="
         echo "Timestamp (UTC): $(date -u +%Y-%m-%dT%H:%M:%SZ)"
         echo "Version:         ${APP_VERSION}"
         echo "Host macOS:      $(sw_vers -productVersion) ($(uname -m))"
@@ -529,23 +907,51 @@ run_smoke_verification() {
         echo "--- Mach-O Architecture Check ---"
         file "${app_bundle}/Contents/MacOS/${APP_NAME}"
         lipo -archs "${app_bundle}/Contents/MacOS/${APP_NAME}"
+        test "$(lipo -archs "${app_bundle}/Contents/MacOS/${APP_NAME}")" = "arm64"
         echo ""
         echo "--- Code Signature Verification ---"
         codesign -dvv "${app_bundle}" 2>&1 || true
         codesign --verify --deep --strict --verbose=2 "${app_bundle}" 2>&1
         echo ""
-        echo "--- Headless Launch Smoke Test (--version) ---"
-        QT_QPA_PLATFORM=offscreen "${app_bundle}/Contents/MacOS/${APP_NAME}" --version 2>&1 || true
+        echo "--- Self-Contained Mach-O Dylib Linkage Audit (otool -L) ---"
+        if audit_no_leaked_dylib_paths "${app_bundle}"; then
+            dylib_audit_ok=1
+        fi
         echo ""
-        echo "--- Bundled Media Stack ---"
+        echo "--- Headless Launch Smoke Test (--version) ---"
+        MLT_REPOSITORY="${app_bundle}/Contents/PlugIns/mlt-7" \
+        MLT_DATA="${app_bundle}/Contents/Resources/mlt-7" \
+        FREI0R_PATH="${app_bundle}/Contents/PlugIns/frei0r-1" \
+        QT_QPA_PLATFORM=offscreen \
+            "${app_bundle}/Contents/MacOS/${APP_NAME}" --version 2>&1
+        echo ""
+        echo "--- Bundled Media Stack (MLT 7 + FFmpeg VideoToolbox) ---"
         if [[ -x "${app_bundle}/Contents/MacOS/melt" ]]; then
-            "${app_bundle}/Contents/MacOS/melt" --version 2>&1 | head -n 3
+            MLT_REPOSITORY="${app_bundle}/Contents/PlugIns/mlt-7" \
+            MLT_DATA="${app_bundle}/Contents/Resources/mlt-7" \
+            FREI0R_PATH="${app_bundle}/Contents/PlugIns/frei0r-1" \
+                "${app_bundle}/Contents/MacOS/melt" --version 2>&1 | head -n 3
         fi
         if [[ -x "${app_bundle}/Contents/MacOS/ffmpeg" ]]; then
             "${app_bundle}/Contents/MacOS/ffmpeg" -version 2>&1 | head -n 2
-            "${app_bundle}/Contents/MacOS/ffmpeg" -hide_banner -hwaccels 2>&1 || true
+            "${app_bundle}/Contents/MacOS/ffmpeg" -hide_banner -hwaccels 2>&1
         fi
+        echo ""
+        echo "--- Bundled Self-Contained Python AI Engine CLI Smoke Test ---"
+        if [[ -x "${app_bundle}/Contents/Resources/python-env/bin/python3" ]]; then
+            PYTHONPATH="${app_bundle}/Contents/Resources" \
+                "${app_bundle}/Contents/Resources/python-env/bin/python3" -m bangonpro.ai_engine.cli --help 2>&1 | head -n 20
+        else
+            echo "SKIPPED: bundled python-env not present (--skip-python-venv)."
+        fi
+        echo ""
+        echo "--- Bundled Licence & Attribution Files ---"
+        ls -la "${app_bundle}/Contents/Resources/LICENSES"
     } | tee "${log_file}"
+
+    if grep -q "LEAKED DYLIB PATH" "${log_file}"; then
+        die "Bundle dylib audit failed: leaked non-relocated library path(s) detected in ${log_file}."
+    fi
 
     local notarized_flag="false"
     local gatekeeper_note
@@ -563,6 +969,7 @@ artifact_version=${APP_VERSION}
 architecture=arm64
 signing_state=${SIGNING_STATE}
 notarized=${notarized_flag}
+self_contained_bundle=true
 gatekeeper_note=${gatekeeper_note}
 EOF
     log "Wrote verification log (${log_file}) and signing annotation (${status_file})."
@@ -579,7 +986,7 @@ main() {
         package_dmg
     fi
     run_smoke_verification
-    log "Done! Artifacts available in: ${OUTPUT_DIR}"
+    log "Done! Self-contained arm64 artifacts available in: ${OUTPUT_DIR}"
 }
 
 main

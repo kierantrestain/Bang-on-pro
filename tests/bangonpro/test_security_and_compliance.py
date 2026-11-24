@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import ast
+import configparser
+import importlib.util
 import json
 import os
 import plistlib
@@ -866,3 +868,145 @@ def test_macos_packaging_script_and_ci_workflows_syntax() -> None:
             pytest.fail(f"Workflow YAML validation failed: {check.stderr}")
 
     assert validated, "Could not validate workflow YAML syntax (PyYAML unavailable)"
+
+
+def test_artcraft_attribution_and_excluded_third_party_assets_absent() -> None:
+    """Verify ArtCraft (storytold/artcraft, MIT OR Apache-2.0) attribution and ZERO excluded asset dirs."""
+    doc_text = (REPO_ROOT / "docs" / "OPEN_SOURCE_COMPONENTS.md").read_text(encoding="utf-8")
+    assert "storytold/artcraft" in doc_text, "ArtCraft upstream repository reference missing"
+    assert "MIT OR Apache-2.0" in doc_text, "ArtCraft dual MIT OR Apache-2.0 licence missing"
+
+    excluded_artcraft_dirs = ("sound", "memes", "skybox", "pose", "characters_gif")
+    for dirname in excluded_artcraft_dirs:
+        assert f"{dirname}/" in doc_text, (
+            f"Excluded ArtCraft asset directory '{dirname}/' must be documented in OPEN_SOURCE_COMPONENTS.md"
+        )
+
+    # Ensure build_macos_arm64.sh embeds ArtCraft attribution notice inside .app/Contents/Resources/LICENSES/
+    build_sh_text = (PACKAGING_MACOS_DIR / "build_macos_arm64.sh").read_text(encoding="utf-8")
+    assert "ARTCRAFT_NOTICE.txt" in build_sh_text, "macOS bundle must include ARTCRAFT_NOTICE.txt"
+
+    # Scan Git tracked files to guarantee ZERO excluded ArtCraft third-party media directories exist
+    if shutil.which("git"):
+        proc = subprocess.run(
+            ["git", "ls-files"],
+            cwd=REPO_ROOT,
+            shell=False,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        tracked_files = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    else:
+        tracked_files = [
+            str(p.relative_to(REPO_ROOT))
+            for p in REPO_ROOT.rglob("*")
+            if p.is_file() and ".git" not in p.parts
+        ]
+
+    forbidden_asset_hits: list[str] = []
+    excluded_set = set(excluded_artcraft_dirs)
+    for rel in tracked_files:
+        parts_lower = [part.lower() for part in Path(rel).parts[:-1]]
+        if any(part in excluded_set for part in parts_lower):
+            forbidden_asset_hits.append(rel)
+
+    assert not forbidden_asset_hits, (
+        "Excluded ArtCraft third-party asset directories MUST NOT exist in Bang On Pro:\n"
+        + "\n".join(forbidden_asset_hits)
+    )
+
+
+def test_macos_craft_config_blueprint_and_ci_self_contained_packaging() -> None:
+    """Validate CraftConfig.ini, craft_blueprint.py (Craft master libs/qt/*), bootstrap_ai_runtime.sh, and macOS CI."""
+    craft_ini = PACKAGING_MACOS_DIR / "CraftConfig.ini"
+    assert craft_ini.is_file(), "packaging/macos/CraftConfig.ini missing"
+
+    cp = configparser.ConfigParser()
+    cp.optionxform = str  # preserve case sensitivity required by CraftMaster
+    cp.read(craft_ini, encoding="utf-8")
+
+    for section in ("General", "Variables", "GeneralSettings", "BlueprintSettings", "macos-arm-clang"):
+        assert section in cp, f"Missing required section [{section}] in CraftConfig.ini"
+
+    assert cp["General"].get("Branch") == "master"
+    assert cp["General"].get("ShallowClone") == "True"
+    assert cp["Variables"].get("UseCache") == "True"
+    assert cp["Variables"].get("CreateCache") == "False"
+    assert cp["GeneralSettings"].get("General/KFHostToolingVersion") == "6"
+    assert cp["GeneralSettings"].get("Packager/RepositoryUrl") == "https://files.kde.org/craft/Qt6/"
+    assert cp["GeneralSettings"].get("CodeSigning/Enabled") == "False"
+    assert cp["BlueprintSettings"].get("libs/qt.qtMajorVersion") == "6"
+    assert cp["BlueprintSettings"].get("libs/qt5.ignored") == "True"
+    assert cp["BlueprintSettings"].get("libs/qt6/qtdoc.ignored") == "True"
+    assert cp["BlueprintSettings"].get("/.buildTests") == "False"
+    assert cp["macos-arm-clang"].get("General/ABI") == "macos-clang-arm64"
+    assert cp["macos-arm-clang"].get("Compile/BuildType") == "RelWithDebInfo"
+    assert cp["macos-arm-clang"].get("Packager/PackageType") == "MacDMGPackager"
+
+    # Verify CraftMaster key syntax invariants: '/' in GeneralSettings/target, '.' in BlueprintSettings
+    for sec in ("GeneralSettings", "macos-arm-clang"):
+        for key in cp[sec]:
+            assert "/" in key, f"CraftMaster requires Category/Key in [{sec}], got {key!r}"
+    for key in cp["BlueprintSettings"]:
+        assert "." in key, f"CraftMaster requires blueprint.option in [BlueprintSettings], got {key!r}"
+
+    # Verify craft_blueprint.py imports offline, uses version 1.0.0 & Craft master libs/qt/* names
+    bp_path = PACKAGING_MACOS_DIR / "craft_blueprint.py"
+    spec = importlib.util.spec_from_file_location("bangonpro_craft_blueprint", bp_path)
+    assert spec is not None and spec.loader is not None
+    bp_mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bp_mod)
+    assert bp_mod.BANGONPRO_VERSION == "1.0.0"
+
+    si = bp_mod.subinfo()
+    si.setTargets()
+    si.setDependencies()
+    deps = set(si.runtimeDependencies.keys())
+    for required_dep in (
+        "libs/qt/qtbase",
+        "libs/qt/qtdeclarative",
+        "libs/qt/qtmultimedia",
+        "libs/qt/qtnetworkauth",
+        "libs/qt/qtsvg",
+        "libs/qt/qtimageformats",
+        "kde/frameworks/tier1/breeze-icons",
+        "kde/frameworks/tier1/kcolorscheme",
+        "kde/frameworks/tier1/kplotting",
+        "kde/frameworks/tier1/kimageformats",
+        "kde/frameworks/tier3/kdeclarative",
+        "kde/frameworks/tier4/frameworkintegration",
+        "kde/plasma/breeze",
+        "libs/ffmpeg",
+        "libs/mlt",
+        "libs/frei0r-plugins",
+        "libs/rubberband",
+    ):
+        assert required_dep in deps, f"craft_blueprint.py missing Craft master dependency: {required_dep}"
+    assert not any(d.startswith("libs/qt6/") for d in deps), (
+        "craft_blueprint.py must use Craft master libs/qt/* paths, not deprecated libs/qt6/*"
+    )
+
+    # Verify bootstrap_ai_runtime.sh exists, is executable, and passes bash -n
+    bootstrap_sh = PACKAGING_MACOS_DIR / "bootstrap_ai_runtime.sh"
+    assert bootstrap_sh.is_file(), "packaging/macos/bootstrap_ai_runtime.sh missing"
+    assert os.access(bootstrap_sh, os.X_OK), "bootstrap_ai_runtime.sh must be executable"
+    proc = subprocess.run(["bash", "-n", str(bootstrap_sh)], shell=False, capture_output=True, text=True)
+    assert proc.returncode == 0, f"bash -n failed on bootstrap_ai_runtime.sh: {proc.stderr}"
+
+    # Verify build_macos_arm64.sh performs recursive dylib relocation & otool -L audit
+    build_sh_text = (PACKAGING_MACOS_DIR / "build_macos_arm64.sh").read_text(encoding="utf-8")
+    assert "relocate_macho_deps" in build_sh_text
+    assert "audit_no_leaked_dylib_paths" in build_sh_text
+    assert "python-env" in build_sh_text
+    assert "mlt-7" in build_sh_text
+    assert "frei0r-1" in build_sh_text
+
+    # Verify build-macos-arm64.yml uses CraftMaster.py (never broken --branch qt6) & non-draft releases
+    wf_text = (WORKFLOWS_DIR / "build-macos-arm64.yml").read_text(encoding="utf-8")
+    assert "CraftMaster.py" in wf_text
+    assert "packaging/macos/CraftConfig.ini" in wf_text
+    assert "--branch qt6" not in wf_text, "Broken CraftBootstrap --branch qt6 must not be used"
+    assert "draft: false" in wf_text, "Versioned tag releases must publish non-draft releases"
+    assert 'default: "1.0.0"' in wf_text
+

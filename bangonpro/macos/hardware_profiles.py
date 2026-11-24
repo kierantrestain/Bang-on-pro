@@ -676,3 +676,168 @@ def validate_profile_against_capabilities(
         issues.append(f"Hardware accelerator '{profile.accelerator}' not available in ffmpeg")
 
     return len(issues) == 0, issues
+
+
+@dataclass(frozen=True)
+class ModelQuantizationRecommendation:
+    """RAM-, MPS-, and storage-aware AI model & quantization recommendation."""
+
+    memory_tier: str
+    ram_gb: float
+    has_mps: bool
+    disk_free_gb: float
+    whisper_model: str
+    whisper_quantization: str
+    whisper_device: str
+    sam2_model: str
+    sam2_precision: str
+    sam2_device: str
+    mps_fallback_device: str
+    mps_fallback_precision: str
+    fallback_active: bool
+    max_concurrent_ai_workers: int
+    recommend_proxies: bool
+    recommend_external_ssd: bool
+    estimated_ram_budget_gb: float
+    estimated_disk_footprint_gb: float
+    warnings: List[str] = field(default_factory=list)
+    notes: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+def recommend_model_quantization(
+    ram_gb: float,
+    has_mps: bool,
+    disk_free_gb: float,
+) -> ModelQuantizationRecommendation:
+    """Select safe Whisper & SAM2/MobileSAM quantization tiers for Apple Silicon or CPU hosts.
+
+    Balances unified-memory pressure across 8 GB / 16 GB / 24 GB / 32 GB+ Macs and
+    enforces deterministic MPS -> CPU ONNX/INT8 fallback whenever MPS is absent,
+    memory is constrained, or free disk space is low.
+    """
+    ram = max(0.0, float(ram_gb))
+    disk = max(0.0, float(disk_free_gb))
+    warnings: List[str] = []
+    notes: List[str] = []
+    fallback_active = not bool(has_mps)
+    recommend_external_ssd = disk < 20.0
+
+    if ram <= 8.5:
+        memory_tier = "8gb"
+        whisper_model = "small" if disk >= 10.0 else "tiny"
+        whisper_quantization = "int8"
+        whisper_device = "cpu"
+        sam2_model = "sam2.1_hiera_tiny" if disk >= 10.0 else "mobilesam"
+        sam2_precision = "onnx_int8"
+        sam2_device = "cpu"
+        max_workers = 1
+        recommend_proxies = True
+        est_ram_gb = 1.8
+        est_disk_gb = 0.6 if whisper_model == "tiny" else 1.2
+        fallback_active = True
+        notes.append(
+            "8 GB unified-memory tier: using CTranslate2 INT8 Whisper and ONNX INT8 CPU "
+            "segmentation to keep NLE timeline playback responsive without swap thrashing."
+        )
+    elif ram <= 18.0:
+        memory_tier = "16gb"
+        whisper_model = "medium" if disk >= 12.0 else "small"
+        whisper_quantization = "int8"
+        whisper_device = "cpu"
+        sam2_model = "sam2.1_hiera_small"
+        sam2_precision = "fp16" if has_mps else "onnx_int8"
+        sam2_device = "mps" if has_mps else "cpu"
+        max_workers = 2
+        recommend_proxies = True
+        est_ram_gb = 3.8
+        est_disk_gb = 2.6 if whisper_model == "medium" else 1.6
+        notes.append(
+            "16 GB unified-memory tier: Whisper INT8 + SAM2 small (MPS FP16 with automatic "
+            "CPU ONNX INT8 fallback)."
+        )
+    elif ram <= 26.0:
+        memory_tier = "24gb"
+        whisper_model = "medium"
+        whisper_quantization = "int8"
+        whisper_device = "cpu"
+        sam2_model = "sam2.1_hiera_small"
+        sam2_precision = "fp16" if has_mps else "onnx_int8"
+        sam2_device = "mps" if has_mps else "cpu"
+        max_workers = 2
+        recommend_proxies = False
+        est_ram_gb = 5.2
+        est_disk_gb = 3.0
+        notes.append(
+            "24 GB unified-memory tier: Whisper medium INT8 alongside MPS FP16 SAM2 small "
+            "with automatic CPU ONNX INT8 fallback."
+        )
+    else:
+        memory_tier = "32gb_plus"
+        use_fp16_large = bool(has_mps) and disk >= 15.0
+        whisper_model = "large-v3" if disk >= 15.0 else "medium"
+        whisper_quantization = "fp16" if use_fp16_large else "int8"
+        whisper_device = "mps" if use_fp16_large else "cpu"
+        sam2_model = "sam2.1_hiera_base_plus"
+        sam2_precision = "fp16" if has_mps else "onnx_int8"
+        sam2_device = "mps" if has_mps else "cpu"
+        max_workers = 4 if ram >= 60.0 else 3
+        recommend_proxies = False
+        est_ram_gb = 8.5 if use_fp16_large else 5.5
+        est_disk_gb = 5.4 if whisper_model == "large-v3" else 3.2
+        notes.append(
+            "32 GB+ unified-memory tier: studio Whisper large-v3 FP16 + SAM2 base+ on MPS "
+            "with automatic CPU ONNX INT8 fallback."
+        )
+
+    if not has_mps:
+        warnings.append(
+            "Apple Metal Performance Shaders (MPS) unavailable; all neural models automatically "
+            "fall back to deterministic CPU INT8 / ONNX INT8 execution."
+        )
+
+    if disk < 10.0:
+        whisper_model = "tiny"
+        whisper_quantization = "int8"
+        whisper_device = "cpu"
+        sam2_model = "mobilesam"
+        sam2_precision = "onnx_int8"
+        sam2_device = "cpu"
+        fallback_active = True
+        recommend_external_ssd = True
+        est_disk_gb = 0.45
+        warnings.append(
+            f"Low free disk space ({disk:.1f} GB < 10 GB): downgraded models to tiny/MobileSAM "
+            "INT8. Relocate BANGONPRO_MODEL_DIR and BANGONPRO_PROXY_CACHE to an external SSD."
+        )
+    elif recommend_external_ssd:
+        warnings.append(
+            f"Moderate free disk space ({disk:.1f} GB < 20 GB): consider relocating "
+            "BANGONPRO_MODEL_DIR and BANGONPRO_PROXY_CACHE to an external Thunderbolt/USB-C SSD."
+        )
+
+    return ModelQuantizationRecommendation(
+        memory_tier=memory_tier,
+        ram_gb=round(ram, 2),
+        has_mps=bool(has_mps),
+        disk_free_gb=round(disk, 2),
+        whisper_model=whisper_model,
+        whisper_quantization=whisper_quantization,
+        whisper_device=whisper_device,
+        sam2_model=sam2_model,
+        sam2_precision=sam2_precision,
+        sam2_device=sam2_device,
+        mps_fallback_device="cpu",
+        mps_fallback_precision="onnx_int8",
+        fallback_active=fallback_active,
+        max_concurrent_ai_workers=max_workers,
+        recommend_proxies=recommend_proxies,
+        recommend_external_ssd=recommend_external_ssd,
+        estimated_ram_budget_gb=est_ram_gb,
+        estimated_disk_footprint_gb=est_disk_gb,
+        warnings=warnings,
+        notes=notes,
+    )
+
