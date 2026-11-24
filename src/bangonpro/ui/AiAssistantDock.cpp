@@ -213,7 +213,7 @@ void AiAssistantDock::buildUi()
     const QVector<QuickChipSpec> chips = {
         {tr("4-Cam Sync + First Cut + Graphics"),
          QStringLiteral("Sync all four cameras, remove setup delays, build a first cut and add our standard graphics")},
-        {tr("Remove Setup Delays & Dead Air"), QStringLiteral("Remove setup delays and silence pauses while preserving natural pacing")},
+        {tr("Remove Setup Delays && Dead Air"), QStringLiteral("Remove setup delays and silence pauses while preserving natural pacing")},
         {tr("Active-Speaker Multicam Cut"), QStringLiteral("Build a multicam edit switching on active speaker with reaction shots")},
         {tr("Dialogue Polish + Captions"), QStringLiteral("Normalize dialogue loudness, clean background noise, and add captions and lower thirds")},
     };

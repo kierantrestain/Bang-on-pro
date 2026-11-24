@@ -50,9 +50,9 @@ void RotoStudioDock::buildUi()
 
     m_tabs = new QTabWidget(this);
     m_tabs->setObjectName(QStringLiteral("rotoStudioTabs"));
-    m_tabs->addTab(buildRotoTab(), QStringLiteral("Rotoscope & Mask"));
+    m_tabs->addTab(buildRotoTab(), QStringLiteral("Rotoscope && Mask"));
     m_tabs->addTab(buildCanvas2DTab(), QStringLiteral("2D Composite"));
-    m_tabs->addTab(buildStoryboardTab(), QStringLiteral("Storyboard & Plates"));
+    m_tabs->addTab(buildStoryboardTab(), QStringLiteral("Storyboard && Plates"));
     root->addWidget(m_tabs, 1);
 }
 

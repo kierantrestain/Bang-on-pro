@@ -215,6 +215,17 @@ jobs:
               tests/bangonpro/test_security_and_compliance.py \
               tests/bangonpro/test_project_integrity.py \
               tests/bangonpro/test_macos_perf.py
+            mkdir -p dist/macos-arm64/benchmarks
+            PATH="dist/macos-arm64/Bang On Pro.app/Contents/MacOS:${CRAFT_PREFIX}/bin:${PATH}" \
+            MLT_REPOSITORY="dist/macos-arm64/Bang On Pro.app/Contents/PlugIns/mlt-7" \
+            MLT_DATA="dist/macos-arm64/Bang On Pro.app/Contents/Resources/mlt-7" \
+              "${BUNDLED_PY}" -m bangonpro.macos.benchmark \
+              --comprehensive \
+              --duration 1.5 \
+              --output-dir dist/macos-arm64/benchmarks || true
+            if [[ -f dist/macos-arm64/benchmarks/benchmark_report.md ]]; then
+              cat dist/macos-arm64/benchmarks/benchmark_report.md
+            fi
           else
             python3 -m pip install --user -r requirements-bangonpro.txt PyYAML Pillow || true
             python3 -m pytest -v \
@@ -242,6 +253,10 @@ jobs:
               cat dist/macos-arm64/SHA256SUMS.txt
               echo '```'
             fi
+            echo ""
+            if [[ -f dist/macos-arm64/benchmarks/benchmark_report.md ]]; then
+              cat dist/macos-arm64/benchmarks/benchmark_report.md
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Clean up temporary signing keychain & notary key
@@ -264,6 +279,7 @@ jobs:
             dist/macos-arm64/SHA256SUMS.txt
             dist/macos-arm64/SIGNING_STATUS.txt
             dist/macos-arm64/BUILD_VERIFICATION.log
+            dist/macos-arm64/benchmarks/
           retention-days: 30
           if-no-files-found: warn
 

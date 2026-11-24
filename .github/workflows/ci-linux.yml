@@ -31,17 +31,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install MLT, FFmpeg, frei0r, Imaging & YAML tooling
+      - name: Install MLT, FFmpeg, frei0r & Xvfb tooling
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             melt \
             ffmpeg \
             frei0r-plugins \
-            xvfb \
-            python3-yaml \
-            python3-pil \
-            python3-opencv
+            xvfb
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
@@ -105,7 +102,7 @@ jobs:
       - name: Install Qt5, KF5, MLT, FFmpeg, frei0r & build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             build-essential \
             cmake \
             ninja-build \
@@ -160,9 +157,7 @@ jobs:
             frei0r-plugins \
             libavcodec-dev \
             libavformat-dev \
-            libswscale-dev \
-            python3-pil \
-            python3-opencv
+            libswscale-dev
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v5

@@ -175,6 +175,56 @@ void dockHorizontalRow(QMainWindow *mainWindow, Qt::DockWidgetArea area, const Q
     }
 }
 
+struct StudioColumnSpec {
+    QList<QDockWidget *> docks;
+    QDockWidget *preferred = nullptr;
+    int width = 360;
+};
+
+void dockTopStudioColumns(QMainWindow *mainWindow, const QList<StudioColumnSpec> &columns, QList<QDockWidget *> &visibleDocks, int &arrangedCount)
+{
+    QList<QDockWidget *> colAnchors;
+    QList<int> colWidths;
+    QDockWidget *prevAnchor = nullptr;
+
+    for (const StudioColumnSpec &col : columns) {
+        QDockWidget *anchor = nullptr;
+        for (QDockWidget *dock : col.docks) {
+            if (dock == nullptr) {
+                continue;
+            }
+            dock->setAllowedAreas(Qt::AllDockWidgetAreas);
+            mainWindow->addDockWidget(Qt::TopDockWidgetArea, dock);
+            dock->setFloating(false);
+            dock->show();
+            if (anchor == nullptr) {
+                anchor = dock;
+                if (prevAnchor != nullptr && prevAnchor != anchor) {
+                    mainWindow->splitDockWidget(prevAnchor, anchor, Qt::Horizontal);
+                }
+            } else if (dock != anchor) {
+                mainWindow->tabifyDockWidget(anchor, dock);
+            }
+            visibleDocks << dock;
+            ++arrangedCount;
+        }
+        if (anchor != nullptr) {
+            if (col.preferred != nullptr && col.docks.contains(col.preferred)) {
+                col.preferred->raise();
+            } else {
+                anchor->raise();
+            }
+            colAnchors.append(anchor);
+            colWidths.append(col.width);
+            prevAnchor = anchor;
+        }
+    }
+
+    if (!colAnchors.isEmpty()) {
+        mainWindow->resizeDocks(colAnchors, colWidths, Qt::Horizontal);
+    }
+}
+
 void hideUnusedDocks(const ResolvedDocks &all, const QList<QDockWidget *> &keepVisible)
 {
     for (QDockWidget *dock : all.allKnownDocks()) {
@@ -511,7 +561,7 @@ QDockWidget *createAiAssistantDock(QMainWindow *mainWindow, AiAssistantDock *con
     auto *dock = new QDockWidget(QCoreApplication::translate("BangOnProWorkspace", "Bang On Pro — AI Assistant"), mainWindow);
     dock->setObjectName(QString::fromLatin1(kAiAssistantDockName));
     dock->setFeatures(QDockWidget::DockWidgetClosable | QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
-    dock->setAllowedAreas(Qt::RightDockWidgetArea | Qt::LeftDockWidgetArea);
+    dock->setAllowedAreas(Qt::AllDockWidgetAreas);
 
     AiAssistantDock *widget = contentWidget != nullptr ? contentWidget : new AiAssistantDock(dock);
     dock->setWidget(widget);
@@ -607,252 +657,158 @@ bool applyWorkspace(QMainWindow *mainWindow, WorkspaceMode mode, const Workspace
 
     switch (mode) {
     case WorkspaceMode::Edit: {
-        // Premiere Pro practical editing layout:
-        // Source & Program Monitors top, Project Bin + Effects bottom-left, Timeline bottom-center.
-        // AI Assistant docked on right edge and collapsed/hidden so manual editing stays unobstructed.
-        dockHorizontalRow(mainWindow, Qt::TopDockWidgetArea, {d.effectStack, d.clipMonitor, d.projectMonitor}, arrangedCount);
-        visibleDocks << d.effectStack << d.clipMonitor << d.projectMonitor;
-
-        QDockWidget *leftAnchor = nullptr;
-        dockIntoTabbedArea(mainWindow, Qt::LeftDockWidgetArea, {d.projectBin, d.effectList, d.premiereBrowser, d.compositionList, d.undoHistory}, d.projectBin,
-                           arrangedCount, &leftAnchor);
-        visibleDocks << d.projectBin << d.effectList << d.premiereBrowser << d.compositionList << d.undoHistory;
+        // Premiere Pro / DaVinci Resolve practical editing layout:
+        // Project Bin & Effects top-left, Source Monitor top-center, Program Monitor top-right, full-width Timeline bottom.
+        // AI Assistant docked and collapsed/hidden so manual editing stays unobstructed.
+        dockTopStudioColumns(
+            mainWindow,
+            {
+                {{d.projectBin, d.effectStack, d.effectList, d.premiereBrowser, d.compositionList, d.undoHistory}, d.projectBin, 320},
+                {{d.clipMonitor}, d.clipMonitor, 520},
+                {{d.projectMonitor}, d.projectMonitor, 600},
+            },
+            visibleDocks, arrangedCount);
 
         if (d.aiAssistant != nullptr) {
+            d.aiAssistant->setAllowedAreas(Qt::AllDockWidgetAreas);
             mainWindow->addDockWidget(Qt::RightDockWidgetArea, d.aiAssistant);
             d.aiAssistant->setFloating(false);
             d.aiAssistant->hide(); // Collapsible on right edge; toggle via AI Panel pill
             ++arrangedCount;
         }
-
-        if (leftAnchor != nullptr) {
-            mainWindow->resizeDocks({leftAnchor}, {320}, Qt::Horizontal);
-        }
         break;
     }
 
     case WorkspaceMode::Multicam: {
-        // Source/Multicam + Program Monitor top, Audio Mixer + Timeline prominent, AI Assistant compact tab.
-        dockHorizontalRow(mainWindow, Qt::TopDockWidgetArea, {d.clipMonitor, d.projectMonitor}, arrangedCount);
-        visibleDocks << d.clipMonitor << d.projectMonitor;
-
-        QDockWidget *leftAnchor = nullptr;
-        dockIntoTabbedArea(mainWindow, Qt::LeftDockWidgetArea, {d.projectBin, d.effectStack}, d.projectBin, arrangedCount, &leftAnchor);
-        visibleDocks << d.projectBin << d.effectStack;
-
-        QDockWidget *rightAnchor = nullptr;
-        dockIntoTabbedArea(mainWindow, Qt::RightDockWidgetArea, {d.audioMixer, d.aiAssistant}, d.audioMixer, arrangedCount, &rightAnchor);
-        visibleDocks << d.audioMixer << d.aiAssistant;
-
-        if (leftAnchor != nullptr) {
-            mainWindow->resizeDocks({leftAnchor}, {280}, Qt::Horizontal);
-        }
-        if (rightAnchor != nullptr) {
-            mainWindow->resizeDocks({rightAnchor}, {340}, Qt::Horizontal);
-        }
+        // Project Bin left, Dual/Program Monitor center, Audio Mixer + AI Assistant right, full-width Timeline bottom.
+        dockTopStudioColumns(
+            mainWindow,
+            {
+                {{d.projectBin, d.effectStack}, d.projectBin, 260},
+                {{d.projectMonitor, d.clipMonitor}, d.projectMonitor, 640},
+                {{d.audioMixer, d.aiAssistant}, d.audioMixer != nullptr ? d.audioMixer : d.aiAssistant, 520},
+            },
+            visibleDocks, arrangedCount);
         break;
     }
 
     case WorkspaceMode::AiFirstCut: {
-        // Monitors top, AI Assistant + Transcript prominent right, Project Bin left, Timeline bottom.
-        dockHorizontalRow(mainWindow, Qt::TopDockWidgetArea, {d.clipMonitor, d.projectMonitor}, arrangedCount);
-        visibleDocks << d.clipMonitor << d.projectMonitor;
-
-        QDockWidget *leftAnchor = nullptr;
-        dockIntoTabbedArea(mainWindow, Qt::LeftDockWidgetArea, {d.projectBin, d.premiereBrowser}, d.projectBin, arrangedCount, &leftAnchor);
-        visibleDocks << d.projectBin << d.premiereBrowser;
-
-        QDockWidget *rightAnchor = nullptr;
-        if (d.aiAssistant != nullptr && d.transcriptDock != nullptr && d.aiAssistant != d.transcriptDock) {
-            mainWindow->addDockWidget(Qt::RightDockWidgetArea, d.aiAssistant);
-            d.aiAssistant->setFloating(false);
-            d.aiAssistant->show();
-            mainWindow->addDockWidget(Qt::RightDockWidgetArea, d.transcriptDock);
-            d.transcriptDock->setFloating(false);
-            d.transcriptDock->show();
-            mainWindow->splitDockWidget(d.aiAssistant, d.transcriptDock, Qt::Vertical);
-            rightAnchor = d.aiAssistant;
-            arrangedCount += 2;
-        } else {
-            dockIntoTabbedArea(mainWindow, Qt::RightDockWidgetArea, {d.aiAssistant, d.transcriptDock}, d.aiAssistant, arrangedCount, &rightAnchor);
-        }
-        visibleDocks << d.aiAssistant << d.transcriptDock;
-
-        if (leftAnchor != nullptr) {
-            mainWindow->resizeDocks({leftAnchor}, {280}, Qt::Horizontal);
-        }
-        if (rightAnchor != nullptr) {
-            mainWindow->resizeDocks({rightAnchor}, {420}, Qt::Horizontal);
-        }
+        // Project Bin left, Program/Clip Monitor center, AI Assistant & Interactive Transcript right, full-width Timeline bottom.
+        dockTopStudioColumns(
+            mainWindow,
+            {
+                {{d.projectBin, d.premiereBrowser}, d.projectBin, 260},
+                {{d.projectMonitor, d.clipMonitor}, d.projectMonitor, 560},
+                {{d.aiAssistant, d.transcriptDock}, d.aiAssistant, 600},
+            },
+            visibleDocks, arrangedCount);
         break;
     }
 
     case WorkspaceMode::Effects: {
-        // Effects + Premiere Presets Browser left, Effect Controls (Inspector) + Program Monitor top, Timeline bottom.
-        dockHorizontalRow(mainWindow, Qt::TopDockWidgetArea, {d.effectStack, d.projectMonitor}, arrangedCount);
-        visibleDocks << d.effectStack << d.projectMonitor;
-        if (d.clipMonitor != nullptr && d.projectMonitor != nullptr && d.clipMonitor != d.projectMonitor) {
-            mainWindow->addDockWidget(Qt::TopDockWidgetArea, d.clipMonitor);
-            d.clipMonitor->setFloating(false);
-            d.clipMonitor->show();
-            mainWindow->tabifyDockWidget(d.projectMonitor, d.clipMonitor);
-            d.projectMonitor->raise();
-            visibleDocks << d.clipMonitor;
-            ++arrangedCount;
-        }
-
-        QDockWidget *leftAnchor = nullptr;
-        QDockWidget *preferredLeft = d.effectList != nullptr ? d.effectList : d.premiereBrowser;
-        dockIntoTabbedArea(mainWindow, Qt::LeftDockWidgetArea, {d.effectList, d.premiereBrowser, d.compositionList, d.projectBin}, preferredLeft, arrangedCount,
-                           &leftAnchor);
-        visibleDocks << d.effectList << d.premiereBrowser << d.compositionList << d.projectBin;
-
-        if (leftAnchor != nullptr) {
-            mainWindow->resizeDocks({leftAnchor}, {340}, Qt::Horizontal);
-        }
+        // Native Effects & Bin left, Program/Clip Monitor center, Premiere Presets Browser (64+ presets) & Effect Stack right, full-width Timeline bottom.
+        QDockWidget *preferredLeft = d.effectList != nullptr ? d.effectList : d.projectBin;
+        QDockWidget *preferredRight = d.premiereBrowser != nullptr ? d.premiereBrowser : d.effectStack;
+        dockTopStudioColumns(
+            mainWindow,
+            {
+                {{d.effectList, d.compositionList, d.projectBin}, preferredLeft, 260},
+                {{d.projectMonitor, d.clipMonitor}, d.projectMonitor, 520},
+                {{d.premiereBrowser, d.effectStack}, preferredRight, 640},
+            },
+            visibleDocks, arrangedCount);
         break;
     }
 
     case WorkspaceMode::Colour: {
-        // Program Monitor + Vectorscope/RGB Parade/Waveform/Histogram Scopes top, Effect Stack/Colour tools right, Timeline bottom.
-        const QList<QDockWidget *> scopes = d.allColorScopeDocks();
-        QDockWidget *scopeAnchor = nullptr;
-        if (d.projectMonitor != nullptr) {
-            mainWindow->addDockWidget(Qt::TopDockWidgetArea, d.projectMonitor);
-            d.projectMonitor->setFloating(false);
-            d.projectMonitor->show();
-            visibleDocks << d.projectMonitor;
-            ++arrangedCount;
+        // Project Bin left, Program Monitor center, Color Scopes & Effect Stack right, full-width Timeline bottom.
+        QList<QDockWidget *> rightDocks;
+        rightDocks << d.effectStack;
+        for (QDockWidget *scope : d.allColorScopeDocks()) {
+            rightDocks << scope;
         }
-        for (QDockWidget *scope : scopes) {
-            mainWindow->addDockWidget(Qt::TopDockWidgetArea, scope);
-            scope->setFloating(false);
-            scope->show();
-            if (scopeAnchor == nullptr) {
-                scopeAnchor = scope;
-                if (d.projectMonitor != nullptr && d.projectMonitor != scopeAnchor) {
-                    mainWindow->splitDockWidget(d.projectMonitor, scopeAnchor, Qt::Horizontal);
-                }
-            } else if (scope != scopeAnchor) {
-                mainWindow->tabifyDockWidget(scopeAnchor, scope);
-            }
-            visibleDocks << scope;
-            ++arrangedCount;
-        }
-        if (scopeAnchor != nullptr) {
-            scopeAnchor->raise();
-        }
-
-        QDockWidget *rightAnchor = nullptr;
-        dockIntoTabbedArea(mainWindow, Qt::RightDockWidgetArea, {d.effectStack, d.effectList}, d.effectStack, arrangedCount, &rightAnchor);
-        visibleDocks << d.effectStack << d.effectList;
-
-        QDockWidget *leftAnchor = nullptr;
-        dockIntoTabbedArea(mainWindow, Qt::LeftDockWidgetArea, {d.projectBin, d.premiereBrowser}, d.projectBin, arrangedCount, &leftAnchor);
-        visibleDocks << d.projectBin << d.premiereBrowser;
-
-        if (rightAnchor != nullptr) {
-            mainWindow->resizeDocks({rightAnchor}, {360}, Qt::Horizontal);
-        }
+        rightDocks << d.effectList;
+        dockTopStudioColumns(
+            mainWindow,
+            {
+                {{d.projectBin, d.premiereBrowser}, d.projectBin, 260},
+                {{d.projectMonitor}, d.projectMonitor, 620},
+                {rightDocks, d.effectStack != nullptr ? d.effectStack : (!rightDocks.isEmpty() ? rightDocks.first() : nullptr), 540},
+            },
+            visibleDocks, arrangedCount);
         break;
     }
 
     case WorkspaceMode::Audio: {
-        // Audio Mixer prominent right, Effects/Audio presets left, Program Monitor top, Timeline bottom.
-        dockHorizontalRow(mainWindow, Qt::TopDockWidgetArea, {d.projectMonitor, d.effectStack}, arrangedCount);
-        visibleDocks << d.projectMonitor << d.effectStack;
-
-        QDockWidget *leftAnchor = nullptr;
+        // Effects & Audio presets left, Program Monitor center, Audio Mixer & Effect Stack right, full-width Timeline bottom.
         QDockWidget *preferredLeft = d.effectList != nullptr ? d.effectList : d.projectBin;
-        dockIntoTabbedArea(mainWindow, Qt::LeftDockWidgetArea, {d.effectList, d.premiereBrowser, d.projectBin}, preferredLeft, arrangedCount, &leftAnchor);
-        visibleDocks << d.effectList << d.premiereBrowser << d.projectBin;
-
-        QDockWidget *rightAnchor = nullptr;
-        dockIntoTabbedArea(mainWindow, Qt::RightDockWidgetArea, {d.audioMixer}, d.audioMixer, arrangedCount, &rightAnchor);
-        visibleDocks << d.audioMixer;
-
-        if (rightAnchor != nullptr) {
-            mainWindow->resizeDocks({rightAnchor}, {420}, Qt::Horizontal);
-        }
+        dockTopStudioColumns(
+            mainWindow,
+            {
+                {{d.effectList, d.premiereBrowser, d.projectBin}, preferredLeft, 260},
+                {{d.projectMonitor}, d.projectMonitor, 580},
+                {{d.audioMixer, d.effectStack}, d.audioMixer != nullptr ? d.audioMixer : d.effectStack, 580},
+            },
+            visibleDocks, arrangedCount);
         break;
     }
 
     case WorkspaceMode::Captions: {
-        // Transcript & Subtitles Editor prominent alongside Program Monitor + Timeline.
-        dockHorizontalRow(mainWindow, Qt::TopDockWidgetArea, {d.projectMonitor}, arrangedCount);
-        visibleDocks << d.projectMonitor;
-
-        QDockWidget *leftAnchor = nullptr;
-        dockIntoTabbedArea(mainWindow, Qt::LeftDockWidgetArea, {d.projectBin, d.effectStack}, d.projectBin, arrangedCount, &leftAnchor);
-        visibleDocks << d.projectBin << d.effectStack;
-
-        QDockWidget *rightAnchor = nullptr;
-        if (d.transcriptDock != nullptr && d.subtitleDock != nullptr && d.transcriptDock != d.subtitleDock) {
-            mainWindow->addDockWidget(Qt::RightDockWidgetArea, d.transcriptDock);
-            d.transcriptDock->setFloating(false);
-            d.transcriptDock->show();
-            mainWindow->addDockWidget(Qt::RightDockWidgetArea, d.subtitleDock);
-            d.subtitleDock->setFloating(false);
-            d.subtitleDock->show();
-            mainWindow->splitDockWidget(d.transcriptDock, d.subtitleDock, Qt::Vertical);
-            rightAnchor = d.transcriptDock;
-            arrangedCount += 2;
-        } else {
-            dockIntoTabbedArea(mainWindow, Qt::RightDockWidgetArea, {d.transcriptDock, d.subtitleDock, d.aiAssistant},
-                               d.transcriptDock != nullptr ? d.transcriptDock : d.subtitleDock, arrangedCount, &rightAnchor);
-        }
-        visibleDocks << d.transcriptDock << d.subtitleDock;
-        if (d.transcriptDock == nullptr && d.subtitleDock == nullptr && d.aiAssistant != nullptr) {
-            visibleDocks << d.aiAssistant;
-        }
-
-        if (rightAnchor != nullptr) {
-            mainWindow->resizeDocks({rightAnchor}, {440}, Qt::Horizontal);
-        }
+        // Project Bin left, Program Monitor center, Transcript & Subtitles right, full-width Timeline bottom.
+        QDockWidget *preferredRight = d.transcriptDock != nullptr ? d.transcriptDock : (d.subtitleDock != nullptr ? d.subtitleDock : d.aiAssistant);
+        dockTopStudioColumns(
+            mainWindow,
+            {
+                {{d.projectBin, d.effectStack}, d.projectBin, 260},
+                {{d.projectMonitor}, d.projectMonitor, 560},
+                {{d.transcriptDock, d.subtitleDock, d.aiAssistant}, preferredRight, 600},
+            },
+            visibleDocks, arrangedCount);
         break;
     }
 
     case WorkspaceMode::Export: {
-        // Program Monitor + AI QC / Export Controls + Timeline.
-        dockHorizontalRow(mainWindow, Qt::TopDockWidgetArea, {d.projectMonitor}, arrangedCount);
-        visibleDocks << d.projectMonitor;
-
-        QDockWidget *leftAnchor = nullptr;
-        dockIntoTabbedArea(mainWindow, Qt::LeftDockWidgetArea, {d.projectBin, d.undoHistory}, d.projectBin, arrangedCount, &leftAnchor);
-        visibleDocks << d.projectBin << d.undoHistory;
-
-        QDockWidget *rightAnchor = nullptr;
+        // Project Bin left, Program Monitor center, Render / AI QC right, full-width Timeline bottom.
         QDockWidget *preferredRight = d.renderDock != nullptr ? d.renderDock : d.aiAssistant;
-        dockIntoTabbedArea(mainWindow, Qt::RightDockWidgetArea, {d.renderDock, d.aiAssistant}, preferredRight, arrangedCount, &rightAnchor);
-        visibleDocks << d.renderDock << d.aiAssistant;
-
-        if (rightAnchor != nullptr) {
-            mainWindow->resizeDocks({rightAnchor}, {420}, Qt::Horizontal);
-        }
+        dockTopStudioColumns(
+            mainWindow,
+            {
+                {{d.projectBin, d.undoHistory}, d.projectBin, 260},
+                {{d.projectMonitor}, d.projectMonitor, 580},
+                {{d.renderDock, d.aiAssistant}, preferredRight, 580},
+            },
+            visibleDocks, arrangedCount);
         break;
     }
 
     case WorkspaceMode::Rotoscoping: {
-        // Roto & 2D Studio Dock prominent alongside Program Monitor + Project Bin + Timeline.
-        dockHorizontalRow(mainWindow, Qt::TopDockWidgetArea, {d.projectMonitor}, arrangedCount);
-        visibleDocks << d.projectMonitor;
-
-        QDockWidget *leftAnchor = nullptr;
-        dockIntoTabbedArea(mainWindow, Qt::LeftDockWidgetArea, {d.projectBin, d.effectList}, d.projectBin, arrangedCount, &leftAnchor);
-        visibleDocks << d.projectBin << d.effectList;
-
-        QDockWidget *rightAnchor = nullptr;
-        dockIntoTabbedArea(mainWindow, Qt::RightDockWidgetArea, {d.rotoStudio, d.effectStack}, d.rotoStudio, arrangedCount, &rightAnchor);
-        visibleDocks << d.rotoStudio << d.effectStack;
-
-        if (rightAnchor != nullptr) {
-            mainWindow->resizeDocks({rightAnchor}, {420}, Qt::Horizontal);
-        }
+        // Project Bin left, Program Monitor center, Roto & 2D Studio + Effect Stack right, full-width Timeline bottom.
+        dockTopStudioColumns(
+            mainWindow,
+            {
+                {{d.projectBin, d.effectList}, d.projectBin, 240},
+                {{d.projectMonitor, d.clipMonitor}, d.projectMonitor, 520},
+                {{d.rotoStudio, d.effectStack}, d.rotoStudio, 660},
+            },
+            visibleDocks, arrangedCount);
         break;
     }
     }
 
     hideUnusedDocks(d, visibleDocks);
+
+    // Hide any extra Kdenlive docks (e.g. Library, Speech Editor, Project Notes, Clip Properties)
+    // that are not part of the active studio workspace so layouts fit comfortably on laptop displays.
+    const QList<QDockWidget *> allMainDocks = mainWindow->findChildren<QDockWidget *>(QString(), Qt::FindDirectChildrenOnly);
+    for (QDockWidget *dock : allMainDocks) {
+        if (dock == nullptr || visibleDocks.contains(dock)) {
+            continue;
+        }
+        if (dock->objectName().contains(QStringLiteral("timeline"), Qt::CaseInsensitive)) {
+            continue;
+        }
+        dock->hide();
+    }
     return arrangedCount > 0;
 }
 
@@ -965,7 +921,9 @@ void WorkspaceSwitcherBar::buildUi()
 
     const QVector<WorkspaceMode> modes = allWorkspaceModes();
     for (const WorkspaceMode mode : modes) {
-        auto *btn = new QPushButton(workspaceModeDisplayName(mode), this);
+        QString btnLabel = workspaceModeDisplayName(mode);
+        btnLabel.replace(QLatin1Char('&'), QStringLiteral("&&"));
+        auto *btn = new QPushButton(btnLabel, this);
         btn->setObjectName(QStringLiteral("workspacePill_%1").arg(workspaceModeToId(mode)));
         btn->setCheckable(true);
         btn->setFlat(true);

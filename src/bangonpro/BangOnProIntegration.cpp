@@ -12,6 +12,7 @@
 #include "timeline_api/TimelineCommandServer.h"
 #include "ui/AiAssistantDock.h"
 #include "ui/BangOnProShortcutPresets.h"
+#include "ui/BangOnProTheme.h"
 #include "ui/BangOnProWorkspace.h"
 #include "ui/ExternalProviderConsentDialog.h"
 #include "ui/ShowProfileEditorDialog.h"
@@ -29,6 +30,7 @@
 
 #include <KActionCollection>
 #include <QAction>
+#include <QApplication>
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QDir>
@@ -334,6 +336,15 @@ void BangOnProIntegration::setupWorkspaceBar()
                 [this](bool visible) { m_workspaceBar->setAiPanelVisible(visible, false); });
     }
     m_workspaceBar->attachToMainWindow(m_mainWindow, collectWorkspaceDocks());
+
+    // Hide Kdenlive's legacy light-themed menuBar corner layout bar so Bang On Pro's unified 9-workspace bar is authoritative
+    if (m_mainWindow->menuBar()) {
+        if (QWidget *legacyCorner = m_mainWindow->menuBar()->cornerWidget(Qt::TopRightCorner)) {
+            legacyCorner->hide();
+        }
+    }
+    // Re-apply unified dark studio palette after Kdenlive ThemeManager initializes
+    applyBangOnProTheme(qApp);
 }
 
 void BangOnProIntegration::setupShortcuts()
@@ -505,8 +516,8 @@ void BangOnProIntegration::loadBuiltinStarterPresetsIfNeeded()
     }
     const QString outDir = dataDir() + QStringLiteral("/presets");
     QDir().mkpath(outDir);
-    QProcess *proc = startPython({QStringLiteral("-m"), QStringLiteral("bangonpro.premiere_compat.cli"), QStringLiteral("builtin"),
-                                  QStringLiteral("--output-dir"), outDir});
+    QProcess *proc = startPython({QStringLiteral("-m"), QStringLiteral("bangonpro.premiere_compat.cli"), QStringLiteral("builtin-library"),
+                                  QStringLiteral("--output"), report});
     if (!proc) {
         return;
     }

@@ -286,6 +286,7 @@ build_application() {
         -DUSE_DBUS=OFF
         -DRELEASE_BUILD=ON
         -DKDE_INSTALL_USE_QT_SYS_PATHS=OFF
+        -DCMAKE_DISABLE_FIND_PACKAGE_KF6DocTools=ON
     )
 
     if [[ "${SKIP_TESTS}" -eq 1 ]]; then
@@ -302,7 +303,14 @@ build_application() {
     fi
 
     cmake "${cmake_args[@]}"
-    local build_targets=(kdenlive kdenlive_render)
+    local build_targets=(kdenlive kdenlive_render mltpreview)
+    local avail_targets
+    avail_targets="$(ninja -C "${BUILD_DIR}" -t targets all 2>/dev/null || true)"
+    for extra_t in pofiles tsfiles; do
+        if printf '%s\n' "${avail_targets}" | grep -qE "^${extra_t}:"; then
+            build_targets+=("${extra_t}")
+        fi
+    done
     if [[ "${SKIP_TESTS}" -eq 0 ]]; then
         build_targets+=(
             bangonpro_test_timeline_command_engine
@@ -372,8 +380,12 @@ relocate_macho_deps() {
     : > "${queue_file}"
     : > "${seen_file}"
 
-    # Seed queue with main executables, bundled tools, frameworks, and plugins
-    find "${app_bundle}/Contents/MacOS" "${app_bundle}/Contents/Frameworks" "${app_bundle}/Contents/PlugIns" \
+    # Seed queue with main executables, bundled tools, frameworks, plugins, and QML libraries
+    local scan_roots=("${app_bundle}/Contents/MacOS" "${app_bundle}/Contents/Frameworks" "${app_bundle}/Contents/PlugIns")
+    if [[ -d "${app_bundle}/Contents/Resources/qml" ]]; then
+        scan_roots+=("${app_bundle}/Contents/Resources/qml")
+    fi
+    find "${scan_roots[@]}" \
         -type f \( -perm -111 -o -name "*.dylib" -o -name "*.so" \) 2>/dev/null | \
         while IFS= read -r candidate; do
             if file -b "${candidate}" 2>/dev/null | grep -q "Mach-O"; then
@@ -409,7 +421,7 @@ relocate_macho_deps() {
                     ensure_rpath "${target}" "@loader_path"
                     ensure_rpath "${target}" "@executable_path/../Frameworks"
                     ;;
-                "${app_bundle}/Contents/PlugIns/"*)
+                "${app_bundle}/Contents/PlugIns/"*|"${app_bundle}/Contents/Resources/qml/"*)
                     ensure_rpath "${target}" "@loader_path/../Frameworks"
                     ensure_rpath "${target}" "@loader_path/../../Frameworks"
                     ensure_rpath "${target}" "@loader_path/../../../Frameworks"
@@ -450,8 +462,8 @@ relocate_macho_deps() {
                         done
                         if [[ -n "${fw_cand}" ]]; then
                             cp -R "${fw_cand}" "${frameworks_dir}/${fw_bundle_name}"
+                            chmod -R u+w "${frameworks_dir}/${fw_bundle_name}" 2>/dev/null || true
                             if [[ -f "${frameworks_dir}/${rpath_rel}" ]]; then
-                                chmod u+w "${frameworks_dir}/${rpath_rel}" 2>/dev/null || true
                                 install_name_tool -id "@rpath/${rpath_rel}" "${frameworks_dir}/${rpath_rel}" 2>/dev/null || true
                                 printf '%s\n' "${frameworks_dir}/${rpath_rel}" >> "${next_queue}"
                             fi
@@ -863,6 +875,12 @@ sign_app_bundle() {
         fi
         warn "Developer ID signing credentials not configured; falling back to ad-hoc signing (not notarized)."
         sign_nested_macho_objects "${app_bundle}" "-" "adhoc"
+        local helper
+        for helper in kdenlive_render melt ffmpeg ffprobe; do
+            if [[ -x "${app_bundle}/Contents/MacOS/${helper}" ]]; then
+                codesign --force --sign - --entitlements "${entitlements}" "${app_bundle}/Contents/MacOS/${helper}"
+            fi
+        done
         codesign --force --deep --sign - --entitlements "${entitlements}" "${app_bundle}"
         codesign --verify --deep --strict --verbose=2 "${app_bundle}"
         SIGNING_STATE="adhoc_signed_not_notarized"

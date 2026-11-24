@@ -191,7 +191,7 @@ void PremierePresetBrowser::buildUi()
     m_overviewBrowser->setOpenExternalLinks(false);
     overviewLayout->addWidget(m_previewImageLabel);
     overviewLayout->addWidget(m_overviewBrowser, 1);
-    m_inspectorTabs->addTab(overviewTab, QStringLiteral("Overview & Preview"));
+    m_inspectorTabs->addTab(overviewTab, QStringLiteral("Overview && Preview"));
 
     const QFont monoFont = QFontDatabase::systemFont(QFontDatabase::FixedFont);
 
@@ -207,7 +207,7 @@ void PremierePresetBrowser::buildUi()
     m_applyEditedParamsBtn->setEnabled(false);
     paramsLayout->addWidget(m_paramEditorEdit, 1);
     paramsLayout->addWidget(m_applyEditedParamsBtn);
-    m_inspectorTabs->addTab(paramsTab, QStringLiteral("Parameters & Keyframes"));
+    m_inspectorTabs->addTab(paramsTab, QStringLiteral("Parameters && Keyframes"));
 
     m_kdenliveXmlEdit = new QPlainTextEdit(m_inspectorTabs);
     m_kdenliveXmlEdit->setReadOnly(true);
