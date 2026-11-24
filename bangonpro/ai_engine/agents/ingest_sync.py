@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+from collections.abc import Iterator
 from fractions import Fraction
 from pathlib import Path
 from typing import Any, Callable
@@ -24,7 +25,18 @@ from scipy.signal import butter, sosfiltfilt
 
 from bangonpro.ai_engine.commands import TimelineCommandBuilder
 from bangonpro.ai_engine.orchestrator import CancellationToken
-from bangonpro.ai_engine.state import MediaAsset, ProjectAnalysisState, SyncResult
+from bangonpro.ai_engine.state import MediaAsset, ProjectAnalysisState, SyncResult, TimeInterval
+
+_STANDARD_BROADCAST_FPS: tuple[tuple[int, int], ...] = (
+    (24000, 1001),  # 23.976
+    (24, 1),
+    (25, 1),
+    (30000, 1001),  # 29.97
+    (30, 1),
+    (50, 1),
+    (60000, 1001),  # 59.94
+    (60, 1),
+)
 
 
 def compute_file_sha256(path: str | Path, chunk_size: int = 1024 * 1024) -> str:
@@ -49,6 +61,19 @@ def verify_source_integrity(state: ProjectAnalysisState) -> dict[str, bool]:
     return results
 
 
+def normalize_fps_rational(fps_num: int, fps_den: int) -> tuple[int, int]:
+    """Snap near-standard broadcast frame rates (23.976, 24, 25, 29.97, 30, 50, 59.94, 60) to exact rationals."""
+    if fps_num <= 0 or fps_den <= 0:
+        return (25, 1)
+    fps_val = float(fps_num) / float(fps_den)
+    for std_num, std_den in _STANDARD_BROADCAST_FPS:
+        std_val = float(std_num) / float(std_den)
+        if abs(fps_val - std_val) <= 0.005:
+            return (std_num, std_den)
+    frac = Fraction(fps_num, fps_den).limit_denominator(10000)
+    return (int(frac.numerator), int(frac.denominator))
+
+
 def _parse_rational_fps(rate_str: str | None) -> tuple[int, int]:
     if not rate_str or rate_str in ("0/0", "N/A"):
         return (25, 1)
@@ -56,7 +81,7 @@ def _parse_rational_fps(rate_str: str | None) -> tuple[int, int]:
         frac = Fraction(rate_str).limit_denominator(10000)
         if frac <= 0:
             return (25, 1)
-        return (int(frac.numerator), int(frac.denominator))
+        return normalize_fps_rational(int(frac.numerator), int(frac.denominator))
     except (ValueError, ZeroDivisionError):
         return (25, 1)
 
@@ -77,7 +102,7 @@ def probe_media_file(path: str | Path) -> dict[str, Any]:
         "-show_streams",
         str(file_path),
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    proc = subprocess.run(cmd, capture_output=True, text=True, check=False, shell=False)
     if proc.returncode != 0:
         raise RuntimeError(
             f"ffprobe failed for '{file_path}' (rc={proc.returncode}): {proc.stderr.strip()}"
@@ -100,7 +125,11 @@ def probe_media_file(path: str | Path) -> dict[str, Any]:
     )
 
     duration_candidates: list[float] = []
-    for src in (fmt.get("duration"), video_stream.get("duration"), audio_stream.get("duration") if audio_stream else None):
+    for src in (
+        fmt.get("duration"),
+        video_stream.get("duration"),
+        audio_stream.get("duration") if audio_stream else None,
+    ):
         if src is not None:
             try:
                 val = float(src)
@@ -130,25 +159,34 @@ def probe_media_file(path: str | Path) -> dict[str, Any]:
     }
 
 
-def extract_mono_pcm(path: str | Path, sample_rate: int = 16000) -> np.ndarray:
-    """Extract mono float32 PCM samples from a media file via ``ffmpeg``."""
+def extract_mono_pcm_window(
+    path: str | Path,
+    *,
+    sample_rate: int = 16000,
+    start_sec: float = 0.0,
+    duration_sec: float | None = None,
+) -> np.ndarray:
+    """Extract a bounded window of mono float32 PCM samples from a media file via ``ffmpeg``."""
     file_path = Path(path).resolve()
-    cmd = [
-        "ffmpeg",
-        "-v",
-        "error",
-        "-i",
-        str(file_path),
-        "-vn",
-        "-ac",
-        "1",
-        "-ar",
-        str(int(sample_rate)),
-        "-f",
-        "f32le",
-        "pipe:1",
-    ]
-    proc = subprocess.run(cmd, capture_output=True, check=False)
+    cmd = ["ffmpeg", "-v", "error"]
+    if start_sec > 0.0:
+        cmd.extend(["-ss", f"{float(start_sec):.6f}"])
+    cmd.extend(["-i", str(file_path)])
+    if duration_sec is not None and duration_sec > 0.0:
+        cmd.extend(["-t", f"{float(duration_sec):.6f}"])
+    cmd.extend(
+        [
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            str(int(sample_rate)),
+            "-f",
+            "f32le",
+            "pipe:1",
+        ]
+    )
+    proc = subprocess.run(cmd, capture_output=True, check=False, shell=False)
     if proc.returncode != 0:
         raise RuntimeError(
             f"ffmpeg audio extraction failed for '{file_path}': "
@@ -157,8 +195,91 @@ def extract_mono_pcm(path: str | Path, sample_rate: int = 16000) -> np.ndarray:
     if not proc.stdout:
         return np.zeros(0, dtype=np.float32)
 
-    pcm = np.frombuffer(proc.stdout, dtype=np.float32).copy()
-    return pcm
+    return np.frombuffer(proc.stdout, dtype=np.float32).copy()
+
+
+def extract_mono_pcm(path: str | Path, sample_rate: int = 16000) -> np.ndarray:
+    """Extract mono float32 PCM samples from a media file via ``ffmpeg``."""
+    return extract_mono_pcm_window(path, sample_rate=sample_rate)
+
+
+def iter_mono_pcm_chunks(
+    path: str | Path,
+    *,
+    sample_rate: int = 16000,
+    chunk_duration_sec: float = 30.0,
+    start_sec: float = 0.0,
+    max_duration_sec: float | None = None,
+) -> Iterator[tuple[float, np.ndarray]]:
+    """Stream mono float32 PCM in O(1) bounded-RAM chunks of ``chunk_duration_sec`` via ``ffmpeg``."""
+    file_path = Path(path).resolve()
+    if chunk_duration_sec <= 0.0:
+        raise ValueError("chunk_duration_sec must be > 0")
+
+    chunk_samples = max(256, int(round(chunk_duration_sec * sample_rate)))
+    chunk_bytes = chunk_samples * 4  # float32 = 4 bytes/sample
+
+    cmd = ["ffmpeg", "-v", "error"]
+    if start_sec > 0.0:
+        cmd.extend(["-ss", f"{float(start_sec):.6f}"])
+    cmd.extend(["-i", str(file_path)])
+    if max_duration_sec is not None and max_duration_sec > 0.0:
+        cmd.extend(["-t", f"{float(max_duration_sec):.6f}"])
+    cmd.extend(
+        [
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            str(int(sample_rate)),
+            "-f",
+            "f32le",
+            "pipe:1",
+        ]
+    )
+
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        shell=False,
+    )
+    assert proc.stdout is not None
+    assert proc.stderr is not None
+
+    emitted_samples = 0
+    leftover = b""
+    try:
+        while True:
+            raw = proc.stdout.read(chunk_bytes)
+            if not raw:
+                break
+            buf = leftover + raw
+            usable_bytes = (len(buf) // 4) * 4
+            leftover = buf[usable_bytes:]
+            if usable_bytes == 0:
+                continue
+            chunk = np.frombuffer(buf[:usable_bytes], dtype=np.float32).copy()
+            chunk_t0 = float(start_sec) + (emitted_samples / float(sample_rate))
+            emitted_samples += int(chunk.size)
+            yield (round(chunk_t0, 6), chunk)
+    finally:
+        try:
+            proc.stdout.close()
+        except OSError:
+            pass
+        if proc.poll() is None:
+            proc.terminate()
+        try:
+            _, err_bytes = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            _, err_bytes = proc.communicate()
+        if proc.returncode not in (0, None, -15, 255) and emitted_samples == 0:
+            raise RuntimeError(
+                f"ffmpeg streaming audio extraction failed for '{file_path}': "
+                f"{err_bytes.decode('utf-8', errors='replace').strip()}"
+            )
 
 
 def _bandpass_speech(pcm: np.ndarray, sample_rate: int) -> np.ndarray:
@@ -182,8 +303,11 @@ def estimate_offset_gcc_phat(
     target_pcm: np.ndarray,
     sample_rate: int = 16000,
     max_offset_sec: float | None = 30.0,
+    sync_window_sec: float | None = 120.0,
 ) -> tuple[float, float, float]:
     """Estimate time offset of ``target_pcm`` relative to ``ref_pcm`` using GCC-PHAT.
+
+    Bounds correlation to ``sync_window_sec`` so multi-hour recordings run in O(1) RAM.
 
     Sign convention:
         Returns ``offset_sec`` such that an acoustic event occurring at ``t`` in
@@ -195,6 +319,13 @@ def estimate_offset_gcc_phat(
     """
     if ref_pcm.size < 64 or target_pcm.size < 64:
         return (0.0, 0.05, 0.0)
+
+    if sync_window_sec is not None and sync_window_sec > 0.0:
+        max_samples = max(1024, int(round(sync_window_sec * sample_rate)))
+        if ref_pcm.size > max_samples:
+            ref_pcm = ref_pcm[:max_samples]
+        if target_pcm.size > max_samples:
+            target_pcm = target_pcm[:max_samples]
 
     x = _bandpass_speech(ref_pcm, sample_rate)
     y = _bandpass_speech(target_pcm, sample_rate)
@@ -270,6 +401,105 @@ def estimate_offset_gcc_phat(
     return (round(offset_sec, 6), round(confidence, 4), round(float(snr), 3))
 
 
+def detect_recording_interruptions(
+    pcm_or_path: np.ndarray | str | Path,
+    sample_rate: int = 16000,
+    *,
+    silence_threshold_db: float = -38.0,
+    interruption_gap_sec: float = 10.0,
+    window_sec: float = 0.1,
+    chunk_duration_sec: float = 30.0,
+) -> list[dict[str, Any]]:
+    """Detect mid-recording dead-air interruptions & restart slates exceeding ``interruption_gap_sec``.
+
+    Works in O(1) RAM when passed a filesystem path (streaming via ``iter_mono_pcm_chunks``)
+    or directly on an in-memory PCM array.
+    """
+    win_samples = max(64, int(round(window_sec * sample_rate)))
+    rms_db_blocks: list[np.ndarray] = []
+    peak_db_blocks: list[np.ndarray] = []
+
+    def _accumulate_chunk(arr: np.ndarray) -> None:
+        n_wins = arr.size // win_samples
+        if n_wins <= 0:
+            return
+        shaped = arr[: n_wins * win_samples].reshape(n_wins, win_samples).astype(np.float64)
+        rms = np.sqrt(np.mean(shaped * shaped, axis=1) + 1e-18)
+        pk = np.max(np.abs(shaped), axis=1)
+        rms_db_blocks.append((20.0 * np.log10(rms + 1e-12)).astype(np.float32))
+        peak_db_blocks.append((20.0 * np.log10(pk + 1e-12)).astype(np.float32))
+
+    if isinstance(pcm_or_path, (str, Path)):
+        for _, chunk in iter_mono_pcm_chunks(
+            pcm_or_path, sample_rate=sample_rate, chunk_duration_sec=chunk_duration_sec
+        ):
+            _accumulate_chunk(chunk)
+    else:
+        _accumulate_chunk(np.asarray(pcm_or_path, dtype=np.float32))
+
+    if not rms_db_blocks:
+        return []
+
+    win_rms_db = np.concatenate(rms_db_blocks)
+    win_peak_db = np.concatenate(peak_db_blocks)
+    n_wins = win_rms_db.size
+
+    # Active dialogue requires sustained energy (>= 3 windows = 0.3s) so brief restart claps
+    # inside dead air are recognized as slates rather than breaking the interruption span!
+    raw_active = win_rms_db >= float(silence_threshold_db)
+    sustained_active = raw_active.copy()
+    idx = 0
+    while idx < n_wins:
+        if sustained_active[idx]:
+            s = idx
+            while idx < n_wins and sustained_active[idx]:
+                idx += 1
+            if (idx - s) < 3:
+                sustained_active[s:idx] = False
+        else:
+            idx += 1
+
+    # Extract sustained active runs
+    active_runs: list[tuple[int, int]] = []
+    idx = 0
+    while idx < n_wins:
+        if sustained_active[idx]:
+            s = idx
+            while idx < n_wins and sustained_active[idx]:
+                idx += 1
+            active_runs.append((s, idx))
+        else:
+            idx += 1
+
+    if len(active_runs) < 2:
+        return []
+
+    interruptions: list[dict[str, Any]] = []
+    for take_idx, (prev_run, next_run) in enumerate(zip(active_runs, active_runs[1:]), start=2):
+        gap_s = prev_run[1] * window_sec
+        gap_e = next_run[0] * window_sec
+        gap_dur = gap_e - gap_s
+        if gap_dur >= float(interruption_gap_sec):
+            # Check for brief high-crest restart slate/clap inside the dead-air gap
+            gap_rms = win_rms_db[prev_run[1] : next_run[0]]
+            gap_peak = win_peak_db[prev_run[1] : next_run[0]]
+            crest = gap_peak - gap_rms
+            slate_indices = np.where((gap_peak >= float(silence_threshold_db) + 8.0) & (crest >= 8.0))[0]
+            has_slate = bool(slate_indices.size > 0)
+            slate_sec = round(gap_s + float(slate_indices[0]) * window_sec, 4) if has_slate else None
+            interruptions.append(
+                {
+                    "take_number": take_idx,
+                    "start_sec": round(gap_s, 4),
+                    "end_sec": round(gap_e, 4),
+                    "duration_sec": round(gap_dur, 4),
+                    "has_restart_slate": has_slate,
+                    "restart_slate_sec": slate_sec,
+                }
+            )
+    return interruptions
+
+
 def run_ingest_sync_agent(
     state: ProjectAnalysisState,
     token: CancellationToken,
@@ -297,17 +527,68 @@ def run_ingest_sync_agent(
     )
 
     sample_rate = state.audio_sample_rate
+    project_fps = state.fps
+    sync_window_sec = float(state.metadata.get("sync_window_sec", 120.0))
+    long_threshold_sec = float(state.metadata.get("long_recording_threshold_sec", 300.0))
+    chunk_duration_sec = float(state.metadata.get("chunk_duration_sec", 30.0))
+    force_streaming = bool(state.metadata.get("force_streaming_audio", False))
 
-    # 1. Probe, SHA-256 hash, and extract mono PCM for every input camera
+    warnings: list[str] = []
+    missing_media: list[dict[str, Any]] = []
+    sync_pcm_by_cam: dict[str, np.ndarray] = {}
+    streaming_cams: list[str] = []
+    fps_report_cams: dict[str, dict[str, Any]] = {}
+    any_fps_conversion = False
+
+    # 1. Probe, SHA-256 hash, and extract bounded mono PCM for every input camera
     for idx, cam_id in enumerate(cam_ids):
         token.check(f"ingest media {cam_id}")
         report_progress(0.05 + 0.45 * (idx / max(1, len(cam_ids))), f"Verifying {cam_id}")
 
         raw_path = state.input_camera_files[cam_id]
-        probe = probe_media_file(raw_path)
-        sha256 = compute_file_sha256(probe["file_path"])
-        cam_meta = profile_cams.get(cam_id, {})
+        try:
+            probe = probe_media_file(raw_path)
+            sha256 = compute_file_sha256(probe["file_path"])
+        except (FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
+            miss_record = {
+                "camera_id": cam_id,
+                "file_path": str(raw_path),
+                "reason": str(exc),
+                "error_type": type(exc).__name__,
+            }
+            missing_media.append(miss_record)
+            warnings.append(
+                f"missing_media: Camera '{cam_id}' is offline or unreadable ({raw_path}): {exc}"
+            )
+            marker = state.add_review_marker(
+                timeline_sec=0.0,
+                label=f"Offline Media: {cam_id} ({Path(str(raw_path)).name})",
+                category="missing_media",
+                confidence=1.0,
+                rationale=f"Camera '{cam_id}' file missing/unreadable; continuing assembly with available cameras",
+            )
+            builder.add_operation(
+                "add_marker",
+                track_id="V1",
+                in_frame=0,
+                out_frame=0,
+                timeline_start=0,
+                params={
+                    "marker_id": marker.marker_id,
+                    "category": "missing_media",
+                    "category_index": 6,
+                    "code": "MISSING_MEDIA",
+                    "camera_id": cam_id,
+                    "file_path": str(raw_path),
+                    "frame": 0,
+                    "label": marker.label,
+                },
+                confidence=1.0,
+                rationale=marker.rationale,
+            )
+            continue
 
+        cam_meta = profile_cams.get(cam_id, {})
         media_ref = f"media_{cam_id}"
         asset = MediaAsset(
             media_ref=media_ref,
@@ -331,63 +612,135 @@ def run_ingest_sync_agent(
         )
         state.media_assets[cam_id] = asset
 
+        fps_converted = abs(asset.fps - project_fps) > 1e-3
+        if fps_converted:
+            any_fps_conversion = True
+        fps_report_cams[cam_id] = {
+            "source_fps": round(asset.fps, 6),
+            "source_fps_rational": f"{asset.fps_num}/{asset.fps_den}",
+            "sequence_fps": round(project_fps, 6),
+            "sequence_fps_rational": f"{state.fps_num}/{state.fps_den}",
+            "fps_conversion_applied": fps_converted,
+            "frame_rate_ratio": round(asset.fps / project_fps, 6),
+        }
+
+        use_streaming = force_streaming or (asset.duration_sec > long_threshold_sec)
         if asset.audio_codec is not None:
-            pcm = extract_mono_pcm(asset.file_path, sample_rate=sample_rate)
+            if use_streaming:
+                streaming_cams.append(cam_id)
+                sync_pcm = extract_mono_pcm_window(
+                    asset.file_path,
+                    sample_rate=sample_rate,
+                    start_sec=0.0,
+                    duration_sec=sync_window_sec,
+                )
+                sync_pcm_by_cam[cam_id] = sync_pcm
+                # Intentionally omit full multi-hour PCM from state.audio_pcm_cache to maintain O(1) RAM
+            else:
+                pcm = extract_mono_pcm(asset.file_path, sample_rate=sample_rate)
+                state.audio_pcm_cache[cam_id] = pcm
+                sync_pcm_by_cam[cam_id] = pcm
         else:
-            pcm = np.zeros(int(round(asset.duration_sec * sample_rate)), dtype=np.float32)
-        state.audio_pcm_cache[cam_id] = pcm
+            if not use_streaming:
+                pcm = np.zeros(int(round(asset.duration_sec * sample_rate)), dtype=np.float32)
+                state.audio_pcm_cache[cam_id] = pcm
+                sync_pcm_by_cam[cam_id] = pcm
+            else:
+                streaming_cams.append(cam_id)
+                sync_pcm_by_cam[cam_id] = np.zeros(
+                    int(round(min(asset.duration_sec, sync_window_sec) * sample_rate)),
+                    dtype=np.float32,
+                )
 
         builder.add_operation(
             "import_media",
             media_ref=media_ref,
             params={
                 "camera_id": cam_id,
+                "name": cam_id,
                 "camera_role": asset.camera_role,
                 "speaker_label": asset.speaker_label,
+                "path": asset.file_path,
+                "source_path": asset.file_path,
                 "file_path": asset.file_path,
                 "sha256": asset.sha256,
                 "duration_sec": round(asset.duration_sec, 4),
+                "duration_frames": state.sec_to_frame(asset.duration_sec),
                 "width": asset.width,
                 "height": asset.height,
                 "fps_num": asset.fps_num,
                 "fps_den": asset.fps_den,
+                "source_fps": round(asset.fps, 6),
+                "sequence_fps": round(project_fps, 6),
+                "fps_conversion_applied": fps_converted,
                 "video_codec": asset.video_codec,
                 "audio_codec": asset.audio_codec,
                 "read_only_verified": True,
             },
             confidence=1.0,
-            rationale=f"Verified source media '{cam_id}' via ffprobe and SHA-256 checksum",
+            rationale=(
+                f"Verified source media '{cam_id}' ({asset.fps:.3f} fps -> sequence {project_fps:.3f} fps) "
+                f"via ffprobe and SHA-256 checksum"
+            ),
         )
 
-    # 2. Choose reference camera (prefer 'wide' or 'desk', else first camera with audio)
+    state.missing_media = missing_media
+    available_cam_ids = [cid for cid in cam_ids if cid in state.media_assets]
+    if not available_cam_ids:
+        failed_desc = "; ".join(f"{m['camera_id']}={m['file_path']} ({m['reason']})" for m in missing_media)
+        raise FileNotFoundError(
+            f"All {len(cam_ids)} input camera media files are missing or unreadable: {failed_desc}"
+        )
+
+    state.metadata["frame_rate_report"] = {
+        "sequence_fps": round(project_fps, 6),
+        "sequence_fps_rational": f"{state.fps_num}/{state.fps_den}",
+        "fps_conversion_applied": any_fps_conversion,
+        "cameras": fps_report_cams,
+    }
+    state.metadata["streaming_audio_mode"] = bool(streaming_cams)
+    state.metadata["streaming_audio_cameras"] = streaming_cams
+    state.metadata["sync_window_sec"] = sync_window_sec
+    state.metadata["chunk_duration_sec"] = chunk_duration_sec
+
+    # 2. Choose reference camera (prefer 'wide' or 'desk', else first available camera with audio)
     ref_cam_id = next(
-        (cid for cid in cam_ids if state.media_assets[cid].camera_role in ("wide", "desk") and state.media_assets[cid].audio_codec),
-        next((cid for cid in cam_ids if state.media_assets[cid].audio_codec), cam_ids[0]),
+        (
+            cid
+            for cid in available_cam_ids
+            if state.media_assets[cid].camera_role in ("wide", "desk")
+            and state.media_assets[cid].audio_codec
+        ),
+        next(
+            (cid for cid in available_cam_ids if state.media_assets[cid].audio_codec),
+            available_cam_ids[0],
+        ),
     )
-    ref_pcm = state.audio_pcm_cache[ref_cam_id]
+    ref_pcm = sync_pcm_by_cam[ref_cam_id]
 
     offsets_sec: dict[str, float] = {ref_cam_id: 0.0}
     offsets_project_frames: dict[str, int] = {ref_cam_id: 0}
     offsets_native_frames: dict[str, int] = {ref_cam_id: 0}
     confidences: dict[str, float] = {ref_cam_id: 1.0}
     peak_snr: dict[str, float] = {ref_cam_id: 100.0}
-    warnings: list[str] = []
 
-    project_fps = state.fps
-    other_cams = [cid for cid in cam_ids if cid != ref_cam_id]
+    other_cams = [cid for cid in available_cam_ids if cid != ref_cam_id]
 
     for idx, cam_id in enumerate(other_cams):
         token.check(f"gcc-phat sync {cam_id}")
         report_progress(
-            0.55 + 0.40 * (idx / max(1, len(other_cams))),
+            0.55 + 0.35 * (idx / max(1, len(other_cams))),
             f"Syncing {cam_id} against {ref_cam_id} (GCC-PHAT)",
         )
         asset = state.media_assets[cam_id]
-        target_pcm = state.audio_pcm_cache[cam_id]
+        target_pcm = sync_pcm_by_cam[cam_id]
 
         if state.intent.sync_cameras and asset.audio_codec is not None and ref_pcm.size > 64:
             offset_sec, conf, snr = estimate_offset_gcc_phat(
-                ref_pcm, target_pcm, sample_rate=sample_rate
+                ref_pcm,
+                target_pcm,
+                sample_rate=sample_rate,
+                sync_window_sec=sync_window_sec,
             )
             if conf < 0.5:
                 warnings.append(
@@ -403,17 +756,47 @@ def run_ingest_sync_agent(
         confidences[cam_id] = conf
         peak_snr[cam_id] = snr
 
+    # 3. Scan reference camera for long mid-recording interruptions / restart slates
+    editing_rules = state.profile.get("editing_rules", {})
+    interruption_gap_sec = float(editing_rules.get("interruption_gap_sec", 10.0))
+    sil_thresh_db = float(editing_rules.get("silence_threshold_db", -36.0))
+    ref_asset = state.media_assets[ref_cam_id]
+    if ref_asset.audio_codec is not None:
+        interrupt_src: np.ndarray | str = (
+            ref_asset.file_path
+            if ref_cam_id in streaming_cams
+            else state.audio_pcm_cache.get(ref_cam_id, ref_pcm)
+        )
+        interruptions = detect_recording_interruptions(
+            interrupt_src,
+            sample_rate=sample_rate,
+            silence_threshold_db=sil_thresh_db,
+            interruption_gap_sec=interruption_gap_sec,
+            chunk_duration_sec=chunk_duration_sec,
+        )
+    else:
+        interruptions = []
+
+    state.metadata["recording_interruptions"] = interruptions
+    state.interruption_intervals = [
+        TimeInterval(
+            start_sec=float(it["start_sec"]),
+            end_sec=float(it["end_sec"]),
+            label="interruption_restart_slate" if it["has_restart_slate"] else "interruption_gap",
+            confidence=0.94,
+        )
+        for it in interruptions
+    ]
+
     # Compute common overlapping duration on master sync timeline starting at T=0
-    # At sync time T, camera c reads source time t_c = T + offsets_sec[c].
-    # Common valid window: T in [max(0, max(-offset_c)), min(duration_c - offset_c)].
     common_end_candidates = [
-        state.media_assets[cid].duration_sec - offsets_sec[cid] for cid in cam_ids
+        state.media_assets[cid].duration_sec - offsets_sec[cid] for cid in available_cam_ids
     ]
     common_duration_sec = max(0.0, min(common_end_candidates))
 
     state.sync_result = SyncResult(
         reference_camera_id=ref_cam_id,
-        method="gcc_phat_16khz",
+        method="gcc_phat_16khz_windowed" if streaming_cams else "gcc_phat_16khz",
         sample_rate=sample_rate,
         offsets_sec=offsets_sec,
         offsets_project_frames=offsets_project_frames,
@@ -430,19 +813,24 @@ def run_ingest_sync_agent(
         media_ref=state.media_assets[ref_cam_id].media_ref,
         params={
             "reference_camera_id": ref_cam_id,
-            "method": "gcc_phat_16khz",
+            "method": state.sync_result.method,
             "sample_rate": sample_rate,
+            "sync_window_sec": sync_window_sec,
             "offsets_sec": offsets_sec,
             "offsets_project_frames": offsets_project_frames,
             "offsets_native_frames": offsets_native_frames,
             "confidences": confidences,
             "peak_snr": peak_snr,
             "common_duration_sec": round(common_duration_sec, 4),
+            "missing_media": missing_media,
+            "fps_conversion_applied": any_fps_conversion,
         },
         confidence=mean_conf,
         rationale=(
-            f"Synchronised {len(cam_ids)} cameras to '{ref_cam_id}' via GCC-PHAT "
-            f"(common overlap {common_duration_sec:.2f}s)"
+            f"Synchronised {len(available_cam_ids)} available cameras to '{ref_cam_id}' via GCC-PHAT "
+            f"(common overlap {common_duration_sec:.2f}s"
+            + (f", {len(missing_media)} missing camera(s) skipped" if missing_media else "")
+            + ")"
         ),
     )
 

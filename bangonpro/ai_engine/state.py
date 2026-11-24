@@ -87,6 +87,16 @@ class TranscriptSegment:
     spectral_centroid_hz: float = 0.0
     section_label: str = "Main"
     backend: str = "deterministic_multimic_vad"
+    speaker_name: str = ""
+    is_overlap: bool = False
+    overlap_speakers: list[str] = field(default_factory=list)
+    is_filler_or_silence: bool = False
+    deleted: bool = False
+    words: list[dict[str, Any]] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not self.speaker_name:
+            self.speaker_name = self.speaker_id
 
 
 @dataclass
@@ -257,6 +267,7 @@ class ProjectAnalysisState:
         # Structured stage outputs
         self.input_camera_files: dict[str, str] = {}
         self.media_assets: dict[str, MediaAsset] = {}
+        self.missing_media: list[dict[str, Any]] = []
         self.sync_result: SyncResult | None = None
 
         # Transient in-memory PCM cache (16 kHz mono float32, excluded from JSON)
@@ -265,7 +276,9 @@ class ProjectAnalysisState:
 
         self.transcript_backend: str = "deterministic_multimic_vad"
         self.transcript_segments: list[TranscriptSegment] = []
+        self.transcript_document: dict[str, Any] | None = None
         self.silence_intervals: list[TimeInterval] = []
+        self.interruption_intervals: list[TimeInterval] = []
         self.setup_delay_sec: float = 0.0
         self.story_sections: list[StorySection] = []
 
@@ -348,10 +361,12 @@ class ProjectAnalysisState:
             "instruction": self.instruction,
             "intent": asdict(self.intent),
             "media_assets": {k: asdict(v) for k, v in self.media_assets.items()},
+            "missing_media": list(self.missing_media),
             "sync_result": asdict(self.sync_result) if self.sync_result else None,
             "transcript_backend": self.transcript_backend,
             "transcript_segments": [asdict(s) for s in self.transcript_segments],
             "silence_intervals": [asdict(i) for i in self.silence_intervals],
+            "interruption_intervals": [asdict(i) for i in self.interruption_intervals],
             "setup_delay_sec": self.setup_delay_sec,
             "story_sections": [asdict(s) for s in self.story_sections],
             "scene_cuts_sec": list(self.scene_cuts_sec),
