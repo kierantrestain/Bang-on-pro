@@ -2,6 +2,7 @@
   "schema_version": "1.0",
   "profile_id": "daily_news",
   "display_name": "Daily News Broadcast Desk",
+  "description": "Broadcast news desk and B-roll bulletin profile with crisp silence removal, anchor lower-thirds, newsroom chyron styling, and strict delivery specs.",
   "format_type": "daily_news",
   "video_spec": {
     "width": 1920,
@@ -24,21 +25,60 @@
       "priority": 1
     }
   ],
+  "camera_roles": {
+    "cam_desk": "desk",
+    "cam_broll": "broll"
+  },
+  "speaker_camera_map": {
+    "Host": "cam_desk"
+  },
+  "camera_preferences": {
+    "prefer_wide_on_overlap": true,
+    "default_opening_role": "desk",
+    "avoid_jump_cuts": true
+  },
+  "wide_shot_interval_sec": 15.0,
+  "reaction_shot_frequency": 0.35,
+  "min_shot_duration_sec": 2.0,
+  "max_shot_duration_sec": 10.0,
+  "silence_threshold_db": -34.0,
+  "loudness_target_lufs": -16.0,
+  "intro_outro_rules": {
+    "open_on_wide": false,
+    "opening_wide_sec": 0.0,
+    "close_on_wide": true,
+    "closing_wide_sec": 2.0,
+    "intro_asset": null,
+    "outro_asset": null,
+    "fade_in_sec": 0.0,
+    "fade_out_sec": 0.5
+  },
   "editing_rules": {
     "min_shot_sec": 2.0,
     "max_shot_sec": 10.0,
+    "min_shot_duration_sec": 2.0,
+    "max_shot_duration_sec": 10.0,
+    "wide_shot_interval_sec": 15.0,
+    "reaction_shot_frequency": 0.35,
     "reaction_cut_interval_sec": 6.0,
     "silence_threshold_db": -34.0,
     "min_silence_sec": 0.4,
+    "interruption_gap_sec": 8.0,
+    "excise_interruption_gaps": true,
+    "overlap_cut_to_wide": true,
     "keep_padding_sec": 0.1,
     "trim_setup_delay": true,
     "review_confidence_threshold": 0.78
   },
   "audio_rules": {
     "target_lufs": -16.0,
+    "loudness_target_lufs": -16.0,
     "true_peak_dbtp": -1.5,
+    "highpass_hz": 90.0,
     "enable_denoise": true,
     "enable_compressor": true,
+    "enable_mic_level_matching": true,
+    "max_mic_trim_db": 18.0,
     "music_duck_db": -20.0
   },
   "graphics_rules": {
@@ -46,6 +86,42 @@
     "enable_lower_thirds": true,
     "lower_third_duration_sec": 5.0,
     "brand_accent_hex": "#D90429"
+  },
+  "graphics_templates": {
+    "lower_third_template": "news_breaking_chyron",
+    "lower_third_position": "bottom_left",
+    "title_card_template": "news_headline_card",
+    "bug_position": "top_left",
+    "font_family": "DejaVu Sans",
+    "accent_hex": "#D90429"
+  },
+  "caption_style": {
+    "font_family": "DejaVu Sans",
+    "font_size_px": 46,
+    "primary_color_hex": "#FFFFFF",
+    "highlight_color_hex": "#D90429",
+    "outline_color_hex": "#0B090A",
+    "outline_width": 3.0,
+    "alignment": "bottom_center",
+    "max_chars_per_line": 44,
+    "uppercase": false,
+    "burn_in": false
+  },
+  "delivery_spec": {
+    "container": "mp4",
+    "video_codec": "libx264",
+    "audio_codec": "aac",
+    "width": 1920,
+    "height": 1080,
+    "fps_num": 25,
+    "fps_den": 1,
+    "color_space": "bt709",
+    "audio_sample_rate": 48000,
+    "audio_channels": 2,
+    "target_lufs": -16.0,
+    "true_peak_dbtp": -1.5,
+    "video_bitrate": "12M",
+    "audio_bitrate": "192k"
   },
   "export_presets": [
     {

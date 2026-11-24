@@ -170,13 +170,26 @@ DocOpenResult KdenliveDoc::Open(const QUrl &url, const QString &projectFolder, Q
     }
 
     QDomDocument domDoc {};
-    int line;
-    int col;
+    int line = 0;
+    int col = 0;
     QString domErrorMessage;
+    const QDomImplementation::InvalidDataPolicy previousInvalidDataPolicy = QDomImplementation::invalidDataPolicy();
+    struct InvalidDataPolicyGuard
+    {
+        QDomImplementation::InvalidDataPolicy policy;
+        bool active;
+        ~InvalidDataPolicyGuard()
+        {
+            if (active) {
+                QDomImplementation::setInvalidDataPolicy(policy);
+            }
+        }
+    } invalidDataPolicyGuard{previousInvalidDataPolicy, false};
     if (recoverCorruption) {
         // this seems to also drop valid non-BMP Unicode characters, so only do
         // it if the file is unreadable otherwise
         QDomImplementation::setInvalidDataPolicy(QDomImplementation::DropInvalidChars);
+        invalidDataPolicyGuard.active = true;
         result.setModified(true);
     }
     bool success = domDoc.setContent(&file, false, &domErrorMessage, &line, &col);
@@ -184,18 +197,37 @@ DocOpenResult KdenliveDoc::Open(const QUrl &url, const QString &projectFolder, Q
     if (!success) {
         if (recoverCorruption) {
             // Try to recover broken file produced by Kdenlive 0.9.4
+            if (!file.seek(0)) {
+                result.setError(i18n("Could not rewind file %1 for corruption recovery.", url.toLocalFile()));
+                return result;
+            }
             int correction = 0;
             QString playlist = QString::fromUtf8(file.readAll());
-            while (!success && correction < 2) {
-                int errorPos = 0;
-                line--;
-                col = col - 2;
-                for (int k = 0; k < line && errorPos < playlist.length(); ++k) {
-                    errorPos = playlist.indexOf(QLatin1Char('\n'), errorPos);
-                    errorPos++;
+            while (!success && correction < 2 && !playlist.isEmpty()) {
+                if (line < 1 || col < 1) {
+                    break;
                 }
-                errorPos += col;
-                if (errorPos >= playlist.length()) {
+                int errorPos = 0;
+                const int targetLine = line - 1;
+                const int colOffset = col - 2;
+                bool lineFound = true;
+                for (int k = 0; k < targetLine; ++k) {
+                    const int nlPos = playlist.indexOf(QLatin1Char('\n'), errorPos);
+                    if (nlPos < 0) {
+                        lineFound = false;
+                        break;
+                    }
+                    errorPos = nlPos + 1;
+                    if (errorPos >= playlist.length()) {
+                        lineFound = false;
+                        break;
+                    }
+                }
+                if (!lineFound) {
+                    break;
+                }
+                errorPos += colOffset;
+                if (errorPos < 0 || errorPos >= playlist.length()) {
                     break;
                 }
                 playlist.remove(errorPos, 1);
@@ -383,7 +415,26 @@ void KdenliveDoc::initializeProperties(bool newDocument, std::pair<int, int> tra
 
 const QStringList KdenliveDoc::guidesCategories()
 {
-    QStringList categories = getGuideModel(activeUuid)->guideCategoriesToStringList(m_documentProperties.value(QStringLiteral("guidesCategories")));
+    auto guideModel = getGuideModel(activeUuid);
+    if (!guideModel) {
+        QMapIterator<QUuid, std::shared_ptr<TimelineItemModel>> it(m_timelines);
+        while (it.hasNext()) {
+            it.next();
+            if (it.value() && it.value()->getGuideModel()) {
+                guideModel = it.value()->getGuideModel();
+                break;
+            }
+        }
+    }
+    if (!guideModel) {
+        qCWarning(KDENLIVE_LOG) << "guidesCategories: no guide model available for active sequence" << activeUuid;
+        const QStringList defaultCategories = getDefaultGuideCategories();
+        if (m_documentProperties.value(QStringLiteral("guidesCategories")).isEmpty()) {
+            m_documentProperties[QStringLiteral("guidesCategories")] = MarkerListModel::categoriesListToJSon(defaultCategories);
+        }
+        return defaultCategories;
+    }
+    QStringList categories = guideModel->guideCategoriesToStringList(m_documentProperties.value(QStringLiteral("guidesCategories")));
     if (categories.isEmpty()) {
         const QStringList defaultCategories = getDefaultGuideCategories();
         m_documentProperties[QStringLiteral("guidesCategories")] = MarkerListModel::categoriesListToJSon(defaultCategories);
@@ -394,8 +445,13 @@ const QStringList KdenliveDoc::guidesCategories()
 
 void KdenliveDoc::updateGuideCategories(const QStringList &categories, const QMap<int, int> remapCategories)
 {
+    auto guideModel = getGuideModel(activeUuid);
+    if (!guideModel) {
+        qCWarning(KDENLIVE_LOG) << "updateGuideCategories: missing guide model for active sequence" << activeUuid;
+        return;
+    }
     const QStringList currentCategories =
-        getGuideModel(activeUuid)->guideCategoriesToStringList(m_documentProperties.value(QStringLiteral("guidesCategories")));
+        guideModel->guideCategoriesToStringList(m_documentProperties.value(QStringLiteral("guidesCategories")));
     // Check if a guide category was removed
     QList<int> currentIndexes;
     QList<int> updatedIndexes;
@@ -412,12 +468,17 @@ void KdenliveDoc::updateGuideCategories(const QStringList &categories, const QMa
         // A marker category was removed, delete all Bin clip markers using it
         pCore->bin()->removeMarkerCategories(currentIndexes, remapCategories);
     }
-    getGuideModel(activeUuid)->loadCategoriesWithUndo(categories, currentCategories, remapCategories);
+    guideModel->loadCategoriesWithUndo(categories, currentCategories, remapCategories);
 }
 
 void KdenliveDoc::saveGuideCategories()
 {
-    const QString categories = getGuideModel(activeUuid)->categoriesToJSon();
+    auto guideModel = getGuideModel(activeUuid);
+    if (!guideModel) {
+        qCWarning(KDENLIVE_LOG) << "saveGuideCategories: missing guide model for active sequence" << activeUuid;
+        return;
+    }
+    const QString categories = guideModel->categoriesToJSon();
     m_documentProperties[QStringLiteral("guidesCategories")] = categories;
 }
 
@@ -742,15 +803,33 @@ bool KdenliveDoc::saveSceneList(const QString &path, const QString &scene, bool 
             message = i18n("Your project file was modified by Kdenlive.\nTo make sure you do not lose data, a backup copy called %1 was created.", backupFile);
         }
 
-        KIO::FileCopyJob *copyjob = KIO::file_copy(QUrl::fromLocalFile(path), QUrl::fromLocalFile(backupFile));
-        if (copyjob->exec()) {
-            KMessageBox::information(QApplication::activeWindow(), message);
-            m_documentOpenStatus = CleanProject;
+        if (QFile::exists(path)) {
+            bool backupCreated = false;
+            KIO::FileCopyJob *copyjob = KIO::file_copy(QUrl::fromLocalFile(path), QUrl::fromLocalFile(backupFile));
+            if (copyjob && copyjob->exec()) {
+                backupCreated = QFile::exists(backupFile);
+            }
+            if (!backupCreated) {
+                qCWarning(KDENLIVE_LOG) << "KIO::file_copy failed for upgrade/modified backup, falling back to QFile::copy:" << path << "->" << backupFile;
+                if (QFile::exists(backupFile)) {
+                    QFile::remove(backupFile);
+                }
+                backupCreated = QFile::copy(path, backupFile);
+            }
+            if (backupCreated) {
+                KMessageBox::information(QApplication::activeWindow(), message);
+                m_documentOpenStatus = CleanProject;
+            } else {
+                qCWarning(KDENLIVE_LOG) << "Failed to create backup copy before saving upgraded/modified project; aborting save:" << backupFile;
+                KMessageBox::error(
+                    QApplication::activeWindow(),
+                    i18n("Your project file was upgraded or modified, but it was not possible to create the backup copy %1.\n"
+                         "Saving has been aborted to avoid overwriting the original project file.",
+                         backupFile));
+                return false;
+            }
         } else {
-            KMessageBox::information(
-                QApplication::activeWindow(),
-                i18n("Your project file was upgraded to the latest Kdenlive document version, but it was not possible to create the backup copy %1.",
-                     backupFile));
+            m_documentOpenStatus = CleanProject;
         }
     }
     QSaveFile file(path);
@@ -965,13 +1044,18 @@ QStringList KdenliveDoc::getAllSubtitlesPath(bool final)
     QMapIterator<QUuid, std::shared_ptr<TimelineItemModel>> j(m_timelines);
     while (j.hasNext()) {
         j.next();
-        if (j.value()->hasSubtitleModel()) {
-            QMap<std::pair<int, QString>, QString> allSubFiles = j.value()->getSubtitleModel()->getSubtitlesList();
-            QMapIterator<std::pair<int, QString>, QString> k(allSubFiles);
-            while (k.hasNext()) {
-                k.next();
-                result << subTitlePath(j.value()->uuid(), k.key().first, final);
-            }
+        if (!j.value() || !j.value()->hasSubtitleModel()) {
+            continue;
+        }
+        auto subModel = j.value()->getSubtitleModel();
+        if (!subModel) {
+            continue;
+        }
+        QMap<std::pair<int, QString>, QString> allSubFiles = subModel->getSubtitlesList();
+        QMapIterator<std::pair<int, QString>, QString> k(allSubFiles);
+        while (k.hasNext()) {
+            k.next();
+            result << subTitlePath(j.value()->uuid(), k.key().first, final);
         }
     }
     return result;
@@ -995,24 +1079,29 @@ void KdenliveDoc::updateWorkFilesBeforeSave(const QString &newUrl, bool onRender
     bool checkOverwrite = QUrl::fromLocalFile(newUrl) != m_url;
     while (j.hasNext()) {
         j.next();
-        if (j.value()->hasSubtitleModel()) {
-            // Calculate the new path for each subtitle in this timeline
-            QString basePath = newUrl;
-            if (j.value()->uuid() != m_uuid) {
-                basePath.append(j.value()->uuid().toString());
+        if (!j.value() || !j.value()->hasSubtitleModel()) {
+            continue;
+        }
+        auto subModel = j.value()->getSubtitleModel();
+        if (!subModel) {
+            continue;
+        }
+        // Calculate the new path for each subtitle in this timeline
+        QString basePath = newUrl;
+        if (j.value()->uuid() != m_uuid) {
+            basePath.append(j.value()->uuid().toString());
+        }
+        QMap<std::pair<int, QString>, QString> allSubs = subModel->getSubtitlesList();
+        QMapIterator<std::pair<int, QString>, QString> i(allSubs);
+        while (i.hasNext()) {
+            i.next();
+            QString finalName = basePath;
+            if (i.key().first > 0) {
+                finalName.append(QStringLiteral("-%1").arg(i.key().first));
             }
-            QMap<std::pair<int, QString>, QString> allSubs = j.value()->getSubtitleModel()->getSubtitlesList();
-            QMapIterator<std::pair<int, QString>, QString> i(allSubs);
-            while (i.hasNext()) {
-                i.next();
-                QString finalName = basePath;
-                if (i.key().first > 0) {
-                    finalName.append(QStringLiteral("-%1").arg(i.key().first));
-                }
-                QFileInfo info(finalName);
-                QString subPath = info.dir().absoluteFilePath(QString("%1.srt").arg(info.fileName()));
-                j.value()->getSubtitleModel()->copySubtitle(subPath, i.key().first, checkOverwrite, true);
-            }
+            QFileInfo info(finalName);
+            QString subPath = info.dir().absoluteFilePath(QString("%1.srt").arg(info.fileName()));
+            subModel->copySubtitle(subPath, i.key().first, checkOverwrite, true);
         }
     }
     QDir sequenceFolder;
@@ -1036,10 +1125,15 @@ void KdenliveDoc::updateWorkFilesAfterSave()
     QMapIterator<QUuid, std::shared_ptr<TimelineItemModel>> j(m_timelines);
     while (j.hasNext()) {
         j.next();
-        if (j.value()->hasSubtitleModel()) {
-            int ix = getSequenceProperty(j.value()->uuid(), QStringLiteral("kdenlive:activeSubtitleIndex"), QStringLiteral("0")).toInt();
-            j.value()->getSubtitleModel()->restoreTmpFile(ix);
+        if (!j.value() || !j.value()->hasSubtitleModel()) {
+            continue;
         }
+        auto subModel = j.value()->getSubtitleModel();
+        if (!subModel) {
+            continue;
+        }
+        int ix = getSequenceProperty(j.value()->uuid(), QStringLiteral("kdenlive:activeSubtitleIndex"), QStringLiteral("0")).toInt();
+        subModel->restoreTmpFile(ix);
     }
 
     bool ok;
@@ -1209,6 +1303,10 @@ bool KdenliveDoc::hasDocumentProperty(const QString &name) const
 
 void KdenliveDoc::setSequenceProperty(const QUuid &uuid, const QString &name, const QString &value)
 {
+    if (uuid.isNull()) {
+        qCWarning(KDENLIVE_LOG) << "setSequenceProperty ignored for null sequence UUID, property:" << name;
+        return;
+    }
     if (m_sequenceProperties.contains(uuid)) {
         if (value.isEmpty()) {
             m_sequenceProperties[uuid].remove(name);
@@ -1229,6 +1327,9 @@ void KdenliveDoc::setSequenceProperty(const QUuid &uuid, const QString &name, in
 
 const QString KdenliveDoc::getSequenceProperty(const QUuid &uuid, const QString &name, const QString defaultValue) const
 {
+    if (uuid.isNull()) {
+        return defaultValue;
+    }
     if (m_sequenceProperties.contains(uuid)) {
         const QMap<QString, QString> sequenceMap = m_sequenceProperties.value(uuid);
         const QString result = sequenceMap.value(name, defaultValue);
@@ -1243,13 +1344,18 @@ const QStringList KdenliveDoc::getSequenceNames() const
     QStringList sequenceNames;
     while (m.hasNext()) {
         m.next();
-        sequenceNames << QString(m.value()->tractor()->get("kdenlive:clipname"));
+        if (m.value() && m.value()->tractor()) {
+            sequenceNames << QString(m.value()->tractor()->get("kdenlive:clipname"));
+        }
     }
     return sequenceNames;
 }
 
 bool KdenliveDoc::hasSequenceProperty(const QUuid &uuid, const QString &name) const
 {
+    if (uuid.isNull()) {
+        return false;
+    }
     if (m_sequenceProperties.contains(uuid)) {
         if (m_sequenceProperties.value(uuid).contains(name)) {
             return true;
@@ -1260,6 +1366,9 @@ bool KdenliveDoc::hasSequenceProperty(const QUuid &uuid, const QString &name) co
 
 void KdenliveDoc::clearSequenceProperty(const QUuid &uuid, const QString &name)
 {
+    if (uuid.isNull()) {
+        return;
+    }
     if (m_sequenceProperties.contains(uuid)) {
         m_sequenceProperties[uuid].remove(name);
     }
@@ -1267,6 +1376,9 @@ void KdenliveDoc::clearSequenceProperty(const QUuid &uuid, const QString &name)
 
 const QMap<QString, QString> KdenliveDoc::getSequenceProperties(const QUuid &uuid) const
 {
+    if (uuid.isNull()) {
+        return QMap<QString, QString>();
+    }
     if (m_sequenceProperties.contains(uuid)) {
         QMap<QString, QString> seqProps = m_sequenceProperties.value(uuid);
         if (pCore->window()) {
@@ -1419,6 +1531,9 @@ void KdenliveDoc::backupLastSavedVersion(const QString &path)
     }
     QFile file(path);
     QDir backupFolder(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + QStringLiteral("/.backup"));
+    if (!backupFolder.exists()) {
+        backupFolder.mkpath(QStringLiteral("."));
+    }
     QString fileName = QUrl::fromLocalFile(path).fileName().section(QLatin1Char('.'), 0, -2);
     QFileInfo info(file);
     fileName.append(QLatin1Char('-') + m_documentProperties.value(QStringLiteral("documentid")));
@@ -1725,8 +1840,11 @@ QMap<QString, QString> KdenliveDoc::documentProperties(bool saveHash)
     QMapIterator<QUuid, std::shared_ptr<TimelineItemModel>> j(m_timelines);
     while (j.hasNext()) {
         j.next();
+        if (!j.value()) {
+            continue;
+        }
         j.value()->passSequenceProperties(getSequenceProperties(j.key()));
-        if (saveHash) {
+        if (saveHash && j.value()->tractor()) {
             j.value()->tractor()->set("kdenlive:sequenceproperties.timelineHash", j.value()->timelineHash().toHex().constData());
         }
     }
@@ -1735,9 +1853,18 @@ QMap<QString, QString> KdenliveDoc::documentProperties(bool saveHash)
 
 void KdenliveDoc::loadDocumentGuides(const QUuid &uuid, std::shared_ptr<TimelineItemModel> model)
 {
+    if (uuid.isNull() || !model) {
+        qCWarning(KDENLIVE_LOG) << "Cannot load document guides for invalid sequence UUID or null timeline:" << uuid;
+        return;
+    }
+    auto guideModel = model->getGuideModel();
+    if (!guideModel) {
+        qCWarning(KDENLIVE_LOG) << "Timeline has no guide model for sequence:" << uuid;
+        return;
+    }
     const QString guides = getSequenceProperty(uuid, QStringLiteral("guides"));
     if (!guides.isEmpty()) {
-        model->getGuideModel()->importFromJson(guides, true, false);
+        guideModel->importFromJson(guides, true, false);
         clearSequenceProperty(uuid, QStringLiteral("guides"));
     }
 }
@@ -2213,12 +2340,14 @@ QStringList KdenliveDoc::getProxyHashList()
 
 std::shared_ptr<TimelineItemModel> KdenliveDoc::getTimeline(const QUuid &uuid, bool allowEmpty)
 {
-    if (m_timelines.contains(uuid)) {
-        return m_timelines.value(uuid);
+    if (!uuid.isNull()) {
+        auto it = m_timelines.constFind(uuid);
+        if (it != m_timelines.constEnd()) {
+            return it.value();
+        }
     }
     if (!allowEmpty) {
-        qDebug() << "REQUESTING UNKNOWN TIMELINE: " << uuid;
-        Q_ASSERT(false);
+        qCWarning(KDENLIVE_LOG) << "REQUESTING UNKNOWN TIMELINE:" << uuid;
     }
     return nullptr;
 }
@@ -2234,13 +2363,22 @@ QStringList KdenliveDoc::getTimelinesIds()
     QMapIterator<QUuid, std::shared_ptr<TimelineItemModel>> j(m_timelines);
     while (j.hasNext()) {
         j.next();
-        ids << QString(j.value()->tractor()->get("id"));
+        if (j.value() && j.value()->tractor()) {
+            const char *id = j.value()->tractor()->get("id");
+            if (id) {
+                ids << QString::fromUtf8(id);
+            }
+        }
     }
     return ids;
 }
 
 void KdenliveDoc::addTimeline(const QUuid &uuid, std::shared_ptr<TimelineItemModel> model, bool force)
 {
+    if (uuid.isNull() || !model) {
+        qCWarning(KDENLIVE_LOG) << "Refusing to add timeline with invalid UUID or null model:" << uuid;
+        return;
+    }
     if (force && m_timelines.find(uuid) != m_timelines.end()) {
         std::shared_ptr<TimelineItemModel> previousModel = m_timelines.take(uuid);
         previousModel.reset();
@@ -2248,8 +2386,7 @@ void KdenliveDoc::addTimeline(const QUuid &uuid, std::shared_ptr<TimelineItemMod
     if (m_timelines.find(uuid) != m_timelines.end()) {
         qDebug() << "::::: TIMELINE " << uuid << " already inserted in project";
         if (m_timelines.value(uuid) != model) {
-            qDebug() << "::::: TIMELINE INCONSISTENCY";
-            Q_ASSERT(false);
+            qCWarning(KDENLIVE_LOG) << "TIMELINE INCONSISTENCY: timeline UUID already registered with different model:" << uuid;
         }
         return;
     }
@@ -2268,7 +2405,7 @@ bool KdenliveDoc::checkConsistency()
     QMapIterator<QUuid, std::shared_ptr<TimelineItemModel>> j(m_timelines);
     while (j.hasNext()) {
         j.next();
-        if (!j.value()->checkConsistency()) {
+        if (!j.value() || !j.value()->checkConsistency()) {
             return false;
         }
     }
@@ -2277,8 +2414,12 @@ bool KdenliveDoc::checkConsistency()
 
 void KdenliveDoc::loadSequenceGroupsAndGuides(const QUuid &uuid)
 {
-    Q_ASSERT(m_timelines.find(uuid) != m_timelines.end());
-    std::shared_ptr<TimelineItemModel> model = m_timelines.value(uuid);
+    auto it = m_timelines.find(uuid);
+    if (uuid.isNull() || it == m_timelines.end() || !it.value()) {
+        qCWarning(KDENLIVE_LOG) << "Cannot load sequence groups and guides for unknown sequence UUID:" << uuid;
+        return;
+    }
+    std::shared_ptr<TimelineItemModel> model = it.value();
     // Load groups
     const QString groupsData = getSequenceProperty(uuid, QStringLiteral("groups"));
     if (!groupsData.isEmpty()) {
@@ -2286,28 +2427,41 @@ void KdenliveDoc::loadSequenceGroupsAndGuides(const QUuid &uuid)
         clearSequenceProperty(uuid, QStringLiteral("groups"));
     }
     // Load guides
-    model->getGuideModel()->loadCategories(guidesCategories(), false);
+    if (auto guideModel = model->getGuideModel()) {
+        guideModel->loadCategories(guidesCategories(), false);
+    }
     model->updateFieldOrderFilter(pCore->getCurrentProfile());
     loadDocumentGuides(uuid, model);
 }
 
 void KdenliveDoc::closeTimeline(const QUuid uuid, bool onDeletion)
 {
-    Q_ASSERT(m_timelines.find(uuid) != m_timelines.end());
+    auto it = m_timelines.find(uuid);
+    if (uuid.isNull() || it == m_timelines.end()) {
+        qCWarning(KDENLIVE_LOG) << "Cannot close unknown timeline UUID:" << uuid;
+        return;
+    }
     // Sync all sequence properties
     if (onDeletion) {
         // Clear all sequence properties
         m_sequenceProperties.remove(uuid);
         auto model = m_timelines.take(uuid);
-        model->prepareClose(!closing);
-        model.reset();
-    } else {
-        auto model = m_timelines.value(uuid);
-        if (!closing) {
-            setSequenceProperty(uuid, QStringLiteral("groups"), model->groupsData());
-            model->passSequenceProperties(getSequenceProperties(uuid));
+        if (model) {
+            model->prepareClose(!closing);
+            model.reset();
         }
-        model->isClosed = true;
+        if (activeUuid == uuid) {
+            activeUuid = m_timelines.isEmpty() ? QUuid() : m_timelines.firstKey();
+        }
+    } else {
+        auto model = it.value();
+        if (model) {
+            if (!closing) {
+                setSequenceProperty(uuid, QStringLiteral("groups"), model->groupsData());
+                model->passSequenceProperties(getSequenceProperties(uuid));
+            }
+            model->isClosed = true;
+        }
         // Clear all sequence properties
         m_sequenceProperties.remove(uuid);
     }
@@ -2315,27 +2469,43 @@ void KdenliveDoc::closeTimeline(const QUuid uuid, bool onDeletion)
 
 void KdenliveDoc::storeGroups(const QUuid &uuid)
 {
-    Q_ASSERT(m_timelines.find(uuid) != m_timelines.end());
-    setSequenceProperty(uuid, QStringLiteral("groups"), m_timelines.value(uuid)->groupsData());
-    m_timelines.value(uuid)->passSequenceProperties(getSequenceProperties(uuid));
+    auto it = m_timelines.find(uuid);
+    if (uuid.isNull() || it == m_timelines.end() || !it.value()) {
+        qCWarning(KDENLIVE_LOG) << "Cannot store groups for unknown sequence UUID:" << uuid;
+        return;
+    }
+    setSequenceProperty(uuid, QStringLiteral("groups"), it.value()->groupsData());
+    it.value()->passSequenceProperties(getSequenceProperties(uuid));
 }
 
 void KdenliveDoc::checkUsage(const QUuid &uuid)
 {
-    Q_ASSERT(m_timelines.find(uuid) != m_timelines.end());
-    qDebug() << "===== CHECKING USAGE FOR: " << uuid << " = " << m_timelines.value(uuid).use_count();
+    auto it = m_timelines.find(uuid);
+    if (uuid.isNull() || it == m_timelines.end()) {
+        qCWarning(KDENLIVE_LOG) << "Cannot check usage for unknown sequence UUID:" << uuid;
+        return;
+    }
+    qDebug() << "===== CHECKING USAGE FOR: " << uuid << " = " << it.value().use_count();
 }
 
 std::shared_ptr<MarkerSortModel> KdenliveDoc::getFilteredGuideModel(const QUuid uuid)
 {
-    Q_ASSERT(m_timelines.find(uuid) != m_timelines.end());
-    return m_timelines.value(uuid)->getFilteredGuideModel();
+    auto it = m_timelines.find(uuid);
+    if (uuid.isNull() || it == m_timelines.end() || !it.value()) {
+        qCWarning(KDENLIVE_LOG) << "Cannot get filtered guide model for unknown sequence UUID:" << uuid;
+        return nullptr;
+    }
+    return it.value()->getFilteredGuideModel();
 }
 
 std::shared_ptr<MarkerListModel> KdenliveDoc::getGuideModel(const QUuid uuid) const
 {
-    Q_ASSERT(m_timelines.find(uuid) != m_timelines.end());
-    return m_timelines.value(uuid)->getGuideModel();
+    auto it = m_timelines.constFind(uuid);
+    if (uuid.isNull() || it == m_timelines.constEnd() || !it.value()) {
+        qCWarning(KDENLIVE_LOG) << "Cannot get guide model for unknown sequence UUID:" << uuid;
+        return nullptr;
+    }
+    return it.value()->getGuideModel();
 }
 
 int KdenliveDoc::openedTimelineCount() const
@@ -2432,12 +2602,16 @@ const QString KdenliveDoc::subTitlePath(const QUuid &uuid, int ix, bool final)
 
 void KdenliveDoc::duplicateSequenceProperty(const QUuid &destUuid, const QUuid &srcUuid, const QString &subsData)
 {
+    if (destUuid.isNull()) {
+        qCWarning(KDENLIVE_LOG) << "Cannot duplicate sequence subtitle properties for null destination UUID";
+        return;
+    }
     QJsonArray list;
     QMap<std::pair<int, QString>, QString> currentSubs = JSonToSubtitleList(subsData);
     QMapIterator<std::pair<int, QString>, QString> s(currentSubs);
     while (s.hasNext()) {
         s.next();
-        const QString newSubPath = pCore->currentDoc()->subTitlePath(destUuid, s.key().first, false);
+        const QString newSubPath = subTitlePath(destUuid, s.key().first, false);
         QJsonObject currentSubtitle;
         currentSubtitle.insert(QLatin1String("name"), QJsonValue(s.key().second));
         currentSubtitle.insert(QLatin1String("id"), QJsonValue(s.key().first));
@@ -2447,8 +2621,8 @@ void KdenliveDoc::duplicateSequenceProperty(const QUuid &destUuid, const QUuid &
             srcSub.prepend(m_documentRoot);
         }
         QFile src(srcSub);
-        if (!src.exists()) {
-            srcSub = pCore->currentDoc()->subTitlePath(srcUuid, s.key().first, true);
+        if (!src.exists() && !srcUuid.isNull()) {
+            srcSub = subTitlePath(srcUuid, s.key().first, true);
             if (QFileInfo(srcSub).isRelative()) {
                 srcSub.prepend(m_documentRoot);
             }
@@ -2507,7 +2681,7 @@ bool KdenliveDoc::hasSubtitles() const
     QMapIterator<QUuid, std::shared_ptr<TimelineItemModel>> j(m_timelines);
     while (j.hasNext()) {
         j.next();
-        if (j.value()->hasSubtitleModel()) {
+        if (j.value() && j.value()->hasSubtitleModel()) {
             return true;
         }
     }
@@ -2516,8 +2690,14 @@ bool KdenliveDoc::hasSubtitles() const
 
 void KdenliveDoc::generateRenderSubtitleFile(const QUuid &uuid, int in, int out, const QString &subtitleFile)
 {
-    if (m_timelines.contains(uuid)) {
-        m_timelines.value(uuid)->getSubtitleModel()->subtitleFileFromZone(in, out, subtitleFile);
+    if (uuid.isNull()) {
+        return;
+    }
+    auto it = m_timelines.constFind(uuid);
+    if (it != m_timelines.constEnd() && it.value() && it.value()->hasSubtitleModel()) {
+        if (auto subModel = it.value()->getSubtitleModel()) {
+            subModel->subtitleFileFromZone(in, out, subtitleFile);
+        }
     }
 }
 
@@ -2715,9 +2895,18 @@ const QUuid KdenliveDoc::uuid() const
 
 void KdenliveDoc::loadSequenceProperties(const QUuid &uuid, Mlt::Properties sequenceProps)
 {
+    if (uuid.isNull()) {
+        qCWarning(KDENLIVE_LOG) << "Cannot load sequence properties for null UUID";
+        return;
+    }
     QMap<QString, QString> sequenceProperties = m_sequenceProperties.take(uuid);
     for (int i = 0; i < sequenceProps.count(); i++) {
-        sequenceProperties.insert(qstrdup(sequenceProps.get_name(i)), qstrdup(sequenceProps.get(i)));
+        const char *propName = sequenceProps.get_name(i);
+        if (!propName) {
+            continue;
+        }
+        const char *propValue = sequenceProps.get(i);
+        sequenceProperties.insert(QString::fromUtf8(propName), propValue ? QString::fromUtf8(propValue) : QString());
     }
     m_sequenceProperties.insert(uuid, sequenceProperties);
 }

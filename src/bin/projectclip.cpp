@@ -1292,7 +1292,7 @@ std::pair<std::shared_ptr<Mlt::Producer>, bool> ProjectClip::giveMasterAndGetTim
             if (parentChain.link_count() > 0) {
                 for (int i = 0; i < parentChain.link_count(); i++) {
                     std::unique_ptr<Mlt::Link> link(parentChain.link(i));
-                    if (strcmp(link->get("mlt_service"), "timeremap") == 0) {
+                    if (qstrcmp(link->get("mlt_service"), "timeremap") == 0) {
                         if (!link->property_exists("time_map")) {
                             link->set("time_map", link->get("map"));
                         }

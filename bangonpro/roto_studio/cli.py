@@ -8,18 +8,19 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections.abc import Sequence
 from dataclasses import asdict
 from pathlib import Path
-from typing import Sequence
+from typing import Any
 
 import numpy as np
 from PIL import Image
 
 from .artcraft_bridge import (
     ARTCRAFT_ATTRIBUTION_NOTICE,
-    ArtCraftLayer,
     Canvas2DComposer,
     StoryboardEngine,
+    get_artcraft_provenance,
     list_generative_models,
 )
 from .mask_engine import (
@@ -28,7 +29,7 @@ from .mask_engine import (
     export_mask_to_mlt,
     propagate_masks,
     render_preview,
-    segment_frame,
+    segment_frame_detailed,
 )
 from .models import RotoSession, validate_roto_session
 
@@ -40,12 +41,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("backends", help="Evaluate available local SAM/ONNX/OpenCV segmentation backends")
+    p_back = sub.add_parser("backends", help="Evaluate available local SAM/ONNX/OpenCV segmentation backends")
+    p_back.add_argument("--model-dir", default=None, help="Optional override for BANGONPRO_MODEL_DIR")
 
     p_seg = sub.add_parser("segment", help="Segment an image frame from positive/negative points or session JSON")
     p_seg.add_argument("--image", required=True)
     p_seg.add_argument("--session", required=True)
     p_seg.add_argument("--output-dir", required=True)
+    p_seg.add_argument("--model-dir", default=None)
 
     p_prop = sub.add_parser("propagate", help="Propagate masks across a directory of frames")
     p_prop.add_argument("--frames-dir", required=True)
@@ -54,9 +57,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     p_prop.add_argument("--direction", choices=("forward", "backward", "both"), default="both")
     p_prop.add_argument("--output-dir", required=True)
 
-    p_comp = sub.add_parser("compose-2d", help="Render an ArtCraft-adapted 2D layer composition JSON to RGBA PNG")
+    p_comp = sub.add_parser("compose-2d", help="Render an ArtCraft-adapted 2D layer composition JSON to RGBA PNG / MP4")
     p_comp.add_argument("--canvas-json", required=True)
     p_comp.add_argument("--output-png", required=True)
+    p_comp.add_argument("--output-mp4", default=None)
+    p_comp.add_argument("--duration-sec", type=float, default=3.0)
+    p_comp.add_argument("--fps", type=float, default=25.0)
 
     p_sb = sub.add_parser("storyboard-export", help="Export a Storyboard JSON into plates + Timeline Command batch")
     p_sb.add_argument("--storyboard-json", required=True)
@@ -67,9 +73,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.cmd == "backends":
         payload = {
-            "segmentation_backends": [asdict(b) for b in evaluate_segmentation_backends()],
+            "segmentation_backends": [asdict(b) for b in evaluate_segmentation_backends(model_dir=args.model_dir)],
             "generative_models": [asdict(m) for m in list_generative_models()],
             "artcraft_notice": ARTCRAFT_ATTRIBUTION_NOTICE,
+            "artcraft_provenance": get_artcraft_provenance(),
         }
         print(json.dumps(payload, indent=2))
         return 0
@@ -79,7 +86,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         validate_roto_session(raw)
         session = RotoSession.from_dict(raw)
         frame_rgb = np.asarray(Image.open(args.image).convert("RGB"), dtype=np.uint8)
-        alpha = combine_masks(session.masks, frame_rgb.shape[1], frame_rgb.shape[0], frame_idx=0, frame_rgb=frame_rgb)
+        segmentation_meta: list[dict[str, Any]] = []
+        for shape in session.masks:
+            if shape.tool == "ai_sam" and (shape.positive_points or shape.bbox is not None):
+                seg_res = segment_frame_detailed(
+                    frame_rgb,
+                    positive_points=shape.positive_points,
+                    negative_points=shape.negative_points,
+                    bbox=shape.bbox,
+                    model_dir=args.model_dir,
+                )
+                segmentation_meta.append({"mask_id": shape.id, **seg_res.to_metadata_dict()})
+        alpha = combine_masks(
+            session.masks,
+            frame_rgb.shape[1],
+            frame_rgb.shape[0],
+            frame_idx=0,
+            frame_rgb=frame_rgb,
+            model_dir=args.model_dir,
+        )
         out_dir = Path(args.output_dir).resolve()
         out_dir.mkdir(parents=True, exist_ok=True)
         preview = render_preview(
@@ -95,6 +120,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         Image.fromarray(preview, mode="RGB").save(preview_path)
         exported = export_mask_to_mlt(session, [alpha], out_dir)
         exported["preview_path"] = str(preview_path)
+        exported["segmentation_reports"] = segmentation_meta
         print(json.dumps(exported, indent=2))
         return 0
 
@@ -117,28 +143,13 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.cmd == "compose-2d":
         data = json.loads(Path(args.canvas_json).read_text(encoding="utf-8"))
-        comp = Canvas2DComposer(width=int(data.get("width", 1920)), height=int(data.get("height", 1080)))
-        for lraw in data.get("layers", []):
-            comp.add_layer(
-                ArtCraftLayer(
-                    layer_id=str(lraw.get("layer_id", "layer")),
-                    name=str(lraw.get("name", "Layer")),
-                    kind=str(lraw.get("kind", "solid")),
-                    x=float(lraw.get("x", 0.0)),
-                    y=float(lraw.get("y", 0.0)),
-                    width=int(lraw.get("width", 320)),
-                    height=int(lraw.get("height", 180)),
-                    scale=float(lraw.get("scale", 1.0)),
-                    opacity=float(lraw.get("opacity", 1.0)),
-                    blend_mode=str(lraw.get("blend_mode", "normal")),
-                    visible=bool(lraw.get("visible", True)),
-                    image_path=lraw.get("image_path"),
-                    color_rgba=tuple(lraw.get("color_rgba", [255, 90, 31, 255])),
-                    text=str(lraw.get("text", "")),
-                )
-            )
+        comp = Canvas2DComposer.from_dict(data)
         out_png = comp.render_to_png(args.output_png)
-        print(json.dumps({"output_png": str(out_png), "layer_count": len(comp.layers)}, indent=2))
+        out_payload: dict[str, Any] = {"output_png": str(out_png), "layer_count": len(comp.layers)}
+        if args.output_mp4:
+            out_mp4 = comp.render_to_mp4(args.output_mp4, duration_sec=args.duration_sec, fps=args.fps)
+            out_payload["output_mp4"] = str(out_mp4)
+        print(json.dumps(out_payload, indent=2))
         return 0
 
     if args.cmd == "storyboard-export":

@@ -1,20 +1,25 @@
 """Audio Restoration, Captions (.srt/.ass), Lower-Third Graphics & Technical QC Agent.
 
-Builds real MLT + FFmpeg audio restoration filter chains, maps transcripts onto
-the edited rough-cut timeline to emit valid ``.srt`` and ``.ass`` captions,
-generates Kdenlive lower-third title XML clips, runs technical QC checks, and
-emits validated Timeline Command API v1 batches.
+Builds real MLT + FFmpeg audio restoration filter chains honoring Show Profile
+``audio_rules``, ``loudness_target_lufs``, and user intent overrides; maps
+transcripts onto timelines to emit ``.srt`` and ``.ass`` captions honoring
+``caption_style``; generates Kdenlive lower-third title XML clips honoring
+``graphics_templates``; runs technical QC including ``delivery_spec`` checks;
+and emits validated Timeline Command API v1 batches strictly scoped to user intent.
 
 SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
 """
 
 from __future__ import annotations
 
+import itertools
 import json
-import xml.sax.saxutils as saxutils
+import textwrap
+from collections.abc import Callable
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
+from xml.sax import saxutils
 
 import numpy as np
 
@@ -28,6 +33,14 @@ from bangonpro.ai_engine.state import (
     QCIssue,
     QCReport,
 )
+from bangonpro.show_profiles.loader import get_effective_profile_settings
+
+_ASS_ALIGNMENT_MAP: dict[str, int] = {
+    "bottom_left": 1,
+    "bottom_center": 2,
+    "bottom_right": 3,
+    "top_center": 8,
+}
 
 
 def _hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
@@ -47,7 +60,7 @@ def _hex_to_ass_color(hex_color: str, alpha: int = 0) -> str:
 
 
 def _format_srt_timestamp(seconds: float) -> str:
-    ms_total = max(0, int(round(seconds * 1000.0)))
+    ms_total = max(0, round(seconds * 1000.0))
     hours, rem = divmod(ms_total, 3600_000)
     minutes, rem = divmod(rem, 60_000)
     secs, ms = divmod(rem, 1000)
@@ -55,34 +68,61 @@ def _format_srt_timestamp(seconds: float) -> str:
 
 
 def _format_ass_timestamp(seconds: float) -> str:
-    cs_total = max(0, int(round(seconds * 100.0)))
+    cs_total = max(0, round(seconds * 100.0))
     hours, rem = divmod(cs_total, 3600_00)
     minutes, rem = divmod(rem, 60_00)
     secs, cs = divmod(rem, 100)
     return f"{hours:d}:{minutes:02d}:{secs:02d}.{cs:02d}"
 
 
+def _wrap_caption_text(
+    text: str,
+    *,
+    max_chars_per_line: int = 42,
+    uppercase: bool = False,
+) -> str:
+    cleaned = " ".join((text or "").strip().split())
+    if uppercase:
+        cleaned = cleaned.upper()
+    if max_chars_per_line > 0 and len(cleaned) > max_chars_per_line:
+        return "\n".join(textwrap.wrap(cleaned, width=max_chars_per_line))
+    return cleaned
+
+
 def build_audio_restoration_chain(
     audio_rules: dict[str, Any],
     *,
     rnnoise_model_path: str | None = None,
+    target_track_id: str = "A1",
+    loudness_override_lufs: float | None = None,
+    include_music_duck: bool = True,
 ) -> tuple[list[AudioFilterSpec], str]:
     """Construct real MLT + FFmpeg audio restoration chain from Show Profile ``audio_rules``."""
-    target_lufs = float(audio_rules.get("target_lufs", -16.0))
+    target_lufs = float(
+        loudness_override_lufs
+        if loudness_override_lufs is not None
+        else audio_rules.get(
+            "loudness_target_lufs", audio_rules.get("target_lufs", -16.0)
+        )
+    )
     true_peak = float(audio_rules.get("true_peak_dbtp", -1.5))
+    highpass_hz = float(audio_rules.get("highpass_hz", 80.0))
     enable_denoise = bool(audio_rules.get("enable_denoise", True))
     enable_compressor = bool(audio_rules.get("enable_compressor", True))
     music_duck_db = float(audio_rules.get("music_duck_db", -18.0))
+    track_slug = target_track_id.lower()
 
     filters: list[AudioFilterSpec] = [
         AudioFilterSpec(
-            filter_id="flt_a1_highpass",
+            filter_id=f"flt_{track_slug}_highpass",
             mlt_service="avfilter.highpass",
-            mlt_params={"av.frequency": 80.0},
-            ffmpeg_filter="highpass=f=80",
-            track_id="A1",
+            mlt_params={"av.frequency": highpass_hz},
+            ffmpeg_filter=f"highpass=f={int(highpass_hz) if highpass_hz.is_integer() else highpass_hz}",
+            track_id=target_track_id,
             enabled=True,
-            rationale="Remove low-frequency studio rumble and mic stand handling noise (<80 Hz)",
+            rationale=(
+                f"Remove low-frequency studio rumble and mic stand handling noise (<{highpass_hz:.0f} Hz)"
+            ),
         )
     ]
 
@@ -91,11 +131,11 @@ def build_audio_restoration_chain(
             model_abs = str(Path(rnnoise_model_path).resolve())
             filters.append(
                 AudioFilterSpec(
-                    filter_id="flt_a1_rnnoise",
+                    filter_id=f"flt_{track_slug}_rnnoise",
                     mlt_service="avfilter.arnndn",
                     mlt_params={"av.model": model_abs},
                     ffmpeg_filter=f"arnndn=m='{model_abs}'",
-                    track_id="A1",
+                    track_id=target_track_id,
                     enabled=True,
                     rationale="Apply RNNoise neural voice denoiser using configured model",
                 )
@@ -103,11 +143,11 @@ def build_audio_restoration_chain(
         else:
             filters.append(
                 AudioFilterSpec(
-                    filter_id="flt_a1_afftdn",
+                    filter_id=f"flt_{track_slug}_afftdn",
                     mlt_service="avfilter.afftdn",
                     mlt_params={"av.noise_reduction": 10.0, "av.nf": -35.0},
                     ffmpeg_filter="afftdn=nr=10:nf=-35",
-                    track_id="A1",
+                    track_id=target_track_id,
                     enabled=True,
                     rationale="Apply FFT spectral noise reduction (deterministic CPU fallback for RNNoise)",
                 )
@@ -116,7 +156,7 @@ def build_audio_restoration_chain(
     if enable_compressor:
         filters.append(
             AudioFilterSpec(
-                filter_id="flt_a1_compressor",
+                filter_id=f"flt_{track_slug}_compressor",
                 mlt_service="avfilter.acompressor",
                 mlt_params={
                     "av.threshold": 0.125,
@@ -126,7 +166,7 @@ def build_audio_restoration_chain(
                     "av.makeup": 1.5,
                 },
                 ffmpeg_filter="acompressor=threshold=0.125:ratio=3:attack=10:release=120:makeup=1.5",
-                track_id="A1",
+                track_id=target_track_id,
                 enabled=True,
                 rationale="Level studio vocal dynamics across multiple microphones",
             )
@@ -134,7 +174,7 @@ def build_audio_restoration_chain(
 
     filters.append(
         AudioFilterSpec(
-            filter_id="flt_a1_loudnorm",
+            filter_id=f"flt_{track_slug}_loudnorm",
             mlt_service="avfilter.loudnorm",
             mlt_params={
                 "av.I": target_lufs,
@@ -142,35 +182,50 @@ def build_audio_restoration_chain(
                 "av.LRA": 7.0,
             },
             ffmpeg_filter=f"loudnorm=I={target_lufs:.1f}:TP={true_peak:.1f}:LRA=7",
-            track_id="A1",
+            track_id=target_track_id,
             enabled=True,
             rationale=f"EBU R128 broadcast loudness normalization to {target_lufs:.1f} LUFS / {true_peak:.1f} dBTP",
         )
     )
 
-    filters.append(
-        AudioFilterSpec(
-            filter_id="flt_a2_music_duck",
-            mlt_service="volume",
-            mlt_params={"level": music_duck_db, "gain": f"{music_duck_db:.1f}dB"},
-            ffmpeg_filter=f"volume={music_duck_db:.1f}dB",
-            track_id="A2",
-            enabled=True,
-            rationale=f"Duck background music bed to {music_duck_db:.1f} dB beneath dialogue",
+    if include_music_duck and target_track_id == "A1":
+        filters.append(
+            AudioFilterSpec(
+                filter_id="flt_a2_music_duck",
+                mlt_service="volume",
+                mlt_params={"level": music_duck_db, "gain": f"{music_duck_db:.1f}dB"},
+                ffmpeg_filter=f"volume={music_duck_db:.1f}dB",
+                track_id="A2",
+                enabled=True,
+                rationale=f"Duck background music bed to {music_duck_db:.1f} dB beneath dialogue",
+            )
         )
+
+    primary_ffmpeg_chain = ",".join(
+        f.ffmpeg_filter for f in filters if f.track_id == target_track_id and f.enabled
     )
-
-    a1_ffmpeg_chain = ",".join(f.ffmpeg_filter for f in filters if f.track_id == "A1" and f.enabled)
-    return filters, a1_ffmpeg_chain
+    return filters, primary_ffmpeg_chain
 
 
-def generate_srt_subtitles(captions: list[CaptionCue]) -> str:
+def generate_srt_subtitles(
+    captions: list[CaptionCue],
+    *,
+    caption_style: dict[str, Any] | None = None,
+) -> str:
     """Render edited-timeline captions as a strictly valid SubRip (.srt) document."""
+    style = caption_style or {}
+    max_chars = int(style.get("max_chars_per_line", 42))
+    uppercase = bool(style.get("uppercase", False))
+
     blocks: list[str] = []
     for idx, cue in enumerate(captions, start=1):
         start_ts = _format_srt_timestamp(cue.start_sec)
         end_ts = _format_srt_timestamp(max(cue.end_sec, cue.start_sec + 0.1))
-        text = cue.text.strip().replace("\r\n", "\n")
+        text = _wrap_caption_text(
+            cue.text.replace("\r\n", "\n"),
+            max_chars_per_line=max_chars,
+            uppercase=uppercase,
+        )
         blocks.append(f"{idx}\n{start_ts} --> {end_ts}\n{text}\n")
     return "\n".join(blocks)
 
@@ -181,12 +236,23 @@ def generate_ass_subtitles(
     width: int = 1920,
     height: int = 1080,
     brand_accent_hex: str = "#FF5A1F",
+    caption_style: dict[str, Any] | None = None,
 ) -> str:
     """Render edited-timeline captions as a strictly valid SubStation Alpha v4+ (.ass) document."""
-    font_size = max(24, int(round(height * 0.044)))
-    margin_v = max(28, int(round(height * 0.05)))
-    margin_h = max(36, int(round(width * 0.04)))
-    accent_ass = _hex_to_ass_color(brand_accent_hex, alpha=0)
+    style = caption_style or {}
+    font_family = str(style.get("font_family", "DejaVu Sans"))
+    font_size = int(style.get("font_size_px", max(24, round(height * 0.044))))
+    margin_v = max(28, round(height * 0.05))
+    margin_h = max(36, round(width * 0.04))
+    primary_ass = _hex_to_ass_color(str(style.get("primary_color_hex", "#FFFFFF")), alpha=0)
+    accent_ass = _hex_to_ass_color(
+        str(style.get("highlight_color_hex", brand_accent_hex)), alpha=0
+    )
+    outline_ass = _hex_to_ass_color(str(style.get("outline_color_hex", "#121212")), alpha=0)
+    outline_w = float(style.get("outline_width", 3.0))
+    align_code = _ASS_ALIGNMENT_MAP.get(str(style.get("alignment", "bottom_center")), 2)
+    max_chars = int(style.get("max_chars_per_line", 42))
+    uppercase = bool(style.get("uppercase", False))
 
     lines = [
         "[Script Info]",
@@ -199,7 +265,7 @@ def generate_ass_subtitles(
         "",
         "[V4+ Styles]",
         "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
-        f"Style: Default,DejaVu Sans,{font_size},&H00FFFFFF,{accent_ass},&H00121212,&H90000000,1,0,0,0,100,100,0,0,1,3,1,2,{margin_h},{margin_h},{margin_v},1",
+        f"Style: Default,{font_family},{font_size},{primary_ass},{accent_ass},{outline_ass},&H90000000,1,0,0,0,100,100,0,0,1,{outline_w:g},1,{align_code},{margin_h},{margin_h},{margin_v},1",
         "",
         "[Events]",
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
@@ -209,7 +275,10 @@ def generate_ass_subtitles(
         start_ts = _format_ass_timestamp(cue.start_sec)
         end_ts = _format_ass_timestamp(max(cue.end_sec, cue.start_sec + 0.1))
         safe_speaker = cue.speaker_id.replace(",", " ")
-        safe_text = cue.text.strip().replace("\n", "\\N")
+        wrapped = _wrap_caption_text(
+            cue.text, max_chars_per_line=max_chars, uppercase=uppercase
+        )
+        safe_text = wrapped.replace("\n", "\\N")
         lines.append(
             f"Dialogue: 0,{start_ts},{end_ts},Default,{safe_speaker},0,0,0,,{safe_text}"
         )
@@ -225,19 +294,37 @@ def generate_kdenlive_lower_third_xml(
     height: int = 1080,
     accent_hex: str = "#FF5A1F",
     duration_frames: int = 100,
+    position: str = "bottom_left",
+    font_family: str = "DejaVu Sans",
 ) -> str:
     """Generate native Kdenlive ``kdenlivetitle`` XML for a broadcast lower-third graphic."""
     r, g, b = _hex_to_rgb(accent_hex)
-    x0 = int(round(width * 0.05))
-    y0 = int(round(height * 0.78))
-    bar_w = max(10, int(round(width * 0.008)))
-    box_w = int(round(width * 0.34))
-    box_h = int(round(height * 0.115))
-    title_px = max(22, int(round(height * 0.038)))
-    sub_px = max(16, int(round(height * 0.024)))
+    bar_w = max(10, round(width * 0.008))
+    box_w = round(width * 0.34)
+    box_h = round(height * 0.115)
+
+    if position == "bottom_center":
+        x0 = round((width - box_w) * 0.5)
+        y0 = round(height * 0.78)
+    elif position == "bottom_right":
+        x0 = round(width * 0.95) - box_w
+        y0 = round(height * 0.78)
+    elif position == "top_left":
+        x0 = round(width * 0.05)
+        y0 = round(height * 0.08)
+    elif position == "top_right":
+        x0 = round(width * 0.95) - box_w
+        y0 = round(height * 0.08)
+    else:
+        x0 = round(width * 0.05)
+        y0 = round(height * 0.78)
+
+    title_px = max(22, round(height * 0.038))
+    sub_px = max(16, round(height * 0.024))
 
     esc_title = saxutils.escape(title)
     esc_sub = saxutils.escape(subtitle)
+    esc_font = saxutils.escape(font_family)
 
     return (
         f'<kdenlivetitle LC_NUMERIC="C" duration="{duration_frames}" '
@@ -253,101 +340,159 @@ def generate_kdenlive_lower_third_xml(
         f'<item type="QGraphicsTextItem" z-index="2">'
         f'<position x="{x0 + bar_w + 22}" y="{y0 + int(box_h * 0.14)}">'
         f"<transform>1,0,0,0,1,0,0,0,1</transform></position>"
-        f'<content font="DejaVu Sans" font-pixel-size="{title_px}" font-weight="700" '
+        f'<content font="{esc_font}" font-pixel-size="{title_px}" font-weight="700" '
         f'font-color="255,255,255,255">{esc_title}</content>'
         f"</item>"
         f'<item type="QGraphicsTextItem" z-index="3">'
         f'<position x="{x0 + bar_w + 22}" y="{y0 + int(box_h * 0.58)}">'
         f"<transform>1,0,0,0,1,0,0,0,1</transform></position>"
-        f'<content font="DejaVu Sans" font-pixel-size="{sub_px}" font-weight="400" '
+        f'<content font="{esc_font}" font-pixel-size="{sub_px}" font-weight="400" '
         f'font-color="{r},{g},{b},255">{esc_sub}</content>'
         f"</item>"
         f"</kdenlivetitle>"
     )
 
 
-def _build_edited_captions(state: ProjectAnalysisState) -> list[CaptionCue]:
-    """Map diarised transcript segments onto the edited rough-cut timeline."""
-    if not state.rough_cut_shots:
-        return []
+def _speaker_matches_filter(speaker: str, target_speakers: list[str]) -> bool:
+    if not target_speakers:
+        return True
+    spk_low = speaker.strip().lower()
+    return any(t.strip().lower() in spk_low or spk_low in t.strip().lower() for t in target_speakers)
 
-    edited_duration = state.rough_cut_shots[-1].timeline_out_sec
+
+def _build_edited_captions(state: ProjectAnalysisState) -> list[CaptionCue]:
+    """Map diarised transcript segments onto the edited rough-cut or source master timeline."""
+    target_speakers = state.intent.target_speakers
+    time_range = state.intent.time_range_sec
     cues: list[CaptionCue] = []
 
-    for seg in state.transcript_segments:
-        # Map segment intersection across kept master intervals
-        cursor = 0.0
-        for iv in state.kept_master_intervals:
-            ov_start = max(seg.start_sec, iv.start_sec)
-            ov_end = min(seg.end_sec, iv.end_sec)
-            if ov_end - ov_start >= 0.20:
-                ed_start = cursor + (ov_start - iv.start_sec)
-                ed_end = min(edited_duration, cursor + (ov_end - iv.start_sec))
-                if ed_end - ed_start >= 0.15:
-                    if cues and ed_start < cues[-1].end_sec:
-                        ed_start = cues[-1].end_sec
-                    if ed_end > ed_start + 0.10:
-                        cues.append(
-                            CaptionCue(
-                                index=len(cues) + 1,
-                                start_sec=round(ed_start, 3),
-                                end_sec=round(ed_end, 3),
-                                speaker_id=seg.speaker_id,
-                                text=seg.text,
-                                confidence=seg.confidence,
+    if state.rough_cut_shots and state.kept_master_intervals:
+        edited_duration = state.rough_cut_shots[-1].timeline_out_sec
+        for seg in state.transcript_segments:
+            if not _speaker_matches_filter(seg.speaker_id, target_speakers):
+                continue
+            cursor = 0.0
+            for iv in state.kept_master_intervals:
+                ov_start = max(seg.start_sec, iv.start_sec)
+                ov_end = min(seg.end_sec, iv.end_sec)
+                if ov_end - ov_start >= 0.20:
+                    ed_start = cursor + (ov_start - iv.start_sec)
+                    ed_end = min(edited_duration, cursor + (ov_end - iv.start_sec))
+                    if time_range is not None:
+                        ed_start = max(ed_start, time_range[0])
+                        ed_end = min(ed_end, time_range[1])
+                    if ed_end - ed_start >= 0.15:
+                        if cues and ed_start < cues[-1].end_sec:
+                            ed_start = cues[-1].end_sec
+                        if ed_end > ed_start + 0.10:
+                            cues.append(
+                                CaptionCue(
+                                    index=len(cues) + 1,
+                                    start_sec=round(ed_start, 3),
+                                    end_sec=round(ed_end, 3),
+                                    speaker_id=seg.speaker_id,
+                                    text=seg.text,
+                                    confidence=seg.confidence,
+                                )
                             )
+                cursor += iv.duration_sec
+    else:
+        # Scoped captions-only workflow without altering timeline cuts
+        for seg in state.transcript_segments:
+            if not _speaker_matches_filter(seg.speaker_id, target_speakers):
+                continue
+            s_t = seg.start_sec
+            e_t = seg.end_sec
+            if time_range is not None:
+                s_t = max(s_t, time_range[0])
+                e_t = min(e_t, time_range[1])
+            if e_t - s_t >= 0.15:
+                if cues and s_t < cues[-1].end_sec:
+                    s_t = cues[-1].end_sec
+                if e_t > s_t + 0.10:
+                    cues.append(
+                        CaptionCue(
+                            index=len(cues) + 1,
+                            start_sec=round(s_t, 3),
+                            end_sec=round(e_t, 3),
+                            speaker_id=seg.speaker_id,
+                            text=seg.text,
+                            confidence=seg.confidence,
                         )
-            cursor += iv.duration_sec
-
-    if not cues and state.rough_cut_shots:
-        first_shot = state.rough_cut_shots[0]
-        cues.append(
-            CaptionCue(
-                index=1,
-                start_sec=0.0,
-                end_sec=round(min(edited_duration, max(1.0, first_shot.timeline_out_sec)), 3),
-                speaker_id=first_shot.speaker_id,
-                text=f"{state.profile['display_name']} — Studio Program",
-                confidence=0.9,
-            )
-        )
+                    )
 
     return cues
 
 
 def _build_lower_thirds(state: ProjectAnalysisState) -> list[LowerThirdSpec]:
-    """Create non-overlapping lower-third graphics for each speaker's first on-screen turn."""
+    """Create non-overlapping lower-third graphics honoring ``graphics_templates`` & intent targets."""
     graphics_rules = state.profile.get("graphics_rules", {})
     if not graphics_rules.get("enable_lower_thirds", True) or not state.intent.add_lower_thirds:
         return []
-    if not state.rough_cut_shots:
-        return []
 
+    effective = get_effective_profile_settings(state.profile)
+    templates = effective["graphics_templates"]
     fps = state.fps
     spec = state.profile["video_spec"]
     width = int(spec["width"])
     height = int(spec["height"])
-    accent_hex = str(graphics_rules.get("brand_accent_hex", "#FF5A1F"))
+    accent_hex = str(
+        templates.get("accent_hex", graphics_rules.get("brand_accent_hex", "#FF5A1F"))
+    )
+    font_family = str(templates.get("font_family", "DejaVu Sans"))
+    template_name = str(templates.get("lower_third_template", "studio_clean_bar"))
+    position = str(templates.get("lower_third_position", "bottom_left"))
     target_dur = float(graphics_rules.get("lower_third_duration_sec", 4.5))
-    total_timeline_frames = state.rough_cut_shots[-1].timeline_out_frame + 1
     show_title = str(state.profile.get("display_name", "Bang On Pro"))
+    target_speakers = state.intent.target_speakers
 
     lower_thirds: list[LowerThirdSpec] = []
     seen_speakers: set[str] = set()
     occupied_until_frame = 0
 
-    for shot in state.rough_cut_shots:
-        spk = shot.speaker_id
-        if not spk or spk in seen_speakers:
+    if state.rough_cut_shots:
+        total_timeline_frames = state.rough_cut_shots[-1].timeline_out_frame + 1
+        candidates = [(shot.speaker_id, shot.timeline_in_frame) for shot in state.rough_cut_shots]
+    else:
+        # Scoped graphics-only workflow without mutating timeline cuts
+        total_dur = (
+            state.sync_result.common_duration_sec
+            if state.sync_result and state.sync_result.common_duration_sec > 0
+            else max((a.duration_sec for a in state.media_assets.values()), default=15.0)
+        )
+        total_timeline_frames = max(round(target_dur * fps) + 1, state.sec_to_frame(total_dur))
+        if state.transcript_segments:
+            candidates = [
+                (seg.speaker_id, state.sec_to_frame(seg.start_sec))
+                for seg in state.transcript_segments
+            ]
+        elif target_speakers:
+            candidates = [
+                (spk, round(idx * (target_dur + 1.0) * fps))
+                for idx, spk in enumerate(target_speakers)
+            ]
+        else:
+            spk_names = [
+                a.speaker_label
+                for a in state.media_assets.values()
+                if a.speaker_label
+            ] or ["Host"]
+            candidates = [
+                (spk, round(idx * (target_dur + 1.0) * fps))
+                for idx, spk in enumerate(spk_names)
+            ]
+
+    for spk, candidate_start_f in candidates:
+        if not spk or spk in seen_speakers or not _speaker_matches_filter(spk, target_speakers):
             continue
-        start_f = max(shot.timeline_in_frame, occupied_until_frame + int(round(0.5 * fps)))
-        if start_f >= total_timeline_frames - int(round(0.8 * fps)):
+        start_f = max(candidate_start_f, occupied_until_frame + round(0.5 * fps))
+        if start_f >= total_timeline_frames - round(0.8 * fps):
             continue
         dur_frames = min(
-            max(1, int(round(target_dur * fps))),
+            max(1, round(target_dur * fps)),
             total_timeline_frames - start_f,
         )
-        if dur_frames < int(round(0.8 * fps)):
+        if dur_frames < round(0.8 * fps):
             continue
 
         out_f = start_f + dur_frames - 1
@@ -358,6 +503,8 @@ def _build_lower_thirds(state: ProjectAnalysisState) -> list[LowerThirdSpec]:
             height=height,
             accent_hex=accent_hex,
             duration_frames=dur_frames,
+            position=position,
+            font_family=font_family,
         )
         lower_thirds.append(
             LowerThirdSpec(
@@ -370,6 +517,8 @@ def _build_lower_thirds(state: ProjectAnalysisState) -> list[LowerThirdSpec]:
                 out_frame=out_f,
                 accent_hex=accent_hex,
                 kdenlive_title_xml=xml,
+                template=template_name,
+                position=position,
             )
         )
         seen_speakers.add(spk)
@@ -379,25 +528,46 @@ def _build_lower_thirds(state: ProjectAnalysisState) -> list[LowerThirdSpec]:
 
 
 def run_technical_qc(state: ProjectAnalysisState) -> QCReport:
-    """Execute deterministic technical QC checks over sync, contiguity, continuity, silence & loudness."""
+    """Execute deterministic technical QC checks over sync, contiguity, continuity, silence, loudness & delivery_spec."""
     issues: list[QCIssue] = []
     metrics: dict[str, Any] = {}
+    effective = get_effective_profile_settings(state.profile)
+    audio_rules = state.profile.get("audio_rules", {})
+    delivery_spec = effective["delivery_spec"]
+    target_lufs = float(
+        state.intent.loudness_target_lufs
+        if state.intent.loudness_target_lufs is not None
+        else effective["loudness_target_lufs"]
+    )
+    metrics["target_lufs"] = target_lufs
+    metrics["delivery_spec"] = delivery_spec
 
     shots = state.rough_cut_shots
     if not shots:
-        issues.append(
-            QCIssue(
-                code="EMPTY_TIMELINE",
-                severity="error",
-                message="Rough cut produced zero shots.",
+        if state.intent.build_rough_cut or state.intent.multicam_switch:
+            issues.append(
+                QCIssue(
+                    code="EMPTY_TIMELINE",
+                    severity="error",
+                    message="Rough cut produced zero shots.",
+                )
             )
-        )
-        return QCReport(passed=False, issues=issues, metrics=metrics)
+            return QCReport(passed=False, issues=issues, metrics=metrics)
+        # Scoped non-cut pass (e.g. audio-only / captions-only / graphics-only)
+        metrics["shot_count"] = 0
+        metrics["scope"] = state.intent.scope
+        return QCReport(passed=True, issues=issues, metrics=metrics)
 
     # 1. Sync confidence & drift check
     if state.sync_result is not None:
-        min_sync_conf = min(state.sync_result.confidences.values()) if state.sync_result.confidences else 1.0
-        max_offset = max((abs(v) for v in state.sync_result.offsets_sec.values()), default=0.0)
+        min_sync_conf = (
+            min(state.sync_result.confidences.values())
+            if state.sync_result.confidences
+            else 1.0
+        )
+        max_offset = max(
+            (abs(v) for v in state.sync_result.offsets_sec.values()), default=0.0
+        )
         metrics["min_sync_confidence"] = round(min_sync_conf, 4)
         metrics["max_camera_offset_sec"] = round(max_offset, 4)
         for cid, conf in state.sync_result.confidences.items():
@@ -454,7 +624,7 @@ def run_technical_qc(state: ProjectAnalysisState) -> QCReport:
 
     # 3. Continuity / jump-cut check
     jump_cuts = 0
-    for prev_s, curr_s in zip(shots, shots[1:]):
+    for prev_s, curr_s in itertools.pairwise(shots):
         if prev_s.camera_id == curr_s.camera_id:
             src_jump = abs(curr_s.source_in_sec - prev_s.source_out_sec)
             if src_jump > 0.15:
@@ -468,7 +638,10 @@ def run_technical_qc(state: ProjectAnalysisState) -> QCReport:
                             f"{prev_s.shot_id} and {curr_s.shot_id} (source jump {src_jump:.2f}s)."
                         ),
                         timeline_sec=curr_s.timeline_in_sec,
-                        details={"camera_id": curr_s.camera_id, "source_jump_sec": round(src_jump, 3)},
+                        details={
+                            "camera_id": curr_s.camera_id,
+                            "source_jump_sec": round(src_jump, 3),
+                        },
                     )
                 )
     metrics["jump_cut_count"] = jump_cuts
@@ -481,8 +654,8 @@ def run_technical_qc(state: ProjectAnalysisState) -> QCReport:
         a_cid = cam_by_ref.get(shot.audio_media_ref)
         pcm = state.audio_pcm_cache.get(a_cid) if a_cid else None
         if pcm is not None and len(pcm) > 0:
-            s_idx = max(0, int(round(shot.audio_source_in_sec * sr)))
-            e_idx = min(len(pcm), int(round(shot.audio_source_out_sec * sr)))
+            s_idx = max(0, round(shot.audio_source_in_sec * sr))
+            e_idx = min(len(pcm), round(shot.audio_source_out_sec * sr))
             if e_idx > s_idx:
                 stitched_chunks.append(pcm[s_idx:e_idx])
 
@@ -494,7 +667,6 @@ def run_technical_qc(state: ProjectAnalysisState) -> QCReport:
         rms_dbfs = round(float(20.0 * np.log10(rms_amp + 1e-12)), 2)
         metrics["pre_loudnorm_peak_dbfs"] = peak_dbfs
         metrics["pre_loudnorm_rms_dbfs"] = rms_dbfs
-        metrics["target_lufs"] = float(state.profile["audio_rules"].get("target_lufs", -16.0))
 
         if peak_dbfs > -0.2:
             issues.append(
@@ -513,14 +685,17 @@ def run_technical_qc(state: ProjectAnalysisState) -> QCReport:
                 )
             )
 
-        # Residual long silence scan (100 ms windows)
         win = max(1, int(0.1 * sr))
         n_wins = edited_pcm.size // win
         max_sil_sec = 0.0
         if n_wins > 0:
             blocks = edited_pcm[: n_wins * win].reshape(n_wins, win)
             win_db = 20.0 * np.log10(np.sqrt(np.mean(blocks * blocks, axis=1) + 1e-18) + 1e-12)
-            sil_thresh = float(state.profile["editing_rules"].get("silence_threshold_db", -36.0))
+            sil_thresh = float(
+                state.intent.silence_threshold_db
+                if state.intent.silence_threshold_db is not None
+                else effective["silence_threshold_db"]
+            )
             run = 0
             for db_val in win_db:
                 if db_val < sil_thresh:
@@ -529,7 +704,9 @@ def run_technical_qc(state: ProjectAnalysisState) -> QCReport:
                 else:
                     run = 0
         metrics["max_residual_silence_sec"] = round(max_sil_sec, 2)
-        allowed_sil = max(2.0, float(state.profile["editing_rules"].get("min_silence_sec", 0.8)) * 2.5)
+        allowed_sil = max(
+            2.0, float(state.profile["editing_rules"].get("min_silence_sec", 0.8)) * 2.5
+        )
         if max_sil_sec > allowed_sil:
             issues.append(
                 QCIssue(
@@ -542,7 +719,9 @@ def run_technical_qc(state: ProjectAnalysisState) -> QCReport:
                 )
             )
 
-    # Per-camera microphone level consistency analysis & automatic gain staging
+    # 5. Per-camera microphone level consistency analysis & automatic gain staging
+    enable_mic_match = bool(audio_rules.get("enable_mic_level_matching", True))
+    max_mic_trim = float(audio_rules.get("max_mic_trim_db", 24.0))
     cam_rms_db: dict[str, float] = {}
     for cam_id, pcm in (state.audio_pcm_cache or {}).items():
         arr = np.asarray(pcm, dtype=np.float32)
@@ -553,7 +732,7 @@ def run_technical_qc(state: ProjectAnalysisState) -> QCReport:
                 cam_rms_db[cam_id] = round(20.0 * float(np.log10(rms_val + 1e-12)), 2)
 
     per_cam_trim_db: dict[str, float] = {}
-    if len(cam_rms_db) >= 2:
+    if enable_mic_match and len(cam_rms_db) >= 2:
         median_db = float(np.median(list(cam_rms_db.values())))
         spread_db = max(cam_rms_db.values()) - min(cam_rms_db.values())
         metrics["mic_level_spread_db"] = round(spread_db, 2)
@@ -570,13 +749,17 @@ def run_technical_qc(state: ProjectAnalysisState) -> QCReport:
                 )
             )
         for cam_id, rms_db in cam_rms_db.items():
-            delta = max(-24.0, min(24.0, round(median_db - rms_db, 2)))
+            delta = max(-max_mic_trim, min(max_mic_trim, round(median_db - rms_db, 2)))
             if abs(delta) >= 2.5:
                 per_cam_trim_db[cam_id] = delta
     state.metadata["per_camera_gain_trim_db"] = per_cam_trim_db
 
-    # Mixed frame-rate & missing-media QC metrics
-    source_fps_map = {cam_id: round(asset.fps, 4) for cam_id, asset in state.media_assets.items()}
+    # 6. Mixed frame-rate (video cameras only) & delivery_spec checks
+    source_fps_map = {
+        cam_id: round(asset.fps, 4)
+        for cam_id, asset in state.media_assets.items()
+        if asset.has_video
+    }
     unique_fps = {round(f, 2) for f in source_fps_map.values()}
     metrics["sequence_fps"] = round(state.fps, 4)
     metrics["source_frame_rates"] = source_fps_map
@@ -591,6 +774,19 @@ def run_technical_qc(state: ProjectAnalysisState) -> QCReport:
                 message=(
                     f"Normalized mixed source frame rates {source_fps_map} into "
                     f"{state.fps:.3f} fps sequence timebase."
+                ),
+            )
+        )
+
+    spec = state.profile.get("video_spec", {})
+    if delivery_spec.get("width") and int(spec.get("width", 0)) != int(delivery_spec["width"]):
+        issues.append(
+            QCIssue(
+                code="DELIVERY_SPEC_WIDTH_MISMATCH",
+                severity="warning",
+                message=(
+                    f"Sequence width {spec.get('width')} differs from delivery_spec width "
+                    f"{delivery_spec['width']}."
                 ),
             )
         )
@@ -617,43 +813,70 @@ def run_audio_graphics_qc_agent(
     state: ProjectAnalysisState,
     token: CancellationToken,
     report_progress: Callable[[float, str], None],
-) -> dict[str, Any]:
-    """Generate audio restoration chain, captions, lower-thirds, and run technical QC."""
+) -> dict[str, Any] | None:
+    """Generate audio restoration chain, captions, lower-thirds, and run technical QC strictly per intent."""
     token.check("audio_graphics_qc start")
-    if not state.rough_cut_shots:
-        raise RuntimeError("rough_cut_multicam must complete before audio_graphics_qc")
+
+    needs_stage = any(
+        (
+            state.intent.restore_audio,
+            state.intent.add_captions,
+            state.intent.add_lower_thirds,
+            state.intent.run_qc,
+        )
+    )
+    if not needs_stage:
+        report_progress(1.0, "Skipping audio/graphics/QC (not requested by instruction scope)")
+        return None
 
     out_dir = Path(state.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    effective = get_effective_profile_settings(state.profile)
 
-    # 1. Build audio restoration filter chain
+    # 1. Build audio restoration filter chain ONLY if restore_audio is enabled
     report_progress(0.15, "Configuring MLT/FFmpeg audio restoration chain")
     audio_rules = state.profile.get("audio_rules", {})
-    audio_filters, ffmpeg_chain = build_audio_restoration_chain(
-        audio_rules,
-        rnnoise_model_path=state.rnnoise_model_path,
+    audio_target_tracks = [t for t in state.intent.target_tracks if t.startswith("A")] or ["A1"]
+    loudness_override = (
+        state.intent.loudness_target_lufs
+        if state.intent.loudness_target_lufs is not None
+        else float(effective["loudness_target_lufs"])
     )
-    if not state.intent.restore_audio:
-        for flt in audio_filters:
-            flt.enabled = False
-    state.audio_filters = audio_filters
-    state.ffmpeg_audio_filtergraph = ffmpeg_chain
 
-    # 2. Generate .srt & .ass captions
+    audio_filters: list[AudioFilterSpec] = []
+    ffmpeg_chains: list[str] = []
+    if state.intent.restore_audio:
+        for trk in audio_target_tracks:
+            flts, chain_str = build_audio_restoration_chain(
+                audio_rules,
+                rnnoise_model_path=state.rnnoise_model_path,
+                target_track_id=trk,
+                loudness_override_lufs=loudness_override,
+                include_music_duck=(trk == "A1" and len(audio_target_tracks) == 1),
+            )
+            audio_filters.extend(flts)
+            if chain_str:
+                ffmpeg_chains.append(chain_str)
+    state.audio_filters = audio_filters
+    state.ffmpeg_audio_filtergraph = ";".join(ffmpeg_chains)
+
+    # 2. Generate .srt & .ass captions ONLY if add_captions is enabled
     report_progress(0.40, "Generating .srt and .ass captions")
     graphics_rules = state.profile.get("graphics_rules", {})
+    caption_style = effective["caption_style"]
     enable_captions = bool(graphics_rules.get("enable_captions", True)) and state.intent.add_captions
     captions = _build_edited_captions(state) if enable_captions else []
     state.captions = captions
 
     if enable_captions and captions:
         spec = state.profile["video_spec"]
-        srt_text = generate_srt_subtitles(captions)
+        srt_text = generate_srt_subtitles(captions, caption_style=caption_style)
         ass_text = generate_ass_subtitles(
             captions,
             width=int(spec["width"]),
             height=int(spec["height"]),
             brand_accent_hex=str(graphics_rules.get("brand_accent_hex", "#FF5A1F")),
+            caption_style=caption_style,
         )
         srt_path = out_dir / "captions.srt"
         ass_path = out_dir / "captions.ass"
@@ -662,21 +885,22 @@ def run_audio_graphics_qc_agent(
         state.artifacts["captions_srt"] = str(srt_path)
         state.artifacts["captions_ass"] = str(ass_path)
 
-    # 3. Generate lower-third graphics
+    # 3. Generate lower-third graphics ONLY if add_lower_thirds is enabled
     token.check("generate lower thirds")
     report_progress(0.60, "Generating Kdenlive lower-third graphics")
     lower_thirds = _build_lower_thirds(state)
     state.lower_thirds = lower_thirds
 
-    # 4. Run technical QC
+    # 4. Run technical QC ONLY if run_qc is enabled
     token.check("run technical qc")
     report_progress(0.78, "Running technical QC checks")
-    qc_report = run_technical_qc(state)
+    qc_report = run_technical_qc(state) if state.intent.run_qc else QCReport(passed=True)
     state.qc_report = qc_report
 
-    qc_path = out_dir / "qc_report.json"
-    qc_path.write_text(json.dumps(asdict(qc_report), indent=2), encoding="utf-8")
-    state.artifacts["qc_report_json"] = str(qc_path)
+    if state.intent.run_qc:
+        qc_path = out_dir / "qc_report.json"
+        qc_path.write_text(json.dumps(asdict(qc_report), indent=2), encoding="utf-8")
+        state.artifacts["qc_report_json"] = str(qc_path)
 
     # 5. Emit validated Timeline Command API v1 batch
     report_progress(0.90, "Building Timeline Command API v1 batch for audio, graphics & QC")
@@ -693,59 +917,59 @@ def run_audio_graphics_qc_agent(
         fps_den=state.fps_den,
     )
 
-    for flt in audio_filters:
-        if not flt.enabled:
-            continue
-        builder.add_operation(
-            "add_audio_filter",
-            track_id=flt.track_id,
-            params={
-                "filter_id": flt.filter_id,
-                "mlt_service": flt.mlt_service,
-                "mlt_params": flt.mlt_params,
-                "ffmpeg_filter": flt.ffmpeg_filter,
-            },
-            confidence=0.98,
-            rationale=flt.rationale,
-        )
+    if state.intent.restore_audio:
+        for flt in audio_filters:
+            if not flt.enabled:
+                continue
+            builder.add_operation(
+                "add_audio_filter",
+                track_id=flt.track_id,
+                params={
+                    "filter_id": flt.filter_id,
+                    "mlt_service": flt.mlt_service,
+                    "mlt_params": flt.mlt_params,
+                    "ffmpeg_filter": flt.ffmpeg_filter,
+                },
+                confidence=0.98,
+                rationale=flt.rationale,
+            )
 
-    # Emit per-clip gain trims when microphones had inconsistent input levels
-    per_cam_trim_db = state.metadata.get("per_camera_gain_trim_db", {})
-    if per_cam_trim_db:
-        for shot in state.rough_cut_shots:
-            src_cam = shot.camera_id
-            # Match audio source camera if available
-            for cid, asset in state.media_assets.items():
-                if asset.media_ref == shot.audio_media_ref:
-                    src_cam = cid
-                    break
-            trim_db = per_cam_trim_db.get(src_cam)
-            if trim_db is not None and abs(trim_db) >= 2.5:
-                builder.add_operation(
-                    "set_audio_level",
-                    clip_id=f"{shot.shot_id}_a",
-                    track_id="A1",
-                    params={
-                        "gain_db": float(trim_db),
-                        "camera_id": src_cam,
-                        "level_matching": True,
-                    },
-                    confidence=0.92,
-                    rationale=f"Level-match microphone '{src_cam}' by {trim_db:+.1f} dB prior to master loudnorm",
-                )
+        per_cam_trim_db = state.metadata.get("per_camera_gain_trim_db", {})
+        if per_cam_trim_db and state.rough_cut_shots:
+            for shot in state.rough_cut_shots:
+                src_cam = shot.camera_id
+                for cid, asset in state.media_assets.items():
+                    if asset.media_ref == shot.audio_media_ref:
+                        src_cam = cid
+                        break
+                trim_db = per_cam_trim_db.get(src_cam)
+                if trim_db is not None and abs(trim_db) >= 2.5:
+                    builder.add_operation(
+                        "set_audio_level",
+                        clip_id=f"{shot.shot_id}_a",
+                        track_id=audio_target_tracks[0],
+                        params={
+                            "gain_db": float(trim_db),
+                            "camera_id": src_cam,
+                            "level_matching": True,
+                        },
+                        confidence=0.92,
+                        rationale=f"Level-match microphone '{src_cam}' by {trim_db:+.1f} dB prior to master loudnorm",
+                    )
 
-    builder.add_operation(
-        "set_audio_level",
-        track_id="A2",
-        params={
-            "gain_db": float(audio_rules.get("music_duck_db", -18.0)),
-            "target_lufs": float(audio_rules.get("target_lufs", -16.0)),
-            "true_peak_dbtp": float(audio_rules.get("true_peak_dbtp", -1.5)),
-            "duck_under_dialogue": True,
-        },
-        confidence=0.96,
-        rationale="Configure music bed ducking level relative to dialogue master A1",
-    )
+        if "A1" in audio_target_tracks and len(audio_target_tracks) == 1:
+            builder.add_operation(
+                "set_audio_level",
+                track_id="A2",
+                params={
+                    "gain_db": float(audio_rules.get("music_duck_db", -18.0)),
+                    "target_lufs": loudness_override,
+                    "true_peak_dbtp": float(audio_rules.get("true_peak_dbtp", -1.5)),
+                    "duck_under_dialogue": True,
+                },
+                confidence=0.96,
+                rationale="Configure music bed ducking level relative to dialogue master A1",
+            )
 
     for cue in captions:
         in_f = state.sec_to_frame(cue.start_sec)
@@ -762,6 +986,7 @@ def run_audio_graphics_qc_agent(
                 "text": cue.text,
                 "srt_path": state.artifacts.get("captions_srt", ""),
                 "ass_path": state.artifacts.get("captions_ass", ""),
+                "caption_style": caption_style,
             },
             confidence=cue.confidence,
             rationale=f"Add caption cue #{cue.index} ({cue.speaker_id})",
@@ -780,10 +1005,12 @@ def run_audio_graphics_qc_agent(
                 "title": lt.title,
                 "subtitle": lt.subtitle,
                 "accent_hex": lt.accent_hex,
+                "template": lt.template,
+                "position": lt.position,
                 "kdenlive_title_xml": lt.kdenlive_title_xml,
             },
             confidence=0.95,
-            rationale=f"Place lower-third graphic for '{lt.title}' on V2",
+            rationale=f"Place lower-third graphic for '{lt.title}' ({lt.template}) on V2",
         )
 
     for issue in qc_report.issues:
@@ -812,5 +1039,12 @@ def run_audio_graphics_qc_agent(
             rationale=issue.message,
         )
 
-    report_progress(0.98, f"QC {'PASSED' if qc_report.passed else 'FAILED'} ({len(qc_report.issues)} findings)")
+    if builder.operation_count == 0:
+        report_progress(0.98, "No audio/graphics/QC operations emitted for current scope")
+        return None
+
+    report_progress(
+        0.98,
+        f"QC {'PASSED' if qc_report.passed else 'FAILED'} ({len(qc_report.issues)} findings)",
+    )
     return builder.build()

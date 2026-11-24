@@ -31,13 +31,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install MLT, FFmpeg, frei0r & Xvfb tooling
+      - name: Install MLT, FFmpeg, frei0r, cppcheck & Xvfb tooling
         run: |
-          sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+          APT_OPTS=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::ForceIPv4=true)
+          sudo apt-get "${APT_OPTS[@]}" update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get "${APT_OPTS[@]}" install -y --no-install-recommends \
             melt \
             ffmpeg \
             frei0r-plugins \
+            cppcheck \
             xvfb
 
       - name: Set up Python 3.12
@@ -45,25 +47,36 @@ jobs:
         with:
           python-version: "3.12"
           cache: "pip"
-          cache-dependency-path: "requirements-bangonpro.txt"
+          cache-dependency-path: "requirements-bangonpro.lock"
 
-      - name: Install pinned Bang On Pro Python dependencies
+      - name: Install locked Bang On Pro Python dependencies & ruff
         run: |
           python3 -m pip install --upgrade pip
-          python3 -m pip install -r requirements-bangonpro.txt PyYAML Pillow opencv-python-headless
+          python3 -m pip install -r requirements-bangonpro.lock ruff
 
-      - name: Validate packaging scripts, CraftConfig.ini & workflow YAML syntax
+      - name: Static analysis (ruff + cppcheck on src/bangonpro/)
+        run: |
+          ruff check --select E9,F63,F7,F82,S602,S307 bangonpro/ tests/bangonpro/
+          ruff check bangonpro/macos/
+          cppcheck --library=qt --enable=warning,portability --suppress=missingIncludeSystem --inline-suppr --error-exitcode=1 -j"$(nproc)" src/bangonpro/
+
+      - name: Validate packaging scripts, lockfile, CraftConfig.ini & workflow YAML syntax
         run: |
           bash -n packaging/macos/build_macos_arm64.sh
           bash -n packaging/macos/bootstrap_ai_runtime.sh
           python3 -m py_compile packaging/macos/craft_blueprint.py
           python3 -c '
-          import configparser, glob, yaml
+          import configparser, glob, re, yaml
           cp = configparser.ConfigParser()
           cp.optionxform = str
           read_ok = cp.read("packaging/macos/CraftConfig.ini", encoding="utf-8")
           assert read_ok and "macos-arm-clang" in cp, "Invalid CraftConfig.ini"
           assert cp["General"]["Branch"] == "master"
+          with open("requirements-bangonpro.lock", "r", encoding="utf-8") as fh:
+              lock_lines = [l.strip() for l in fh if l.strip() and not l.strip().startswith("#")]
+          assert lock_lines, "requirements-bangonpro.lock is empty"
+          for line in lock_lines:
+              assert re.match(r"^[A-Za-z0-9_.-]+==[A-Za-z0-9_.+-]+$", line), f"Non-locked entry: {line}"
           for path in sorted(glob.glob(".github/workflows/*.yml")):
               with open(path, "r", encoding="utf-8") as fh:
                   doc = yaml.safe_load(fh)
@@ -78,6 +91,7 @@ jobs:
           QT_QPA_PLATFORM=offscreen \
           xvfb-run -a python3 tests/bangonpro/run_all_checks.py \
             --report-dir reports/qa \
+            --require-ruff \
             --verbose
 
       - name: Upload QA & Security Compliance test reports
@@ -101,8 +115,9 @@ jobs:
 
       - name: Install Qt5, KF5, MLT, FFmpeg, frei0r & build dependencies
         run: |
-          sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+          APT_OPTS=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::ForceIPv4=true)
+          sudo apt-get "${APT_OPTS[@]}" update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get "${APT_OPTS[@]}" install -y --no-install-recommends \
             build-essential \
             cmake \
             ninja-build \
@@ -164,12 +179,12 @@ jobs:
         with:
           python-version: "3.12"
           cache: "pip"
-          cache-dependency-path: "requirements-bangonpro.txt"
+          cache-dependency-path: "requirements-bangonpro.lock"
 
-      - name: Install pinned Bang On Pro Python dependencies
+      - name: Install locked Bang On Pro Python dependencies
         run: |
           python3 -m pip install --upgrade pip
-          python3 -m pip install -r requirements-bangonpro.txt PyYAML Pillow opencv-python-headless
+          python3 -m pip install -r requirements-bangonpro.lock
 
       - name: Restore ccache
         uses: actions/cache@v4

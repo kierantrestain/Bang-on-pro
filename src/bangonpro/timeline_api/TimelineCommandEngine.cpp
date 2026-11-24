@@ -5,6 +5,7 @@
 
 #include "TimelineCommandEngine.h"
 
+#include <QCryptographicHash>
 #include <QDateTime>
 #include <QJsonDocument>
 #include <QSet>
@@ -13,10 +14,78 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <utility>
 
 namespace BangOnPro {
 
 namespace {
+
+bool isValidIdentifier(const QString &value, int maxLen = 256)
+{
+    const QString trimmed = value.trimmed();
+    if (trimmed.isEmpty() || value.size() > maxLen) {
+        return false;
+    }
+    for (const QChar ch : value) {
+        const ushort u = ch.unicode();
+        if (u < 0x20 || u == 0x7F) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool isValidServiceIdentifier(const QString &value, int maxLen = 128)
+{
+    if (!isValidIdentifier(value, maxLen)) {
+        return false;
+    }
+    const QString trimmed = value.trimmed();
+    if (trimmed.contains(QStringLiteral("..")) || trimmed.contains(QLatin1Char('/')) || trimmed.contains(QLatin1Char('\\'))) {
+        return false;
+    }
+    for (const QChar ch : trimmed) {
+        if (ch.isSpace()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+QJsonArray stringListToJsonArray(const QStringList &list)
+{
+    QJsonArray arr;
+    for (const QString &s : list) {
+        arr.append(s);
+    }
+    return arr;
+}
+
+QString computeFingerprintDigest(const TimelineStateFingerprint &fp)
+{
+    QCryptographicHash hasher(QCryptographicHash::Sha256);
+    hasher.addData(QByteArrayLiteral("proj="));
+    hasher.addData(fp.projectId.toUtf8());
+    hasher.addData(QByteArrayLiteral("\nseq="));
+    hasher.addData(fp.sequenceId.toUtf8());
+    hasher.addData(QByteArrayLiteral("\nmut="));
+    hasher.addData(QByteArray::number(fp.backendMutationCounter));
+    hasher.addData(QByteArrayLiteral("\ntracks:"));
+    for (const QString &tid : fp.trackIds) {
+        hasher.addData(QByteArrayLiteral("\nT:"));
+        hasher.addData(tid.toUtf8());
+        hasher.addData(QByteArrayLiteral("="));
+        hasher.addData(fp.trackSignatures.value(tid).toUtf8());
+    }
+    hasher.addData(QByteArrayLiteral("\nclips:"));
+    for (const QString &cid : fp.clipIds) {
+        hasher.addData(QByteArrayLiteral("\nC:"));
+        hasher.addData(cid.toUtf8());
+        hasher.addData(QByteArrayLiteral("="));
+        hasher.addData(fp.clipSignatures.value(cid).toUtf8());
+    }
+    return QString::fromLatin1(hasher.result().toHex());
+}
 
 bool jsonValueIsStrictInteger(const QJsonValue &val, qint64 *out = nullptr)
 {
@@ -328,9 +397,9 @@ bool extractSpeedPercent(const QJsonObject &params, double *speedPercentOut, QSt
             return false;
         }
         const double sp = v.toDouble();
-        if (!std::isfinite(sp) || std::abs(sp) < 1.0 || std::abs(sp) > 10000.0) {
+        if (!std::isfinite(sp) || sp < 1.0 || sp > 10000.0) {
             if (errorOut != nullptr) {
-                *errorOut = QStringLiteral("set_clip_speed speed_percent (%1) must have magnitude within [1.0, 10000.0]").arg(sp);
+                *errorOut = QStringLiteral("set_clip_speed speed_percent (%1) must be finite and within [1.0, 10000.0]").arg(sp);
             }
             return false;
         }
@@ -349,8 +418,14 @@ bool extractSpeedPercent(const QJsonObject &params, double *speedPercentOut, QSt
             return false;
         }
         const double ratio = v.toDouble();
+        if (!std::isfinite(ratio) || ratio < 0.01 || ratio > 100.0) {
+            if (errorOut != nullptr) {
+                *errorOut = QStringLiteral("set_clip_speed speed ratio (%1) must be finite and within [0.01, 100.0]").arg(ratio);
+            }
+            return false;
+        }
         const double sp = ratio * 100.0;
-        if (!std::isfinite(sp) || std::abs(sp) < 1.0 || std::abs(sp) > 10000.0) {
+        if (!std::isfinite(sp) || sp < 1.0 || sp > 10000.0) {
             if (errorOut != nullptr) {
                 *errorOut = QStringLiteral("set_clip_speed speed ratio (%1) out of valid range").arg(ratio);
             }
@@ -568,7 +643,413 @@ QString buildLowerThirdTitleXml(const QString &speakerName, const QString &subti
     return xml;
 }
 
+QMap<QString, QJsonObject> indexJsonArrayByKey(const QJsonArray &arr, const QString &idField)
+{
+    QMap<QString, QJsonObject> map;
+    for (const QJsonValue &v : arr) {
+        if (!v.isObject()) {
+            continue;
+        }
+        const QJsonObject o = v.toObject();
+        const QString id = o.value(idField).toString();
+        if (!id.isEmpty()) {
+            map.insert(id, o);
+        }
+    }
+    return map;
+}
+
+QJsonObject summarizeClipJson(const QJsonObject &clipObj)
+{
+    const QJsonObject fr = clipObj.value(QStringLiteral("frame_range")).toObject();
+    const int inFrame = fr.value(QStringLiteral("in_frame")).toInt(0);
+    const int outFrame = fr.value(QStringLiteral("out_frame")).toInt(0);
+    const int timelineStart = fr.value(QStringLiteral("timeline_start")).toInt(0);
+    const int duration = qMax(0, outFrame - inFrame);
+
+    QJsonObject s;
+    s.insert(QStringLiteral("clip_id"), clipObj.value(QStringLiteral("clip_id")).toString());
+    s.insert(QStringLiteral("sequence_id"), clipObj.value(QStringLiteral("sequence_id")).toString());
+    s.insert(QStringLiteral("track_id"), clipObj.value(QStringLiteral("track_id")).toString());
+    s.insert(QStringLiteral("media_ref"), clipObj.value(QStringLiteral("media_ref")).toString());
+    s.insert(QStringLiteral("name"), clipObj.value(QStringLiteral("name")).toString());
+    s.insert(QStringLiteral("in_frame"), inFrame);
+    s.insert(QStringLiteral("out_frame"), outFrame);
+    s.insert(QStringLiteral("timeline_start"), timelineStart);
+    s.insert(QStringLiteral("timeline_end"), timelineStart + duration);
+    s.insert(QStringLiteral("duration_frames"), duration);
+    s.insert(QStringLiteral("speed_percent"), clipObj.value(QStringLiteral("speed_percent")).toDouble(100.0));
+    s.insert(QStringLiteral("pitch_compensate"), clipObj.value(QStringLiteral("pitch_compensate")).toBool(true));
+    s.insert(QStringLiteral("audio_gain_db"), clipObj.value(QStringLiteral("audio_gain_db")).toDouble(0.0));
+    s.insert(QStringLiteral("effect_count"), clipObj.value(QStringLiteral("effects")).toArray().size());
+    return s;
+}
+
+int computeSequenceDurationFrames(const QJsonObject &stateSnap, const QString &sequenceId)
+{
+    int maxEnd = 0;
+    const QJsonArray clips = stateSnap.value(QStringLiteral("clips")).toArray();
+    for (const QJsonValue &v : clips) {
+        const QJsonObject c = v.toObject();
+        const QString cSeq = c.value(QStringLiteral("sequence_id")).toString();
+        if (!sequenceId.isEmpty() && !cSeq.isEmpty() && cSeq != sequenceId) {
+            continue;
+        }
+        const QJsonObject fr = c.value(QStringLiteral("frame_range")).toObject();
+        const int inFrame = fr.value(QStringLiteral("in_frame")).toInt(0);
+        const int outFrame = fr.value(QStringLiteral("out_frame")).toInt(0);
+        const int start = fr.value(QStringLiteral("timeline_start")).toInt(0);
+        const int end = start + qMax(0, outFrame - inFrame);
+        if (end > maxEnd) {
+            maxEnd = end;
+        }
+    }
+    return maxEnd;
+}
+
+QJsonObject diffCollectionById(const QJsonArray &beforeArr, const QJsonArray &afterArr, const QString &idField)
+{
+    const QMap<QString, QJsonObject> beforeMap = indexJsonArrayByKey(beforeArr, idField);
+    const QMap<QString, QJsonObject> afterMap = indexJsonArrayByKey(afterArr, idField);
+
+    QJsonArray added;
+    QJsonArray removed;
+    QJsonArray modified;
+
+    for (auto it = afterMap.cbegin(); it != afterMap.cend(); ++it) {
+        if (!beforeMap.contains(it.key())) {
+            added.append(it.value());
+        } else if (beforeMap.value(it.key()) != it.value()) {
+            QJsonObject mod;
+            mod.insert(idField, it.key());
+            mod.insert(QStringLiteral("before"), beforeMap.value(it.key()));
+            mod.insert(QStringLiteral("after"), it.value());
+            modified.append(mod);
+        }
+    }
+    for (auto it = beforeMap.cbegin(); it != beforeMap.cend(); ++it) {
+        if (!afterMap.contains(it.key())) {
+            removed.append(it.value());
+        }
+    }
+
+    QJsonObject result;
+    result.insert(QStringLiteral("added"), added);
+    result.insert(QStringLiteral("removed"), removed);
+    result.insert(QStringLiteral("modified"), modified);
+    result.insert(QStringLiteral("before_count"), beforeMap.size());
+    result.insert(QStringLiteral("after_count"), afterMap.size());
+    result.insert(QStringLiteral("delta"), afterMap.size() - beforeMap.size());
+    return result;
+}
+
+void populateIsolatedStateDiff(const QJsonObject &beforeSnap, const QJsonObject &afterSnap, const QString &sequenceId, QJsonObject *diffOut)
+{
+    if (diffOut == nullptr) {
+        return;
+    }
+
+    // Tracks diff
+    const QMap<QString, QJsonObject> beforeTracks = indexJsonArrayByKey(beforeSnap.value(QStringLiteral("tracks")).toArray(), QStringLiteral("track_id"));
+    const QMap<QString, QJsonObject> afterTracks = indexJsonArrayByKey(afterSnap.value(QStringLiteral("tracks")).toArray(), QStringLiteral("track_id"));
+    QJsonArray tracksAdded;
+    QJsonArray tracksRemoved;
+    for (auto it = afterTracks.cbegin(); it != afterTracks.cend(); ++it) {
+        if (!beforeTracks.contains(it.key())) {
+            QJsonObject t;
+            t.insert(QStringLiteral("track_id"), it.key());
+            t.insert(QStringLiteral("name"), it.value().value(QStringLiteral("name")).toString());
+            t.insert(QStringLiteral("kind"), it.value().value(QStringLiteral("kind")).toString());
+            t.insert(QStringLiteral("index"), it.value().value(QStringLiteral("index")).toInt());
+            tracksAdded.append(t);
+        }
+    }
+    for (auto it = beforeTracks.cbegin(); it != beforeTracks.cend(); ++it) {
+        if (!afterTracks.contains(it.key())) {
+            tracksRemoved.append(it.key());
+        }
+    }
+    diffOut->insert(QStringLiteral("tracks_added"), tracksAdded);
+    diffOut->insert(QStringLiteral("tracks_removed"), tracksRemoved);
+
+    // Media diff
+    const QMap<QString, QJsonObject> beforeMedia = indexJsonArrayByKey(beforeSnap.value(QStringLiteral("media_bin")).toArray(), QStringLiteral("media_ref"));
+    const QMap<QString, QJsonObject> afterMedia = indexJsonArrayByKey(afterSnap.value(QStringLiteral("media_bin")).toArray(), QStringLiteral("media_ref"));
+    QJsonArray mediaAdded;
+    for (auto it = afterMedia.cbegin(); it != afterMedia.cend(); ++it) {
+        if (!beforeMedia.contains(it.key())) {
+            mediaAdded.append(it.value());
+        }
+    }
+    diffOut->insert(QStringLiteral("media_added"), mediaAdded);
+
+    // Clips diff
+    const QMap<QString, QJsonObject> beforeClips = indexJsonArrayByKey(beforeSnap.value(QStringLiteral("clips")).toArray(), QStringLiteral("clip_id"));
+    const QMap<QString, QJsonObject> afterClips = indexJsonArrayByKey(afterSnap.value(QStringLiteral("clips")).toArray(), QStringLiteral("clip_id"));
+    QJsonArray clipsAdded;
+    QJsonArray clipsRemoved;
+    QJsonArray clipsModified;
+
+    for (auto it = afterClips.cbegin(); it != afterClips.cend(); ++it) {
+        if (!beforeClips.contains(it.key())) {
+            clipsAdded.append(summarizeClipJson(it.value()));
+        } else {
+            const QJsonObject &prev = beforeClips.value(it.key());
+            const QJsonObject &curr = it.value();
+            if (prev != curr) {
+                QJsonArray changedFields;
+                const QStringList watchedFields = {
+                    QStringLiteral("track_id"),      QStringLiteral("frame_range"),         QStringLiteral("speed_percent"),
+                    QStringLiteral("pitch_compensate"), QStringLiteral("audio_gain_db"),    QStringLiteral("audio_automation"),
+                    QStringLiteral("effects"),       QStringLiteral("intrinsic_keyframes"), QStringLiteral("camera_id"),
+                    QStringLiteral("name"),          QStringLiteral("metadata"),
+                };
+                for (const QString &field : watchedFields) {
+                    if (prev.value(field) != curr.value(field)) {
+                        changedFields.append(field);
+                    }
+                }
+                QJsonObject mod;
+                mod.insert(QStringLiteral("clip_id"), it.key());
+                mod.insert(QStringLiteral("changed_fields"), changedFields);
+                mod.insert(QStringLiteral("before"), summarizeClipJson(prev));
+                mod.insert(QStringLiteral("after"), summarizeClipJson(curr));
+                clipsModified.append(mod);
+            }
+        }
+    }
+    for (auto it = beforeClips.cbegin(); it != beforeClips.cend(); ++it) {
+        if (!afterClips.contains(it.key())) {
+            clipsRemoved.append(summarizeClipJson(it.value()));
+        }
+    }
+    diffOut->insert(QStringLiteral("clips_added"), clipsAdded);
+    diffOut->insert(QStringLiteral("clips_removed"), clipsRemoved);
+    diffOut->insert(QStringLiteral("clips_modified"), clipsModified);
+
+    // Duration delta
+    const int durationBefore = computeSequenceDurationFrames(beforeSnap, sequenceId);
+    const int durationAfter = computeSequenceDurationFrames(afterSnap, sequenceId);
+    diffOut->insert(QStringLiteral("duration_before"), durationBefore);
+    diffOut->insert(QStringLiteral("duration_after"), durationAfter);
+    diffOut->insert(QStringLiteral("duration_delta"), durationAfter - durationBefore);
+
+    // Markers, captions, masks, transitions, lower thirds
+    diffOut->insert(QStringLiteral("markers"),
+                    diffCollectionById(beforeSnap.value(QStringLiteral("markers")).toArray(), afterSnap.value(QStringLiteral("markers")).toArray(),
+                                       QStringLiteral("marker_id")));
+    diffOut->insert(QStringLiteral("captions"),
+                    diffCollectionById(beforeSnap.value(QStringLiteral("captions")).toArray(), afterSnap.value(QStringLiteral("captions")).toArray(),
+                                       QStringLiteral("caption_id")));
+    diffOut->insert(QStringLiteral("masks"),
+                    diffCollectionById(beforeSnap.value(QStringLiteral("masks")).toArray(), afterSnap.value(QStringLiteral("masks")).toArray(),
+                                       QStringLiteral("mask_id")));
+    diffOut->insert(QStringLiteral("transitions"),
+                    diffCollectionById(beforeSnap.value(QStringLiteral("transitions")).toArray(), afterSnap.value(QStringLiteral("transitions")).toArray(),
+                                       QStringLiteral("transition_instance_id")));
+    diffOut->insert(QStringLiteral("lower_thirds"),
+                    diffCollectionById(beforeSnap.value(QStringLiteral("lower_thirds")).toArray(), afterSnap.value(QStringLiteral("lower_thirds")).toArray(),
+                                       QStringLiteral("lower_third_id")));
+
+    // Backward-compatible collection counts delta
+    QJsonObject countsDelta;
+    const QStringList collections = {QStringLiteral("media_bin"),         QStringLiteral("tracks"),        QStringLiteral("clips"),
+                                     QStringLiteral("captions"),          QStringLiteral("markers"),       QStringLiteral("masks"),
+                                     QStringLiteral("transitions"),       QStringLiteral("lower_thirds"),  QStringLiteral("camera_selections"),
+                                     QStringLiteral("sync_groups"),       QStringLiteral("export_requests")};
+    for (const QString &key : collections) {
+        const int beforeCount = beforeSnap.value(key).toArray().size();
+        const int afterCount = afterSnap.value(key).toArray().size();
+        if (beforeCount != afterCount) {
+            QJsonObject d;
+            d.insert(QStringLiteral("before"), beforeCount);
+            d.insert(QStringLiteral("after"), afterCount);
+            d.insert(QStringLiteral("delta"), afterCount - beforeCount);
+            countsDelta.insert(key, d);
+        }
+    }
+    diffOut->insert(QStringLiteral("collection_deltas"), countsDelta);
+}
+
+void collectReferencedExistingEntities(const QVector<TimelineOperation> &ops, const QSet<QString> *selectedOpIds, QSet<QString> *referencedTracksOut,
+                                       QSet<QString> *referencedClipsOut)
+{
+    QSet<QString> intraCreatedTracks;
+    QSet<QString> intraCreatedClips;
+
+    auto addTrackRef = [&](const QString &raw) {
+        const QString tid = raw.trimmed();
+        if (!tid.isEmpty() && !intraCreatedTracks.contains(tid)) {
+            referencedTracksOut->insert(tid);
+        }
+    };
+    auto addClipRef = [&](const QString &raw) {
+        const QString cid = raw.trimmed();
+        if (!cid.isEmpty() && !intraCreatedClips.contains(cid)) {
+            referencedClipsOut->insert(cid);
+        }
+    };
+
+    for (const TimelineOperation &op : ops) {
+        if (selectedOpIds != nullptr && !selectedOpIds->contains(op.opId)) {
+            continue;
+        }
+        if (op.type == QStringLiteral("create_track")) {
+            const QString tid = !op.trackId.trimmed().isEmpty() ? op.trackId.trimmed() : op.params.value(QStringLiteral("track_id")).toString().trimmed();
+            if (!tid.isEmpty()) {
+                intraCreatedTracks.insert(tid);
+            }
+            continue;
+        }
+        if (op.type == QStringLiteral("place_clip")) {
+            addTrackRef(!op.trackId.trimmed().isEmpty() ? op.trackId : op.params.value(QStringLiteral("track_id")).toString());
+            const QString cid = !op.clipId.trimmed().isEmpty() ? op.clipId.trimmed() : op.params.value(QStringLiteral("clip_id")).toString().trimmed();
+            if (!cid.isEmpty()) {
+                intraCreatedClips.insert(cid);
+            }
+            continue;
+        }
+        if (op.type == QStringLiteral("move_clip")) {
+            addClipRef(op.clipId);
+            addTrackRef(!op.trackId.trimmed().isEmpty() ? op.trackId : firstNonEmptyStringParam(op.params, {QStringLiteral("target_track_id"), QStringLiteral("track_id")}));
+            continue;
+        }
+        if (op.type == QStringLiteral("trim_clip") || op.type == QStringLiteral("delete_clip") || op.type == QStringLiteral("set_clip_speed")) {
+            addClipRef(op.clipId);
+            continue;
+        }
+        if (op.type == QStringLiteral("split_clip")) {
+            addClipRef(op.clipId);
+            const QString rightId =
+                firstNonEmptyStringParam(op.params, {QStringLiteral("new_clip_id"), QStringLiteral("right_clip_id"), QStringLiteral("second_clip_id")});
+            if (!rightId.isEmpty()) {
+                intraCreatedClips.insert(rightId);
+            }
+            continue;
+        }
+        if (op.type == QStringLiteral("sync_clips")) {
+            const QJsonArray clipIdsArr = op.params.value(QStringLiteral("clip_ids")).toArray();
+            for (const QJsonValue &v : clipIdsArr) {
+                addClipRef(v.toString());
+            }
+            addClipRef(op.params.value(QStringLiteral("reference_clip_id")).toString());
+            continue;
+        }
+        if (op.type == QStringLiteral("add_transition")) {
+            addTrackRef(extractTrackParamString(op.params, QStringLiteral("a_track")));
+            addTrackRef(extractTrackParamString(op.params, QStringLiteral("a_track_id")));
+            const QString bTrack = extractTrackParamString(op.params, QStringLiteral("b_track"));
+            const QString bTrackAlt = extractTrackParamString(op.params, QStringLiteral("b_track_id"));
+            addTrackRef(!bTrack.isEmpty() ? bTrack : (!bTrackAlt.isEmpty() ? bTrackAlt : op.trackId));
+            addClipRef(op.clipId);
+            continue;
+        }
+        if (op.type == QStringLiteral("add_lower_third")) {
+            addTrackRef(op.trackId);
+            const QString cid = !op.clipId.trimmed().isEmpty() ? op.clipId.trimmed() : op.params.value(QStringLiteral("clip_id")).toString().trimmed();
+            if (!cid.isEmpty()) {
+                intraCreatedClips.insert(cid);
+            }
+            continue;
+        }
+        if (op.type == QStringLiteral("add_effect") || op.type == QStringLiteral("add_audio_filter") || op.type == QStringLiteral("set_effect_param") ||
+            op.type == QStringLiteral("set_keyframe") || op.type == QStringLiteral("set_audio_level") || op.type == QStringLiteral("apply_mask") ||
+            op.type == QStringLiteral("select_camera") || op.type == QStringLiteral("add_marker") || op.type == QStringLiteral("add_caption")) {
+            addClipRef(op.clipId);
+            addTrackRef(op.trackId);
+        }
+    }
+}
+
 } // namespace
+
+// ============================================================================
+// Freshness, Fingerprint, and Dependency Struct Serializers
+// ============================================================================
+
+QJsonObject TimelineStateFingerprint::toJson() const
+{
+    QJsonObject obj;
+    obj.insert(QStringLiteral("valid"), valid);
+    obj.insert(QStringLiteral("project_id"), projectId);
+    obj.insert(QStringLiteral("sequence_id"), sequenceId);
+    obj.insert(QStringLiteral("engine_revision"), engineRevision);
+    obj.insert(QStringLiteral("backend_mutation_counter"), backendMutationCounter);
+    obj.insert(QStringLiteral("track_ids"), stringListToJsonArray(trackIds));
+    obj.insert(QStringLiteral("clip_ids"), stringListToJsonArray(clipIds));
+    obj.insert(QStringLiteral("digest"), digest);
+    return obj;
+}
+
+QString proposalFreshnessStatusToString(ProposalFreshnessStatus status)
+{
+    switch (status) {
+    case ProposalFreshnessStatus::Fresh:
+        return QStringLiteral("fresh");
+    case ProposalFreshnessStatus::StaleRevision:
+        return QStringLiteral("stale_revision");
+    case ProposalFreshnessStatus::ManualEditDrift:
+        return QStringLiteral("manual_edit_drift");
+    case ProposalFreshnessStatus::ContextMismatch:
+        return QStringLiteral("context_mismatch");
+    case ProposalFreshnessStatus::EntityConflict:
+        return QStringLiteral("entity_conflict");
+    case ProposalFreshnessStatus::NotFound:
+        return QStringLiteral("not_found");
+    }
+    return QStringLiteral("unknown");
+}
+
+QJsonObject ProposalFreshnessReport::toJson() const
+{
+    QJsonObject obj;
+    obj.insert(QStringLiteral("request_id"), requestId);
+    obj.insert(QStringLiteral("status"), proposalFreshnessStatusToString(status));
+    obj.insert(QStringLiteral("fresh"), fresh);
+    obj.insert(QStringLiteral("can_rebase"), canRebase);
+    obj.insert(QStringLiteral("requires_regenerate"), requiresRegenerate);
+    obj.insert(QStringLiteral("base_revision"), baseRevision);
+    obj.insert(QStringLiteral("current_revision"), currentRevision);
+    obj.insert(QStringLiteral("original_project_id"), originalProjectId);
+    obj.insert(QStringLiteral("current_project_id"), currentProjectId);
+    obj.insert(QStringLiteral("original_sequence_id"), originalSequenceId);
+    obj.insert(QStringLiteral("current_sequence_id"), currentSequenceId);
+    obj.insert(QStringLiteral("added_track_ids"), stringListToJsonArray(addedTrackIds));
+    obj.insert(QStringLiteral("removed_track_ids"), stringListToJsonArray(removedTrackIds));
+    obj.insert(QStringLiteral("added_clip_ids"), stringListToJsonArray(addedClipIds));
+    obj.insert(QStringLiteral("removed_clip_ids"), stringListToJsonArray(removedClipIds));
+    obj.insert(QStringLiteral("modified_clip_ids"), stringListToJsonArray(modifiedClipIds));
+    obj.insert(QStringLiteral("missing_referenced_tracks"), stringListToJsonArray(missingReferencedTracks));
+    obj.insert(QStringLiteral("missing_referenced_clips"), stringListToJsonArray(missingReferencedClips));
+    obj.insert(QStringLiteral("modified_referenced_clips"), stringListToJsonArray(modifiedReferencedClips));
+    obj.insert(QStringLiteral("summary"), summary);
+    obj.insert(QStringLiteral("recommended_action"), recommendedAction);
+    return obj;
+}
+
+QJsonObject BatchDependencyAnalysis::toJson() const
+{
+    QJsonObject obj;
+    obj.insert(QStringLiteral("valid"), valid);
+    obj.insert(QStringLiteral("missing_prerequisite_op_ids"), stringListToJsonArray(missingPrerequisiteOpIds));
+    obj.insert(QStringLiteral("unknown_selected_op_ids"), stringListToJsonArray(unknownSelectedOpIds));
+    if (!errorMessage.isEmpty()) {
+        obj.insert(QStringLiteral("error_message"), errorMessage);
+    }
+    QJsonArray issueArr;
+    for (const OperationDependencyIssue &issue : issues) {
+        QJsonObject io;
+        io.insert(QStringLiteral("op_id"), issue.opId);
+        io.insert(QStringLiteral("op_type"), issue.opType);
+        io.insert(QStringLiteral("required_op_id"), issue.requiredOpId);
+        io.insert(QStringLiteral("entity_kind"), issue.entityKind);
+        io.insert(QStringLiteral("entity_id"), issue.entityId);
+        io.insert(QStringLiteral("message"), issue.message);
+        issueArr.append(io);
+    }
+    obj.insert(QStringLiteral("issues"), issueArr);
+    return obj;
+}
 
 // ============================================================================
 // InMemoryTimelineBackend
@@ -579,6 +1060,76 @@ InMemoryTimelineBackend::InMemoryTimelineBackend() = default;
 QString InMemoryTimelineBackend::backendName() const
 {
     return QStringLiteral("in_memory");
+}
+
+void InMemoryTimelineBackend::setActiveContext(const QString &projectId, const QString &sequenceId)
+{
+    m_projectId = projectId.trimmed();
+    if (!sequenceId.trimmed().isEmpty()) {
+        m_state.activeSequenceId = sequenceId.trimmed();
+    } else {
+        m_state.activeSequenceId.clear();
+    }
+}
+
+QString InMemoryTimelineBackend::currentProjectId() const
+{
+    return m_projectId;
+}
+
+QString InMemoryTimelineBackend::currentSequenceId() const
+{
+    return m_state.activeSequenceId;
+}
+
+TimelineStateFingerprint InMemoryTimelineBackend::captureStateFingerprint(const QString &sequenceId) const
+{
+    TimelineStateFingerprint fp;
+    fp.valid = true;
+    fp.projectId = m_projectId;
+    fp.sequenceId = !sequenceId.isEmpty() ? sequenceId : m_state.activeSequenceId;
+    fp.backendMutationCounter = m_mutationCounter;
+
+    for (auto it = m_state.tracks.cbegin(); it != m_state.tracks.cend(); ++it) {
+        const TimelineTrack &t = it.value();
+        if (!fp.sequenceId.isEmpty() && !t.sequenceId.isEmpty() && t.sequenceId != fp.sequenceId) {
+            continue;
+        }
+        fp.trackIds.append(t.trackId);
+        fp.trackSignatures.insert(t.trackId, QStringLiteral("%1|%2|%3|%4|%5|%6")
+                                                 .arg(t.kind, t.name)
+                                                 .arg(t.index)
+                                                 .arg(t.locked ? 1 : 0)
+                                                 .arg(t.muted ? 1 : 0)
+                                                 .arg(t.effects.size()));
+    }
+    std::sort(fp.trackIds.begin(), fp.trackIds.end());
+
+    for (auto it = m_state.clips.cbegin(); it != m_state.clips.cend(); ++it) {
+        const TimelineClip &c = it.value();
+        if (!fp.sequenceId.isEmpty() && !c.sequenceId.isEmpty() && c.sequenceId != fp.sequenceId) {
+            continue;
+        }
+        fp.clipIds.append(c.clipId);
+        fp.clipSignatures.insert(c.clipId, QStringLiteral("%1|%2|%3|%4|%5|%6|%7|%8")
+                                               .arg(c.trackId, c.mediaRef)
+                                               .arg(c.frameRange.inFrame)
+                                               .arg(c.frameRange.outFrame)
+                                               .arg(c.frameRange.timelineStart)
+                                               .arg(c.speedPercent, 0, 'f', 3)
+                                               .arg(c.audioGainDb, 0, 'f', 3)
+                                               .arg(c.effects.size()));
+    }
+    std::sort(fp.clipIds.begin(), fp.clipIds.end());
+
+    fp.digest = computeFingerprintDigest(fp);
+    return fp;
+}
+
+QJsonObject InMemoryTimelineBackend::captureReadOnlyStateJson(const QString &sequenceId) const
+{
+    Q_UNUSED(sequenceId);
+    return captureStateSnapshot();
 }
 
 bool InMemoryTimelineBackend::beginTransaction(const QString &label, QString *errorOut)
@@ -606,6 +1157,7 @@ bool InMemoryTimelineBackend::commitTransaction(const QString &label, QString *e
     }
     m_inTransaction = false;
     m_transactionBackup = State{};
+    ++m_mutationCounter;
     return true;
 }
 
@@ -994,6 +1546,12 @@ TimelineOperationResult InMemoryTimelineBackend::handlePlaceClip(const TimelineO
         }
     }
 
+    const double audioGainDb = op.params.value(QStringLiteral("audio_gain_db")).toDouble(0.0);
+    if (!std::isfinite(audioGainDb) || audioGainDb < -96.0 || audioGainDb > 24.0) {
+        res.message = QStringLiteral("place_clip audio_gain_db (%1) must be finite and within [-96.0, 24.0]").arg(audioGainDb);
+        return res;
+    }
+
     TimelineClip clip;
     clip.clipId = clipId;
     clip.sequenceId = sequenceId;
@@ -1002,7 +1560,7 @@ TimelineOperationResult InMemoryTimelineBackend::handlePlaceClip(const TimelineO
     clip.name = op.params.value(QStringLiteral("name")).toString(mediaRef.isEmpty() ? clipId : mediaRef);
     clip.frameRange = fr;
     clip.cameraId = op.params.value(QStringLiteral("camera_id")).toString(track.cameraId);
-    clip.audioGainDb = op.params.value(QStringLiteral("audio_gain_db")).toDouble(0.0);
+    clip.audioGainDb = audioGainDb;
     clip.metadata = op.params.value(QStringLiteral("metadata")).toObject();
 
     m_state.clips.insert(clipId, clip);

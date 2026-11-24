@@ -82,9 +82,9 @@ public:
 
     struct TimeWarpInfo
     {
-        bool enableRemap;
+        bool enableRemap{false};
         QString timeMapData;
-        int pitchShift;
+        int pitchShift{0};
         QString imageMode;
     };
 

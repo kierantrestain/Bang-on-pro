@@ -12,12 +12,13 @@ SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import subprocess
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from fractions import Fraction
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 from scipy.fft import next_fast_len
@@ -25,7 +26,13 @@ from scipy.signal import butter, sosfiltfilt
 
 from bangonpro.ai_engine.commands import TimelineCommandBuilder
 from bangonpro.ai_engine.orchestrator import CancellationToken
-from bangonpro.ai_engine.state import MediaAsset, ProjectAnalysisState, SyncResult, TimeInterval
+from bangonpro.ai_engine.state import (
+    MediaAsset,
+    ProjectAnalysisState,
+    SyncResult,
+    TimeInterval,
+)
+from bangonpro.show_profiles.loader import get_effective_profile_settings
 
 _STANDARD_BROADCAST_FPS: tuple[tuple[int, int], ...] = (
     (24000, 1001),  # 23.976
@@ -87,7 +94,7 @@ def _parse_rational_fps(rate_str: str | None) -> tuple[int, int]:
 
 
 def probe_media_file(path: str | Path) -> dict[str, Any]:
-    """Inspect a media file using real ``ffprobe`` and return structured stream info."""
+    """Inspect a video or independent audio-recorder file via ``ffprobe``."""
     file_path = Path(path).resolve()
     if not file_path.is_file():
         raise FileNotFoundError(f"Media file not found: {file_path}")
@@ -115,19 +122,28 @@ def probe_media_file(path: str | Path) -> dict[str, Any]:
     video_stream = next((s for s in streams if s.get("codec_type") == "video"), None)
     audio_stream = next((s for s in streams if s.get("codec_type") == "audio"), None)
 
-    if video_stream is None:
-        raise ValueError(f"No video stream detected in '{file_path}'")
+    if video_stream is None and audio_stream is None:
+        raise ValueError(f"No video or audio stream detected in '{file_path}'")
 
-    fps_num, fps_den = _parse_rational_fps(
-        video_stream.get("avg_frame_rate")
-        if video_stream.get("avg_frame_rate") not in (None, "0/0")
-        else video_stream.get("r_frame_rate")
-    )
+    if video_stream is not None:
+        fps_num, fps_den = _parse_rational_fps(
+            video_stream.get("avg_frame_rate")
+            if video_stream.get("avg_frame_rate") not in (None, "0/0")
+            else video_stream.get("r_frame_rate")
+        )
+        width = int(video_stream.get("width", 0))
+        height = int(video_stream.get("height", 0))
+        video_codec: str | None = str(video_stream.get("codec_name", "unknown"))
+    else:
+        fps_num, fps_den = (0, 1)
+        width = 0
+        height = 0
+        video_codec = None
 
     duration_candidates: list[float] = []
     for src in (
         fmt.get("duration"),
-        video_stream.get("duration"),
+        video_stream.get("duration") if video_stream else None,
         audio_stream.get("duration") if audio_stream else None,
     ):
         if src is not None:
@@ -147,14 +163,16 @@ def probe_media_file(path: str | Path) -> dict[str, Any]:
         "file_path": str(file_path),
         "file_size_bytes": file_path.stat().st_size,
         "duration_sec": duration_sec,
-        "width": int(video_stream.get("width", 0)),
-        "height": int(video_stream.get("height", 0)),
+        "width": width,
+        "height": height,
         "fps_num": fps_num,
         "fps_den": fps_den,
-        "video_codec": str(video_stream.get("codec_name", "unknown")),
+        "video_codec": video_codec,
         "audio_codec": str(audio_stream.get("codec_name")) if audio_stream else None,
         "audio_sample_rate": int(audio_stream.get("sample_rate", 48000)) if audio_stream else 0,
         "audio_channels": int(audio_stream.get("channels", 0)) if audio_stream else 0,
+        "has_video": video_stream is not None,
+        "has_audio": audio_stream is not None,
         "raw_format_name": str(fmt.get("format_name", "")),
     }
 
@@ -216,7 +234,7 @@ def iter_mono_pcm_chunks(
     if chunk_duration_sec <= 0.0:
         raise ValueError("chunk_duration_sec must be > 0")
 
-    chunk_samples = max(256, int(round(chunk_duration_sec * sample_rate)))
+    chunk_samples = max(256, round(chunk_duration_sec * sample_rate))
     chunk_bytes = chunk_samples * 4  # float32 = 4 bytes/sample
 
     cmd = ["ffmpeg", "-v", "error"]
@@ -321,7 +339,7 @@ def estimate_offset_gcc_phat(
         return (0.0, 0.05, 0.0)
 
     if sync_window_sec is not None and sync_window_sec > 0.0:
-        max_samples = max(1024, int(round(sync_window_sec * sample_rate)))
+        max_samples = max(1024, round(sync_window_sec * sample_rate))
         if ref_pcm.size > max_samples:
             ref_pcm = ref_pcm[:max_samples]
         if target_pcm.size > max_samples:
@@ -354,7 +372,7 @@ def estimate_offset_gcc_phat(
 
     max_possible_lag = min(x.size, y.size) - 1
     if max_offset_sec is not None:
-        max_lag = min(max_possible_lag, int(round(max_offset_sec * sample_rate)))
+        max_lag = min(max_possible_lag, round(max_offset_sec * sample_rate))
     else:
         max_lag = max_possible_lag
 
@@ -382,7 +400,7 @@ def estimate_offset_gcc_phat(
     offset_sec = float(lag_samples) / float(sample_rate)
 
     # Compute Peak-to-Sidelobe SNR excluding a +/-20 ms guard band around peak
-    guard = max(4, int(round(0.02 * sample_rate)))
+    guard = max(4, round(0.02 * sample_rate))
     mask = np.ones(cc_window.size, dtype=bool)
     lo = max(0, peak_idx - guard)
     hi = min(cc_window.size, peak_idx + guard + 1)
@@ -415,7 +433,7 @@ def detect_recording_interruptions(
     Works in O(1) RAM when passed a filesystem path (streaming via ``iter_mono_pcm_chunks``)
     or directly on an in-memory PCM array.
     """
-    win_samples = max(64, int(round(window_sec * sample_rate)))
+    win_samples = max(64, round(window_sec * sample_rate))
     rms_db_blocks: list[np.ndarray] = []
     peak_db_blocks: list[np.ndarray] = []
 
@@ -475,7 +493,7 @@ def detect_recording_interruptions(
         return []
 
     interruptions: list[dict[str, Any]] = []
-    for take_idx, (prev_run, next_run) in enumerate(zip(active_runs, active_runs[1:]), start=2):
+    for take_idx, (prev_run, next_run) in enumerate(itertools.pairwise(active_runs), start=2):
         gap_s = prev_run[1] * window_sec
         gap_e = next_run[0] * window_sec
         gap_dur = gap_e - gap_s
@@ -511,6 +529,10 @@ def run_ingest_sync_agent(
         raise ValueError("No input camera files registered in ProjectAnalysisState")
 
     profile_cams = {cam["camera_id"]: cam for cam in state.profile.get("cameras", [])}
+    effective = get_effective_profile_settings(state.profile)
+    profile_roles: dict[str, str] = effective["camera_roles"]
+    speaker_cam_map: dict[str, str] = effective["speaker_camera_map"]
+    cam_to_speaker = {cid: spk for spk, cid in speaker_cam_map.items()}
     cam_ids = list(state.input_camera_files.keys())
 
     builder = TimelineCommandBuilder(
@@ -519,7 +541,11 @@ def run_ingest_sync_agent(
         expected_revision=state.revision,
         agent_id="ingest_sync_agent",
         agent_role="media_ingest_and_sync",
-        transaction_label="Ingest Media & GCC-PHAT Multicam Sync",
+        transaction_label=(
+            "Ingest Media & GCC-PHAT Multicam Sync"
+            if state.intent.sync_cameras
+            else "Ingest & Verify Source Media"
+        ),
         requires_approval=False,
         dry_run=state.dry_run,
         fps_num=state.fps_num,
@@ -540,7 +566,7 @@ def run_ingest_sync_agent(
     fps_report_cams: dict[str, dict[str, Any]] = {}
     any_fps_conversion = False
 
-    # 1. Probe, SHA-256 hash, and extract bounded mono PCM for every input camera
+    # 1. Probe, SHA-256 hash, and extract bounded mono PCM for every input camera/recorder
     for idx, cam_id in enumerate(cam_ids):
         token.check(f"ingest media {cam_id}")
         report_progress(0.05 + 0.45 * (idx / max(1, len(cam_ids))), f"Verifying {cam_id}")
@@ -589,12 +615,15 @@ def run_ingest_sync_agent(
             continue
 
         cam_meta = profile_cams.get(cam_id, {})
+        default_role = "audio_recorder" if probe["video_codec"] is None else "wide"
+        resolved_role = str(profile_roles.get(cam_id, cam_meta.get("role", default_role)))
+        resolved_speaker = cam_to_speaker.get(cam_id, cam_meta.get("speaker_label"))
         media_ref = f"media_{cam_id}"
         asset = MediaAsset(
             media_ref=media_ref,
             camera_id=cam_id,
-            camera_role=str(cam_meta.get("role", "wide")),
-            speaker_label=cam_meta.get("speaker_label"),
+            camera_role=resolved_role,
+            speaker_label=resolved_speaker,
             file_path=probe["file_path"],
             sha256=sha256,
             file_size_bytes=probe["file_size_bytes"],
@@ -612,7 +641,7 @@ def run_ingest_sync_agent(
         )
         state.media_assets[cam_id] = asset
 
-        fps_converted = abs(asset.fps - project_fps) > 1e-3
+        fps_converted = bool(asset.has_video and abs(asset.fps - project_fps) > 1e-3)
         if fps_converted:
             any_fps_conversion = True
         fps_report_cams[cam_id] = {
@@ -621,7 +650,8 @@ def run_ingest_sync_agent(
             "sequence_fps": round(project_fps, 6),
             "sequence_fps_rational": f"{state.fps_num}/{state.fps_den}",
             "fps_conversion_applied": fps_converted,
-            "frame_rate_ratio": round(asset.fps / project_fps, 6),
+            "frame_rate_ratio": round(asset.fps / project_fps, 6) if asset.has_video else 0.0,
+            "is_audio_only": asset.is_audio_only,
         }
 
         use_streaming = force_streaming or (asset.duration_sec > long_threshold_sec)
@@ -642,13 +672,13 @@ def run_ingest_sync_agent(
                 sync_pcm_by_cam[cam_id] = pcm
         else:
             if not use_streaming:
-                pcm = np.zeros(int(round(asset.duration_sec * sample_rate)), dtype=np.float32)
+                pcm = np.zeros(round(asset.duration_sec * sample_rate), dtype=np.float32)
                 state.audio_pcm_cache[cam_id] = pcm
                 sync_pcm_by_cam[cam_id] = pcm
             else:
                 streaming_cams.append(cam_id)
                 sync_pcm_by_cam[cam_id] = np.zeros(
-                    int(round(min(asset.duration_sec, sync_window_sec) * sample_rate)),
+                    round(min(asset.duration_sec, sync_window_sec) * sample_rate),
                     dtype=np.float32,
                 )
 
@@ -675,19 +705,27 @@ def run_ingest_sync_agent(
                 "fps_conversion_applied": fps_converted,
                 "video_codec": asset.video_codec,
                 "audio_codec": asset.audio_codec,
+                "is_audio_only": asset.is_audio_only,
                 "read_only_verified": True,
             },
             confidence=1.0,
             rationale=(
-                f"Verified source media '{cam_id}' ({asset.fps:.3f} fps -> sequence {project_fps:.3f} fps) "
-                f"via ffprobe and SHA-256 checksum"
+                f"Verified source media '{cam_id}' "
+                + (
+                    "(independent audio recorder)"
+                    if asset.is_audio_only
+                    else f"({asset.fps:.3f} fps -> sequence {project_fps:.3f} fps)"
+                )
+                + " via ffprobe and SHA-256 checksum"
             ),
         )
 
     state.missing_media = missing_media
     available_cam_ids = [cid for cid in cam_ids if cid in state.media_assets]
     if not available_cam_ids:
-        failed_desc = "; ".join(f"{m['camera_id']}={m['file_path']} ({m['reason']})" for m in missing_media)
+        failed_desc = "; ".join(
+            f"{m['camera_id']}={m['file_path']} ({m['reason']})" for m in missing_media
+        )
         raise FileNotFoundError(
             f"All {len(cam_ids)} input camera media files are missing or unreadable: {failed_desc}"
         )
@@ -698,12 +736,18 @@ def run_ingest_sync_agent(
         "fps_conversion_applied": any_fps_conversion,
         "cameras": fps_report_cams,
     }
+    state.metadata["independent_audio_recorders"] = [
+        cid
+        for cid in available_cam_ids
+        if state.media_assets[cid].is_audio_only
+        or state.media_assets[cid].camera_role == "audio_recorder"
+    ]
     state.metadata["streaming_audio_mode"] = bool(streaming_cams)
     state.metadata["streaming_audio_cameras"] = streaming_cams
     state.metadata["sync_window_sec"] = sync_window_sec
     state.metadata["chunk_duration_sec"] = chunk_duration_sec
 
-    # 2. Choose reference camera (prefer 'wide' or 'desk', else first available camera with audio)
+    # 2. Choose reference asset (prefer 'wide' or 'desk' video with audio, then audio_recorder, then any with audio)
     ref_cam_id = next(
         (
             cid
@@ -712,8 +756,16 @@ def run_ingest_sync_agent(
             and state.media_assets[cid].audio_codec
         ),
         next(
-            (cid for cid in available_cam_ids if state.media_assets[cid].audio_codec),
-            available_cam_ids[0],
+            (
+                cid
+                for cid in available_cam_ids
+                if state.media_assets[cid].camera_role == "audio_recorder"
+                and state.media_assets[cid].audio_codec
+            ),
+            next(
+                (cid for cid in available_cam_ids if state.media_assets[cid].audio_codec),
+                available_cam_ids[0],
+            ),
         ),
     )
     ref_pcm = sync_pcm_by_cam[ref_cam_id]
@@ -730,7 +782,9 @@ def run_ingest_sync_agent(
         token.check(f"gcc-phat sync {cam_id}")
         report_progress(
             0.55 + 0.35 * (idx / max(1, len(other_cams))),
-            f"Syncing {cam_id} against {ref_cam_id} (GCC-PHAT)",
+            f"Syncing {cam_id} against {ref_cam_id} (GCC-PHAT)"
+            if state.intent.sync_cameras
+            else f"Skipping sync for {cam_id} (not requested)",
         )
         asset = state.media_assets[cam_id]
         target_pcm = sync_pcm_by_cam[cam_id]
@@ -747,21 +801,33 @@ def run_ingest_sync_agent(
                     f"Low GCC-PHAT sync confidence ({conf:.2f}, SNR={snr:.1f}) for '{cam_id}'"
                 )
         else:
-            offset_sec, conf, snr = (0.0, 0.5, 0.0)
-            warnings.append(f"Skipped audio sync for '{cam_id}' (no audio or sync disabled)")
+            offset_sec, conf, snr = (0.0, 1.0 if not state.intent.sync_cameras else 0.5, 0.0)
+            if state.intent.sync_cameras:
+                warnings.append(f"Skipped audio sync for '{cam_id}' (no audio stream)")
 
         offsets_sec[cam_id] = offset_sec
-        offsets_project_frames[cam_id] = int(round(offset_sec * project_fps))
-        offsets_native_frames[cam_id] = int(round(offset_sec * asset.fps))
+        offsets_project_frames[cam_id] = round(offset_sec * project_fps)
+        offsets_native_frames[cam_id] = (
+            round(offset_sec * asset.fps) if asset.has_video else offsets_project_frames[cam_id]
+        )
         confidences[cam_id] = conf
         peak_snr[cam_id] = snr
 
-    # 3. Scan reference camera for long mid-recording interruptions / restart slates
+    # 3. Scan reference asset for long mid-recording interruptions / restart slates
     editing_rules = state.profile.get("editing_rules", {})
     interruption_gap_sec = float(editing_rules.get("interruption_gap_sec", 10.0))
-    sil_thresh_db = float(editing_rules.get("silence_threshold_db", -36.0))
+    sil_thresh_db = float(
+        state.intent.silence_threshold_db
+        if state.intent.silence_threshold_db is not None
+        else effective["silence_threshold_db"]
+    )
     ref_asset = state.media_assets[ref_cam_id]
-    if ref_asset.audio_codec is not None:
+    if ref_asset.audio_codec is not None and (
+        state.intent.remove_silence
+        or state.intent.build_rough_cut
+        or state.intent.transcribe
+        or state.intent.sync_cameras
+    ):
         interrupt_src: np.ndarray | str = (
             ref_asset.file_path
             if ref_cam_id in streaming_cams
@@ -794,9 +860,14 @@ def run_ingest_sync_agent(
     ]
     common_duration_sec = max(0.0, min(common_end_candidates))
 
+    sync_method = (
+        "skipped_not_requested"
+        if not state.intent.sync_cameras
+        else ("gcc_phat_16khz_windowed" if streaming_cams else "gcc_phat_16khz")
+    )
     state.sync_result = SyncResult(
         reference_camera_id=ref_cam_id,
-        method="gcc_phat_16khz_windowed" if streaming_cams else "gcc_phat_16khz",
+        method=sync_method,
         sample_rate=sample_rate,
         offsets_sec=offsets_sec,
         offsets_project_frames=offsets_project_frames,
@@ -807,32 +878,33 @@ def run_ingest_sync_agent(
         warnings=warnings,
     )
 
-    mean_conf = float(np.mean(list(confidences.values()))) if confidences else 1.0
-    builder.add_operation(
-        "sync_clips",
-        media_ref=state.media_assets[ref_cam_id].media_ref,
-        params={
-            "reference_camera_id": ref_cam_id,
-            "method": state.sync_result.method,
-            "sample_rate": sample_rate,
-            "sync_window_sec": sync_window_sec,
-            "offsets_sec": offsets_sec,
-            "offsets_project_frames": offsets_project_frames,
-            "offsets_native_frames": offsets_native_frames,
-            "confidences": confidences,
-            "peak_snr": peak_snr,
-            "common_duration_sec": round(common_duration_sec, 4),
-            "missing_media": missing_media,
-            "fps_conversion_applied": any_fps_conversion,
-        },
-        confidence=mean_conf,
-        rationale=(
-            f"Synchronised {len(available_cam_ids)} available cameras to '{ref_cam_id}' via GCC-PHAT "
-            f"(common overlap {common_duration_sec:.2f}s"
-            + (f", {len(missing_media)} missing camera(s) skipped" if missing_media else "")
-            + ")"
-        ),
-    )
+    if state.intent.sync_cameras:
+        mean_conf = float(np.mean(list(confidences.values()))) if confidences else 1.0
+        builder.add_operation(
+            "sync_clips",
+            media_ref=state.media_assets[ref_cam_id].media_ref,
+            params={
+                "reference_camera_id": ref_cam_id,
+                "method": state.sync_result.method,
+                "sample_rate": sample_rate,
+                "sync_window_sec": sync_window_sec,
+                "offsets_sec": offsets_sec,
+                "offsets_project_frames": offsets_project_frames,
+                "offsets_native_frames": offsets_native_frames,
+                "confidences": confidences,
+                "peak_snr": peak_snr,
+                "common_duration_sec": round(common_duration_sec, 4),
+                "missing_media": missing_media,
+                "fps_conversion_applied": any_fps_conversion,
+            },
+            confidence=mean_conf,
+            rationale=(
+                f"Synchronised {len(available_cam_ids)} available asset(s) to '{ref_cam_id}' via GCC-PHAT "
+                f"(common overlap {common_duration_sec:.2f}s"
+                + (f", {len(missing_media)} missing camera(s) skipped" if missing_media else "")
+                + ")"
+            ),
+        )
 
     report_progress(0.98, "Validated ingest & sync command batch")
     return builder.build()

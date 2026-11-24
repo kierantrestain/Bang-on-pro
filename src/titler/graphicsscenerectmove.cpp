@@ -766,11 +766,11 @@ void GraphicsSceneRectMove::mouseDoubleClickEvent(QGraphicsSceneMouseEvent *e)
 
     int ix = 1;
     QGraphicsItem *g = i.constFirst();
-    while (!(g->flags() & QGraphicsItem::ItemIsSelectable) && ix < i.count()) {
+    while (g != nullptr && !g->flags().testFlag(QGraphicsItem::ItemIsSelectable) && ix < i.count()) {
         g = i.at(ix);
         ix++;
     }
-    if ((g != nullptr) && g->type() == QGraphicsTextItem::Type && (((g->flags() & static_cast<int>((QGraphicsItem::ItemIsSelectable) != 0))) != 0)) {
+    if ((g != nullptr) && g->type() == QGraphicsTextItem::Type && g->flags().testFlag(QGraphicsItem::ItemIsSelectable)) {
         m_selectedItem = g;
     } else {
         Q_EMIT doubleClickEvent();

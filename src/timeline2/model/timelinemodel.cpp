@@ -465,10 +465,13 @@ int TimelineModel::getSubtitleByPosition(int position) const
 int TimelineModel::getTrackPosition(int trackId) const
 {
     READ_LOCK();
-    Q_ASSERT(isTrack(trackId));
-    auto it = m_allTracks.cbegin();
-    int pos = int(std::distance(it, static_cast<decltype(it)>(m_iteratorTable.at(trackId))));
-    return pos;
+    auto tableIt = m_iteratorTable.find(trackId);
+    if (tableIt == m_iteratorTable.cend()) {
+        qWarning() << "TimelineModel::getTrackPosition: unknown trackId" << trackId;
+        return -1;
+    }
+    std::list<std::shared_ptr<TrackModel>>::const_iterator trackIt = tableIt->second;
+    return int(std::distance(m_allTracks.cbegin(), trackIt));
 }
 
 int TimelineModel::getTrackMltIndex(int trackId) const

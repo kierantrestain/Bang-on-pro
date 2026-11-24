@@ -10,6 +10,7 @@ from .benchmark import (
     get_peak_rss_mb,
     run_comprehensive_benchmarks,
     run_full_benchmark,
+    run_sustained_benchmarks,
 )
 from .hardware_profiles import (
     HardwareCapabilities,
@@ -17,6 +18,7 @@ from .hardware_profiles import (
     MetalMltAssessment,
     ModelQuantizationRecommendation,
     assess_metal_mlt_support,
+    classify_host_tier,
     generate_decode_args,
     generate_export_profile,
     list_profile_names,
@@ -30,6 +32,7 @@ from .proxy_cache_manager import (
     DuplicateMediaAuditReport,
     EvictionReport,
     MediaProbeInfo,
+    ProxyCancelledError,
     ProxyDecision,
     ProxyPolicy,
     ProxyResult,
@@ -72,6 +75,7 @@ __all__ = [
     "ModelQuantizationRecommendation",
     "OffloadJobRequest",
     "OffloadJobResponse",
+    "ProxyCancelledError",
     "ProxyDecision",
     "ProxyPolicy",
     "ProxyResult",
@@ -86,6 +90,7 @@ __all__ = [
     "StorageSummary",
     "assess_metal_mlt_support",
     "build_scrubbed_manifest",
+    "classify_host_tier",
     "evaluate_proxy_policy",
     "generate_decode_args",
     "generate_export_profile",
@@ -97,6 +102,8 @@ __all__ = [
     "recommend_model_quantization",
     "run_comprehensive_benchmarks",
     "run_full_benchmark",
+    "run_sustained_benchmarks",
     "scrub_metadata_dict",
     "validate_profile_against_capabilities",
 ]
+

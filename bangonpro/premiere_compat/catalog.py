@@ -17,15 +17,15 @@ import functools
 import math
 import re
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any
 
 from .models import (
     CompatibilityStatus,
     EffectComponent,
     InterpolationMode,
-    Keyframe,
     MappedEffectResult,
     MissingDependency,
     MltFilterSpec,
@@ -61,12 +61,12 @@ _GENERIC_FONTS = {
 }
 
 # Proprietary plugin classification patterns: (regex, vendor_label, remediation)
-_PROPRIETARY_PATTERNS: List[Tuple[re.Pattern[str], str, str]] = [
+_PROPRIETARY_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
     (
         re.compile(r"(?:^|[.\s_/-])keyper(?:$|[.\s_/-])", re.IGNORECASE),
         "Keyper (Third-Party AI Keying)",
-        "Proprietary AI keying plugin not natively executable. Use Bang On Pro AI Roto/Matte "
-        "or avfilter.chromakey / rotoscoping fallback.",
+        ("Proprietary AI keying plugin not natively executable. Use Bang On Pro AI Roto/Matte "
+        "or avfilter.chromakey / rotoscoping fallback."),
     ),
     (
         re.compile(r"(?:mettle|mantra\s*vr|skybox|mettle\.flux)", re.IGNORECASE),
@@ -99,7 +99,7 @@ _PROPRIETARY_PATTERNS: List[Tuple[re.Pattern[str], str, str]] = [
 ]
 
 # Apple Audio Unit macOS-only platform plugins: (regex, display, suggested_ffmpeg_fallback)
-_APPLE_AU_PATTERNS: List[Tuple[re.Pattern[str], str, str]] = [
+_APPLE_AU_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
     (
         re.compile(r"^(?:au\.|apple\s*au|au(?:multiband|dynamics))", re.IGNORECASE),
         "Apple Audio Unit Dynamics/Compressor",
@@ -140,8 +140,8 @@ class MappingContext:
     fps: float = 25.0
     width: int = DEFAULT_WIDTH
     height: int = DEFAULT_HEIGHT
-    bundled_assets: Dict[str, str] = field(default_factory=dict)
-    asset_search_dirs: List[Path] = field(default_factory=list)
+    bundled_assets: dict[str, str] = field(default_factory=dict)
+    asset_search_dirs: list[Path] = field(default_factory=list)
     platform_name: str = "linux"
 
 
@@ -155,7 +155,7 @@ def mlt_interp_operator(mode: InterpolationMode) -> str:
 
 
 def format_mlt_scalar_keyframes(
-    param: Optional[Parameter],
+    param: Parameter | None,
     transform: Callable[[float], float],
     default_value: float,
     precision: int = 4,
@@ -167,8 +167,8 @@ def format_mlt_scalar_keyframes(
     if param.keyframes:
         # Deduplicate frames keeping last value at same frame, ordered by frame
         ordered = sorted(param.keyframes, key=lambda k: k.frame)
-        parts: List[str] = []
-        seen_frames: Dict[int, str] = {}
+        parts: list[str] = []
+        seen_frames: dict[int, str] = {}
         for kf in ordered:
             raw = _as_float(kf.value, default_value)
             val = transform(raw)
@@ -198,7 +198,7 @@ def _as_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
-def _as_point(value: Any, default: Tuple[float, float]) -> Tuple[float, float]:
+def _as_point(value: Any, default: tuple[float, float]) -> tuple[float, float]:
     if isinstance(value, tuple) and len(value) >= 2:
         return (float(value[0]), float(value[1]))
     if isinstance(value, (list,)) and len(value) >= 2:
@@ -221,7 +221,7 @@ def _db_to_linear(db: float) -> float:
     return math.pow(10.0, db / 20.0)
 
 
-def _find_param(pmap: Dict[str, Parameter], *aliases: str) -> Optional[Parameter]:
+def _find_param(pmap: dict[str, Parameter], *aliases: str) -> Parameter | None:
     for alias in aliases:
         key = alias.strip().lower()
         if key in pmap:
@@ -235,12 +235,18 @@ def _find_param(pmap: Dict[str, Parameter], *aliases: str) -> Optional[Parameter
     return None
 
 
+def _param_val(pmap: dict[str, Parameter], *aliases: str, default: Any = None) -> Any:
+    """Safely fetch Parameter.current_value with explicit None narrowing."""
+    param = _find_param(pmap, *aliases)
+    return param.current_value if param is not None else default
+
+
 def _sample_param_at_frame(
-    param: Optional[Parameter],
+    param: Parameter | None,
     frame: int,
     default: Any,
     is_point: bool = False,
-) -> Tuple[Any, InterpolationMode]:
+) -> tuple[Any, InterpolationMode]:
     """Evaluate a Premiere parameter at a target frame (piecewise linear / hold lookup)."""
     if param is None:
         return (default, InterpolationMode.LINEAR)
@@ -280,7 +286,7 @@ def _sample_param_at_frame(
     return (default, InterpolationMode.LINEAR)
 
 
-def _normalize_coord_pair(pt: Tuple[float, float], width: int, height: int) -> Tuple[float, float]:
+def _normalize_coord_pair(pt: tuple[float, float], width: int, height: int) -> tuple[float, float]:
     """Convert Premiere normalized (0..1) or pixel coordinates to pixel coordinates."""
     x, y = pt
     if -2.0 <= x <= 2.0 and -2.0 <= y <= 2.0:
@@ -289,9 +295,9 @@ def _normalize_coord_pair(pt: Tuple[float, float], width: int, height: int) -> T
 
 
 @functools.lru_cache(maxsize=1)
-def _installed_system_fonts() -> Set[str]:
+def _installed_system_fonts() -> set[str]:
     """Query installed font families safely via fontconfig (`fc-list`) without shell interpolation."""
-    fonts: Set[str] = set(_GENERIC_FONTS)
+    fonts: set[str] = set(_GENERIC_FONTS)
     try:
         proc = subprocess.run(
             ["fc-list", ":", "family"],
@@ -311,7 +317,7 @@ def _installed_system_fonts() -> Set[str]:
     return fonts
 
 
-def _resolve_external_asset(filename: str, ctx: MappingContext) -> Optional[str]:
+def _resolve_external_asset(filename: str, ctx: MappingContext) -> str | None:
     """Check whether an external asset (LUT, font, IR audio) exists in bundle or search paths."""
     base = Path(filename).name.lower()
     if base in ctx.bundled_assets:
@@ -326,9 +332,9 @@ def _resolve_external_asset(filename: str, ctx: MappingContext) -> Optional[str]
     return None
 
 
-def _check_codec_dependencies(comp: EffectComponent) -> List[MissingDependency]:
-    deps: List[MissingDependency] = []
-    seen: Set[str] = set()
+def _check_codec_dependencies(comp: EffectComponent) -> list[MissingDependency]:
+    deps: list[MissingDependency] = []
+    seen: set[str] = set()
     for p in comp.parameters:
         blob = f"{p.current_value or ''} {p.raw_arb_data or ''}"
         for match in _PROPRIETARY_CODEC_RE.finditer(blob):
@@ -375,7 +381,7 @@ def _map_motion_or_transform(
     default_center = (W / 2.0, H / 2.0)
 
     # Collect union of all keyframe frames across spatial parameters
-    frame_set: Set[int] = set()
+    frame_set: set[int] = set()
     for p in (pos_p, anchor_p, scale_p, scale_w_p, opacity_p):
         if p is not None and p.keyframes:
             for kf in p.keyframes:
@@ -386,7 +392,7 @@ def _map_motion_or_transform(
         or abs(_as_float(scale_w_p.current_value, 100.0) - _as_float(scale_p.current_value if scale_p else 100.0, 100.0)) > 0.1
     )
 
-    def _rect_at_frame(frame: int) -> Tuple[str, InterpolationMode]:
+    def _rect_at_frame(frame: int) -> tuple[str, InterpolationMode]:
         pos_raw, pos_interp = _sample_param_at_frame(pos_p, frame, default_center, is_point=True)
         anc_raw, _ = _sample_param_at_frame(anchor_p, frame, default_center, is_point=True)
         sc_y_pct, sc_interp = _sample_param_at_frame(scale_p, frame, 100.0, is_point=False)
@@ -402,14 +408,14 @@ def _map_motion_or_transform(
 
         sx = max(0.01, float(sc_x_pct) / 100.0)
         sy = max(0.01, float(sc_y_pct) / 100.0)
-        rw = max(1, int(round(W * sx)))
-        rh = max(1, int(round(H * sy)))
-        rx = int(round(px - ax * sx))
-        ry = int(round(py - ay * sy))
+        rw = max(1, round(W * sx))
+        rh = max(1, round(H * sy))
+        rx = round(px - ax * sx)
+        ry = round(py - ay * sy)
         alpha = _clamp(float(op_pct) / 100.0, 0.0, 1.0)
 
         # Prioritize explicit keyframes located exactly at `frame` (HOLD > BEZIER/EASE > LINEAR)
-        exact_interps: List[InterpolationMode] = []
+        exact_interps: list[InterpolationMode] = []
         for param_obj in (pos_p, anchor_p, scale_p, scale_w_p, opacity_p):
             if param_obj is not None:
                 for kf in param_obj.keyframes:
@@ -435,7 +441,7 @@ def _map_motion_or_transform(
         return (f"{rx} {ry} {rw} {rh} {alpha:.4f}", interp)
 
     if len(frame_set) >= 2:
-        rect_entries: List[str] = []
+        rect_entries: list[str] = []
         for f in sorted(frame_set):
             rect_str, interp = _rect_at_frame(f)
             op = mlt_interp_operator(interp)
@@ -447,7 +453,7 @@ def _map_motion_or_transform(
 
     rot_prop = format_mlt_scalar_keyframes(rot_p, lambda v: v, default_value=0.0, precision=3)
 
-    props: Dict[str, str] = {
+    props: dict[str, str] = {
         "rect": rect_prop,
         "rotation": rot_prop,
         "rotate_center": "1",
@@ -455,7 +461,7 @@ def _map_motion_or_transform(
         "distort": "1" if non_uniform_scale else "0",
     }
 
-    notes: List[str] = []
+    notes: list[str] = []
     status = CompatibilityStatus.EXACT_VALIDATED
 
     if is_transform_effect:
@@ -539,20 +545,20 @@ def _map_crop(comp: EffectComponent, ctx: MappingContext) -> MappedEffectResult:
     feather_p = _find_param(pmap, "edge feather", "feather")
     W, H = ctx.width, ctx.height
 
-    frames: Set[int] = set()
+    frames: set[int] = set()
     for p in (left_p, top_p, right_p, bottom_p):
         if p and p.keyframes:
             frames.update(kf.frame for kf in p.keyframes)
 
-    def _crop_rect(frame: int) -> Tuple[str, InterpolationMode]:
+    def _crop_rect(frame: int) -> tuple[str, InterpolationMode]:
         lp, li = _sample_param_at_frame(left_p, frame, 0.0)
         tp, ti = _sample_param_at_frame(top_p, frame, 0.0)
         rp, ri = _sample_param_at_frame(right_p, frame, 0.0)
         bp, bi = _sample_param_at_frame(bottom_p, frame, 0.0)
-        x = int(round(W * _clamp(float(lp) / 100.0, 0.0, 0.99)))
-        y = int(round(H * _clamp(float(tp) / 100.0, 0.0, 0.99)))
-        rx = int(round(W * _clamp(float(rp) / 100.0, 0.0, 0.99)))
-        by = int(round(H * _clamp(float(bp) / 100.0, 0.0, 0.99)))
+        x = round(W * _clamp(float(lp) / 100.0, 0.0, 0.99))
+        y = round(H * _clamp(float(tp) / 100.0, 0.0, 0.99))
+        rx = round(W * _clamp(float(rp) / 100.0, 0.0, 0.99))
+        by = round(H * _clamp(float(bp) / 100.0, 0.0, 0.99))
         cw = max(1, W - x - rx)
         ch = max(1, H - y - by)
         interp = next(
@@ -569,7 +575,7 @@ def _map_crop(comp: EffectComponent, ctx: MappingContext) -> MappedEffectResult:
     else:
         rect_prop, _ = _crop_rect(next(iter(frames), 0))
 
-    notes: List[str] = []
+    notes: list[str] = []
     status = CompatibilityStatus.EXACT_VALIDATED
     feather_val = _as_float(feather_p.current_value if feather_p else 0.0, 0.0)
     if feather_val > 0.0:
@@ -652,19 +658,19 @@ def _map_corner_pin(comp: EffectComponent, ctx: MappingContext) -> MappedEffectR
     pmap = comp.param_map()
     W, H = ctx.width, ctx.height
     ul = _normalize_coord_pair(
-        _as_point(_find_param(pmap, "upper left").current_value if _find_param(pmap, "upper left") else (0.0, 0.0), (0.0, 0.0)),
+        _as_point(_param_val(pmap, "upper left", default=(0.0, 0.0)), (0.0, 0.0)),
         W, H,
     )
     ur = _normalize_coord_pair(
-        _as_point(_find_param(pmap, "upper right").current_value if _find_param(pmap, "upper right") else (W, 0.0), (W, 0.0)),
+        _as_point(_param_val(pmap, "upper right", default=(W, 0.0)), (W, 0.0)),
         W, H,
     )
     lr = _normalize_coord_pair(
-        _as_point(_find_param(pmap, "lower right").current_value if _find_param(pmap, "lower right") else (W, H), (W, H)),
+        _as_point(_param_val(pmap, "lower right", default=(W, H)), (W, H)),
         W, H,
     )
     ll = _normalize_coord_pair(
-        _as_point(_find_param(pmap, "lower left").current_value if _find_param(pmap, "lower left") else (0.0, H), (0.0, H)),
+        _as_point(_param_val(pmap, "lower left", default=(0.0, H)), (0.0, H)),
         W, H,
     )
 
@@ -698,13 +704,13 @@ def _map_corner_pin(comp: EffectComponent, ctx: MappingContext) -> MappedEffectR
 
 def _map_basic_3d(comp: EffectComponent, ctx: MappingContext) -> MappedEffectResult:
     pmap = comp.param_map()
-    swivel = _as_float(_find_param(pmap, "swivel").current_value if _find_param(pmap, "swivel") else 0.0, 0.0)
-    tilt = _as_float(_find_param(pmap, "tilt").current_value if _find_param(pmap, "tilt") else 0.0, 0.0)
+    swivel = _as_float(_param_val(pmap, "swivel", default=0.0), 0.0)
+    tilt = _as_float(_param_val(pmap, "tilt", default=0.0), 0.0)
     inset_x = _clamp(abs(swivel) / 180.0 * 0.15, 0.0, 0.2)
     inset_y = _clamp(abs(tilt) / 180.0 * 0.15, 0.0, 0.2)
     notes = [
-        "Premiere Basic 3D swivel/tilt approximated with frei0r.c0rners 2.5D perspective; "
-        "specular highlight and 3D depth shading are unsupported."
+        ("Premiere Basic 3D swivel/tilt approximated with frei0r.c0rners 2.5D perspective; "
+        "specular highlight and 3D depth shading are unsupported.")
     ]
     mlt = MltFilterSpec(
         service="frei0r.c0rners",
@@ -735,8 +741,8 @@ def _map_wave_warp(comp: EffectComponent, ctx: MappingContext) -> MappedEffectRe
     pmap = comp.param_map()
     height_p = _find_param(pmap, "wave height", "height")
     speed_p = _find_param(pmap, "wave speed", "speed")
-    amplitude = max(1, int(round(_as_float(height_p.current_value if height_p else 10.0, 10.0))))
-    speed = max(0, int(round(_as_float(speed_p.current_value if speed_p else 1.0, 1.0) * 5.0)))
+    amplitude = max(1, round(_as_float(height_p.current_value if height_p else 10.0, 10.0)))
+    speed = max(0, round(_as_float(speed_p.current_value if speed_p else 1.0, 1.0) * 5.0))
     notes = ["Premiere Wave Warp approximated with MLT wave filter (sine waveform only)."]
     mlt = MltFilterSpec(
         service="wave",
@@ -809,8 +815,8 @@ def _map_gaussian_blur(comp: EffectComponent, ctx: MappingContext) -> MappedEffe
     sigma_str = format_mlt_scalar_keyframes(
         blur_p, lambda v: _clamp(max(0.0, v) * 0.4, 0.0, 250.0), default_value=10.0, precision=3
     )
-    dim_val = int(round(_as_float(dim_p.current_value if dim_p else 1.0, 1.0)))
-    props: Dict[str, str] = {"av.sigma": sigma_str, "av.steps": "2", "av.planes": "15"}
+    dim_val = round(_as_float(dim_p.current_value if dim_p else 1.0, 1.0))
+    props: dict[str, str] = {"av.sigma": sigma_str, "av.steps": "2", "av.planes": "15"}
     if dim_val == 2:  # Horizontal only
         props["av.sigmaV"] = "0.0"
     elif dim_val == 3:  # Vertical only
@@ -859,8 +865,8 @@ def _map_box_or_fast_blur(comp: EffectComponent, ctx: MappingContext) -> MappedE
     pmap = comp.param_map()
     blur_p = _find_param(pmap, "blurriness", "blur radius", "radius")
     iter_p = _find_param(pmap, "iterations")
-    radius = max(1, int(round(_clamp(_as_float(blur_p.current_value if blur_p else 10.0, 10.0) * 0.5, 1.0, 64.0))))
-    iters = max(1, int(round(_clamp(_as_float(iter_p.current_value if iter_p else 2.0, 2.0), 1.0, 6.0))))
+    radius = max(1, round(_clamp(_as_float(blur_p.current_value if blur_p else 10.0, 10.0) * 0.5, 1.0, 64.0)))
+    iters = max(1, round(_clamp(_as_float(iter_p.current_value if iter_p else 2.0, 2.0), 1.0, 6.0)))
     mlt = MltFilterSpec(
         service="avfilter.boxblur",
         media_type="video",
@@ -882,8 +888,8 @@ def _map_radial_blur(comp: EffectComponent, ctx: MappingContext) -> MappedEffect
         amt_p, lambda v: _clamp(max(0.0, v) * 0.35, 0.5, 120.0), default_value=15.0, precision=3
     )
     notes = [
-        "Premiere Radial Blur (Spin/Zoom) approximated using avfilter.gblur; "
-        "true radial spin kernel not natively available in MLT avfilter."
+        ("Premiere Radial Blur (Spin/Zoom) approximated using avfilter.gblur; "
+        "true radial spin kernel not natively available in MLT avfilter.")
     ]
     mlt = MltFilterSpec(
         service="avfilter.gblur",
@@ -937,8 +943,8 @@ def _map_drop_shadow(comp: EffectComponent, ctx: MappingContext) -> MappedEffect
     sigma = _clamp(_as_float(soft_p.current_value if soft_p else 12.0, 12.0) * 0.3, 0.5, 40.0)
     dist = _as_float(dist_p.current_value if dist_p else 10.0, 10.0)
     notes = [
-        f"Premiere Drop Shadow (distance={dist:.1f}px, softness={sigma:.1f}) approximated via "
-        "MLT vignette/blur shading; alpha-channel composited drop shadow requires track layering."
+        (f"Premiere Drop Shadow (distance={dist:.1f}px, softness={sigma:.1f}) approximated via "
+        "MLT vignette/blur shading; alpha-channel composited drop shadow requires track layering.")
     ]
     mlt = MltFilterSpec(
         service="avfilter.gblur",
@@ -992,8 +998,8 @@ def _map_glow(comp: EffectComponent, ctx: MappingContext, is_vr: bool = False) -
 
 def _map_mosaic(comp: EffectComponent, ctx: MappingContext) -> MappedEffectResult:
     pmap = comp.param_map()
-    hb = max(1.0, _as_float(_find_param(pmap, "horizontal blocks").current_value if _find_param(pmap, "horizontal blocks") else 40.0, 40.0))
-    vb = max(1.0, _as_float(_find_param(pmap, "vertical blocks").current_value if _find_param(pmap, "vertical blocks") else 40.0, 40.0))
+    hb = max(1.0, _as_float(_param_val(pmap, "horizontal blocks", default=40.0), 40.0))
+    vb = max(1.0, _as_float(_param_val(pmap, "vertical blocks", default=40.0), 40.0))
     mlt = MltFilterSpec(
         service="frei0r.pixeliz0r",
         media_type="video",
@@ -1099,7 +1105,7 @@ def _map_chromatic_aberration(
         green_p, lambda v: _clamp(v * 0.5, -255.0, 255.0), default_value=0.0, precision=1
     )
 
-    notes: List[str] = []
+    notes: list[str] = []
     status = CompatibilityStatus.EXACT_VALIDATED
     if is_vr:
         status = CompatibilityStatus.APPROXIMATED
@@ -1132,8 +1138,8 @@ def _map_chromatic_aberration(
 
 def _map_rgb_curves(comp: EffectComponent, ctx: MappingContext) -> MappedEffectResult:
     notes = [
-        "Premiere RGB Curves approximated with avfilter.curves S-curve preset; "
-        "arbitrary Bezier spline handles are approximated."
+        ("Premiere RGB Curves approximated with avfilter.curves S-curve preset; "
+        "arbitrary Bezier spline handles are approximated.")
     ]
     mlt = MltFilterSpec(
         service="avfilter.curves",
@@ -1154,15 +1160,15 @@ def _map_rgb_curves(comp: EffectComponent, ctx: MappingContext) -> MappedEffectR
 def _map_lumetri(comp: EffectComponent, ctx: MappingContext) -> MappedEffectResult:
     """Honest sub-module inspection for Adobe Lumetri Color."""
     pmap = comp.param_map()
-    filters: List[MltFilterSpec] = []
-    deps: List[MissingDependency] = []
-    notes: List[str] = [
-        "Lumetri Color mapped to FFmpeg Rec.709 filters (avfilter.eq / colorbalance / vignette / lut3d); "
-        "Adobe proprietary tone-mapping curve and colour management pipeline differ slightly."
+    filters: list[MltFilterSpec] = []
+    deps: list[MissingDependency] = []
+    notes: list[str] = [
+        ("Lumetri Color mapped to FFmpeg Rec.709 filters (avfilter.eq / colorbalance / vignette / lut3d); "
+        "Adobe proprietary tone-mapping curve and colour management pipeline differ slightly.")
     ]
 
     # 1. Inspect external LUT references (.cube, .look, .3dl, .itx)
-    found_luts: List[str] = []
+    found_luts: list[str] = []
     for p in comp.parameters:
         blob = f"{p.current_value or ''} {p.raw_arb_data or ''}"
         for m in _LUT_FILE_RE.finditer(blob):
@@ -1408,10 +1414,10 @@ def _map_bw(comp: EffectComponent, ctx: MappingContext) -> MappedEffectResult:
 
 def _map_procamp(comp: EffectComponent, ctx: MappingContext) -> MappedEffectResult:
     pmap = comp.param_map()
-    br = _clamp(_as_float(_find_param(pmap, "brightness").current_value if _find_param(pmap, "brightness") else 0.0, 0.0) / 100.0, -1.0, 1.0)
-    ct = _clamp(_as_float(_find_param(pmap, "contrast").current_value if _find_param(pmap, "contrast") else 100.0, 100.0) / 100.0, 0.1, 3.0)
-    sat = _clamp(_as_float(_find_param(pmap, "saturation").current_value if _find_param(pmap, "saturation") else 100.0, 100.0) / 100.0, 0.0, 3.0)
-    hue = _as_float(_find_param(pmap, "hue").current_value if _find_param(pmap, "hue") else 0.0, 0.0)
+    br = _clamp(_as_float(_param_val(pmap, "brightness", default=0.0), 0.0) / 100.0, -1.0, 1.0)
+    ct = _clamp(_as_float(_param_val(pmap, "contrast", default=100.0), 100.0) / 100.0, 0.1, 3.0)
+    sat = _clamp(_as_float(_param_val(pmap, "saturation", default=100.0), 100.0) / 100.0, 0.0, 3.0)
+    hue = _as_float(_param_val(pmap, "hue", default=0.0), 0.0)
     filters = [
         MltFilterSpec(
             service="avfilter.eq",
@@ -1439,8 +1445,8 @@ def _map_procamp(comp: EffectComponent, ctx: MappingContext) -> MappedEffectResu
 
 def _map_ultra_key(comp: EffectComponent, ctx: MappingContext) -> MappedEffectResult:
     pmap = comp.param_map()
-    sim = _clamp(_as_float(_find_param(pmap, "tolerance", "similarity").current_value if _find_param(pmap, "tolerance", "similarity") else 25.0, 25.0) / 100.0, 0.01, 0.9)
-    blend = _clamp(_as_float(_find_param(pmap, "soften", "choke", "blend").current_value if _find_param(pmap, "soften", "choke", "blend") else 10.0, 10.0) / 100.0, 0.0, 1.0)
+    sim = _clamp(_as_float(_param_val(pmap, "tolerance", "similarity", default=25.0), 25.0) / 100.0, 0.01, 0.9)
+    blend = _clamp(_as_float(_param_val(pmap, "soften", "choke", "blend", default=10.0), 10.0) / 100.0, 0.0, 1.0)
     notes = ["Premiere Ultra Key mapped to avfilter.chromakey; spill suppression and pedestal controls approximated."]
     mlt = MltFilterSpec(
         service="avfilter.chromakey",
@@ -1460,8 +1466,8 @@ def _map_ultra_key(comp: EffectComponent, ctx: MappingContext) -> MappedEffectRe
 
 def _map_luma_key(comp: EffectComponent, ctx: MappingContext) -> MappedEffectResult:
     pmap = comp.param_map()
-    thresh = _clamp(_as_float(_find_param(pmap, "threshold").current_value if _find_param(pmap, "threshold") else 20.0, 20.0) / 100.0, 0.0, 1.0)
-    cutoff = _clamp(_as_float(_find_param(pmap, "cutoff", "tolerance").current_value if _find_param(pmap, "cutoff", "tolerance") else 10.0, 10.0) / 100.0, 0.01, 1.0)
+    thresh = _clamp(_as_float(_param_val(pmap, "threshold", default=20.0), 20.0) / 100.0, 0.0, 1.0)
+    cutoff = _clamp(_as_float(_param_val(pmap, "cutoff", "tolerance", default=10.0), 10.0) / 100.0, 0.01, 1.0)
     mlt = MltFilterSpec(
         service="avfilter.lumakey",
         media_type="video",
@@ -1483,7 +1489,7 @@ def _map_luma_key(comp: EffectComponent, ctx: MappingContext) -> MappedEffectRes
 
 def _map_parametric_eq(comp: EffectComponent, ctx: MappingContext) -> MappedEffectResult:
     pmap = comp.param_map()
-    filters: List[MltFilterSpec] = []
+    filters: list[MltFilterSpec] = []
 
     # Check standard numbered Premiere Parametric EQ bands (1..5)
     for band in range(1, 6):
@@ -1533,7 +1539,7 @@ def _map_parametric_eq(comp: EffectComponent, ctx: MappingContext) -> MappedEffe
         )
 
     # Fallback default voice presence peaking band if XML contained opaque Arb EQ state
-    notes: List[str] = []
+    notes: list[str] = []
     status = CompatibilityStatus.EXACT_VALIDATED
     if not filters:
         status = CompatibilityStatus.APPROXIMATED
@@ -1561,7 +1567,7 @@ def _map_parametric_eq(comp: EffectComponent, ctx: MappingContext) -> MappedEffe
 
 
 def _map_graphic_eq(comp: EffectComponent, ctx: MappingContext) -> MappedEffectResult:
-    filters: List[MltFilterSpec] = []
+    filters: list[MltFilterSpec] = []
     freq_re = re.compile(r"(\d+(?:\.\d+)?)\s*(k)?\s*hz", re.IGNORECASE)
     for p in comp.parameters:
         m = freq_re.search(p.name)
@@ -1601,11 +1607,11 @@ def _map_compressor(
     comp: EffectComponent, ctx: MappingContext, is_multiband: bool = False
 ) -> MappedEffectResult:
     pmap = comp.param_map()
-    thresh_db = _as_float(_find_param(pmap, "threshold", "compressor threshold").current_value if _find_param(pmap, "threshold", "compressor threshold") else -18.0, -18.0)
-    ratio = _clamp(_as_float(_find_param(pmap, "ratio", "compressor ratio").current_value if _find_param(pmap, "ratio", "compressor ratio") else 4.0, 4.0), 1.0, 20.0)
-    attack = _clamp(_as_float(_find_param(pmap, "attack", "compressor attack").current_value if _find_param(pmap, "attack", "compressor attack") else 10.0, 10.0), 0.01, 2000.0)
-    release = _clamp(_as_float(_find_param(pmap, "release", "compressor release").current_value if _find_param(pmap, "release", "compressor release") else 120.0, 120.0), 0.01, 9000.0)
-    makeup_db = _as_float(_find_param(pmap, "makeup", "output gain", "gain").current_value if _find_param(pmap, "makeup", "output gain", "gain") else 3.0, 3.0)
+    thresh_db = _as_float(_param_val(pmap, "threshold", "compressor threshold", default=-18.0), -18.0)
+    ratio = _clamp(_as_float(_param_val(pmap, "ratio", "compressor ratio", default=4.0), 4.0), 1.0, 20.0)
+    attack = _clamp(_as_float(_param_val(pmap, "attack", "compressor attack", default=10.0), 10.0), 0.01, 2000.0)
+    release = _clamp(_as_float(_param_val(pmap, "release", "compressor release", default=120.0), 120.0), 0.01, 9000.0)
+    makeup_db = _as_float(_param_val(pmap, "makeup", "output gain", "gain", default=3.0), 3.0)
 
     thresh_lin = _clamp(_db_to_linear(thresh_db), 0.001, 1.0)
     makeup_lin = _clamp(_db_to_linear(max(0.0, makeup_db)), 1.0, 64.0)
@@ -1637,7 +1643,7 @@ def _map_compressor(
             )
         )
 
-    notes: List[str] = []
+    notes: list[str] = []
     status = CompatibilityStatus.EXACT_VALIDATED
     if is_multiband:
         status = CompatibilityStatus.APPROXIMATED
@@ -1657,9 +1663,9 @@ def _map_compressor(
 
 def _map_hard_limiter(comp: EffectComponent, ctx: MappingContext) -> MappedEffectResult:
     pmap = comp.param_map()
-    max_db = _as_float(_find_param(pmap, "maximum amplitude", "ceiling", "limit").current_value if _find_param(pmap, "maximum amplitude", "ceiling", "limit") else -1.0, -1.0)
-    boost_db = _as_float(_find_param(pmap, "input boost", "boost").current_value if _find_param(pmap, "input boost", "boost") else 0.0, 0.0)
-    rel = _clamp(_as_float(_find_param(pmap, "release").current_value if _find_param(pmap, "release") else 50.0, 50.0), 1.0, 8000.0)
+    max_db = _as_float(_param_val(pmap, "maximum amplitude", "ceiling", "limit", default=-1.0), -1.0)
+    boost_db = _as_float(_param_val(pmap, "input boost", "boost", default=0.0), 0.0)
+    rel = _clamp(_as_float(_param_val(pmap, "release", default=50.0), 50.0), 1.0, 8000.0)
     mlt = MltFilterSpec(
         service="avfilter.alimiter",
         media_type="audio",
@@ -1680,7 +1686,7 @@ def _map_hard_limiter(comp: EffectComponent, ctx: MappingContext) -> MappedEffec
 
 def _map_reverb(comp: EffectComponent, ctx: MappingContext, is_convolution: bool = False) -> MappedEffectResult:
     pmap = comp.param_map()
-    deps: List[MissingDependency] = []
+    deps: list[MissingDependency] = []
     missing_ir = False
 
     if is_convolution:
@@ -1701,13 +1707,13 @@ def _map_reverb(comp: EffectComponent, ctx: MappingContext, is_convolution: bool
                         )
                     )
 
-    decay = _clamp(_as_float(_find_param(pmap, "decay", "reverb time").current_value if _find_param(pmap, "decay", "reverb time") else 1500.0, 1500.0), 50.0, 5000.0)
-    wet = _clamp(_as_float(_find_param(pmap, "wet", "output level").current_value if _find_param(pmap, "wet", "output level") else 35.0, 35.0) / 100.0, 0.05, 0.9)
+    decay = _clamp(_as_float(_param_val(pmap, "decay", "reverb time", default=1500.0), 1500.0), 50.0, 5000.0)
+    wet = _clamp(_as_float(_param_val(pmap, "wet", "output level", default=35.0), 35.0) / 100.0, 0.05, 0.9)
     d1 = int(_clamp(decay * 0.04, 20, 200))
     d2 = int(_clamp(decay * 0.08, 45, 450))
     notes = [
-        "Premiere Studio/Convolution Reverb approximated using multi-tap avfilter.aecho "
-        "(diffuse early/late reflection algorithms differ from Adobe Reverb)."
+        ("Premiere Studio/Convolution Reverb approximated using multi-tap avfilter.aecho "
+        "(diffuse early/late reflection algorithms differ from Adobe Reverb).")
     ]
     mlt = MltFilterSpec(
         service="avfilter.aecho",
@@ -1734,7 +1740,7 @@ def _map_reverb(comp: EffectComponent, ctx: MappingContext, is_convolution: bool
 
 def _map_denoise(comp: EffectComponent, ctx: MappingContext, is_dereverb: bool = False) -> MappedEffectResult:
     pmap = comp.param_map()
-    amt = _clamp(_as_float(_find_param(pmap, "amount", "noise reduction").current_value if _find_param(pmap, "amount", "noise reduction") else 40.0, 40.0) * 0.4, 3.0, 60.0)
+    amt = _clamp(_as_float(_param_val(pmap, "amount", "noise reduction", default=40.0), 40.0) * 0.4, 3.0, 60.0)
     filters = [
         MltFilterSpec(
             service="avfilter.afftdn",
@@ -1766,7 +1772,7 @@ def _map_denoise(comp: EffectComponent, ctx: MappingContext, is_dereverb: bool =
 
 def _map_deesser(comp: EffectComponent, ctx: MappingContext) -> MappedEffectResult:
     pmap = comp.param_map()
-    amt = _clamp(_as_float(_find_param(pmap, "amount", "intensity", "threshold").current_value if _find_param(pmap, "amount", "intensity", "threshold") else 40.0, 40.0) / 100.0, 0.05, 1.0)
+    amt = _clamp(_as_float(_param_val(pmap, "amount", "intensity", "threshold", default=40.0), 40.0) / 100.0, 0.05, 1.0)
     mlt = MltFilterSpec(
         service="avfilter.deesser",
         media_type="audio",
@@ -1805,8 +1811,8 @@ def _map_highpass_lowpass(comp: EffectComponent, ctx: MappingContext, is_highpas
 
 def _map_pitch_shifter(comp: EffectComponent, ctx: MappingContext) -> MappedEffectResult:
     pmap = comp.param_map()
-    semi = _as_float(_find_param(pmap, "semi-tones", "semitones", "pitch").current_value if _find_param(pmap, "semi-tones", "semitones", "pitch") else 0.0, 0.0)
-    cents = _as_float(_find_param(pmap, "cents").current_value if _find_param(pmap, "cents") else 0.0, 0.0)
+    semi = _as_float(_param_val(pmap, "semi-tones", "semitones", "pitch", default=0.0), 0.0)
+    cents = _as_float(_param_val(pmap, "cents", default=0.0), 0.0)
     ratio = _clamp(math.pow(2.0, (semi + cents / 100.0) / 12.0), 0.25, 4.0)
     notes = ["Premiere Pitch Shifter mapped to avfilter.rubberband formant-preserving pitch ratio."]
     mlt = MltFilterSpec(
@@ -1840,8 +1846,8 @@ def _map_volume(comp: EffectComponent, ctx: MappingContext, is_channel: bool = F
         )
     ]
     if is_channel:
-        left_v = _as_float(_find_param(pmap, "left").current_value if _find_param(pmap, "left") else 0.0, 0.0)
-        right_v = _as_float(_find_param(pmap, "right").current_value if _find_param(pmap, "right") else 0.0, 0.0)
+        left_v = _as_float(_param_val(pmap, "left", default=0.0), 0.0)
+        right_v = _as_float(_param_val(pmap, "right", default=0.0), 0.0)
         pan = _clamp(0.5 + (right_v - left_v) / 40.0, 0.0, 1.0)
         filters.append(
             MltFilterSpec(
@@ -1861,7 +1867,7 @@ def _map_volume(comp: EffectComponent, ctx: MappingContext, is_channel: bool = F
 
 def _map_loudness(comp: EffectComponent, ctx: MappingContext) -> MappedEffectResult:
     pmap = comp.param_map()
-    target = _clamp(_as_float(_find_param(pmap, "target loudness", "target").current_value if _find_param(pmap, "target loudness", "target") else -14.0, -14.0), -70.0, -5.0)
+    target = _clamp(_as_float(_param_val(pmap, "target loudness", "target", default=-14.0), -14.0), -70.0, -5.0)
     notes = ["Premiere Loudness normalization mapped to single-pass avfilter.loudnorm."]
     mlt = MltFilterSpec(
         service="avfilter.loudnorm",
@@ -1906,8 +1912,8 @@ def _map_text_graphic(comp: EffectComponent, ctx: MappingContext) -> MappedEffec
     size_val = int(_clamp(round(_as_float(size_p.current_value if size_p else 64.0, 64.0)), 12, 300))
     outline_val = int(_clamp(round(_as_float(outline_p.current_value if outline_p else 2.0, 2.0)), 0, 3))
 
-    deps: List[MissingDependency] = []
-    notes: List[str] = []
+    deps: list[MissingDependency] = []
+    notes: list[str] = []
     missing_font = False
     resolved_family = "Sans"
 
@@ -1969,15 +1975,15 @@ def _map_text_graphic(comp: EffectComponent, ctx: MappingContext) -> MappedEffec
 
 def _map_mask_or_matte(comp: EffectComponent, ctx: MappingContext) -> MappedEffectResult:
     pmap = comp.param_map()
-    feather = int(_clamp(round(_as_float(_find_param(pmap, "mask feather", "feather").current_value if _find_param(pmap, "mask feather", "feather") else 8.0, 8.0)), 0, 1000))
-    invert = "1" if _as_float(_find_param(pmap, "inverted", "invert").current_value if _find_param(pmap, "inverted", "invert") else 0.0, 0.0) > 0.5 else "0"
+    feather = int(_clamp(round(_as_float(_param_val(pmap, "mask feather", "feather", default=8.0), 8.0)), 0, 1000))
+    invert = "1" if _as_float(_param_val(pmap, "inverted", "invert", default=0.0), 0.0) > 0.5 else "0"
     default_spline = '{"0":[[[0.15,0.15],[0.15,0.15],[0.15,0.15]],[[0.85,0.15],[0.85,0.15],[0.85,0.15]],[[0.85,0.85],[0.85,0.85],[0.85,0.85]],[[0.15,0.85],[0.15,0.85],[0.15,0.85]]]}'
 
     is_track_matte = "track matte" in comp.match_name.lower() or "track matte" in comp.display_name.lower()
     if is_track_matte:
         notes = [
-            "Premiere Track Matte Key approximated using MLT mask_start (rotoscoping) + mask_apply; "
-            "secondary timeline matte track routing must be linked manually in Kdenlive."
+            ("Premiere Track Matte Key approximated using MLT mask_start (rotoscoping) + mask_apply; "
+            "secondary timeline matte track routing must be linked manually in Kdenlive.")
         ]
         filters = [
             MltFilterSpec(
@@ -2009,8 +2015,8 @@ def _map_mask_or_matte(comp: EffectComponent, ctx: MappingContext) -> MappedEffe
         ]
     else:
         notes = [
-            "Premiere Mask mapped to MLT rotoscoping alpha mask + qtblend composite; "
-            "custom Bezier mask vertices may require fine adjustment."
+            ("Premiere Mask mapped to MLT rotoscoping alpha mask + qtblend composite; "
+            "custom Bezier mask vertices may require fine adjustment.")
         ]
         filters = [
             MltFilterSpec(
@@ -2055,10 +2061,10 @@ def _map_mask_or_matte(comp: EffectComponent, ctx: MappingContext) -> MappedEffe
 def _map_three_way_color(comp: EffectComponent, ctx: MappingContext) -> MappedEffectResult:
     """Map Three-Way Color Corrector -> MLT lift_gamma_gain + avfilter.eq."""
     pmap = comp.param_map()
-    sh_r = _clamp(_as_float(_find_param(pmap, "shadow red", "shadows").current_value if _find_param(pmap, "shadow red", "shadows") else 0.0, 0.0) / 100.0, -0.5, 0.5)
-    mid_g = _clamp(1.0 + _as_float(_find_param(pmap, "midtone", "midtones", "gamma").current_value if _find_param(pmap, "midtone", "midtones", "gamma") else 0.0, 0.0) / 100.0, 0.2, 3.0)
-    hi_b = _clamp(1.0 + _as_float(_find_param(pmap, "highlight", "highlights", "gain").current_value if _find_param(pmap, "highlight", "highlights", "gain") else 0.0, 0.0) / 100.0, 0.2, 3.0)
-    sat = _clamp(_as_float(_find_param(pmap, "saturation", "master saturation").current_value if _find_param(pmap, "saturation", "master saturation") else 100.0, 100.0) / 100.0, 0.0, 3.0)
+    sh_r = _clamp(_as_float(_param_val(pmap, "shadow red", "shadows", default=0.0), 0.0) / 100.0, -0.5, 0.5)
+    mid_g = _clamp(1.0 + _as_float(_param_val(pmap, "midtone", "midtones", "gamma", default=0.0), 0.0) / 100.0, 0.2, 3.0)
+    hi_b = _clamp(1.0 + _as_float(_param_val(pmap, "highlight", "highlights", "gain", default=0.0), 0.0) / 100.0, 0.2, 3.0)
+    sat = _clamp(_as_float(_param_val(pmap, "saturation", "master saturation", default=100.0), 100.0) / 100.0, 0.0, 3.0)
     notes = ["Premiere Three-Way Color Corrector approximated via MLT lift_gamma_gain + avfilter.eq saturation."]
     filters = [
         MltFilterSpec(
@@ -2097,11 +2103,11 @@ def _map_three_way_color(comp: EffectComponent, ctx: MappingContext) -> MappedEf
 def _map_levels(comp: EffectComponent, ctx: MappingContext) -> MappedEffectResult:
     """Map Premiere Levels -> frei0r.levels."""
     pmap = comp.param_map()
-    in_blk = _clamp(_as_float(_find_param(pmap, "rgb black input", "input black", "black input").current_value if _find_param(pmap, "rgb black input", "input black", "black input") else 0.0, 0.0) / 255.0, 0.0, 0.95)
-    in_wht = _clamp(_as_float(_find_param(pmap, "rgb white input", "input white", "white input").current_value if _find_param(pmap, "rgb white input", "input white", "white input") else 255.0, 255.0) / 255.0, max(0.05, in_blk + 0.02), 1.0)
-    gamma = _clamp(_as_float(_find_param(pmap, "rgb gamma", "gamma").current_value if _find_param(pmap, "rgb gamma", "gamma") else 1.0, 1.0) * 0.25, 0.02, 1.0)
-    out_blk = _clamp(_as_float(_find_param(pmap, "rgb black output", "output black", "black output").current_value if _find_param(pmap, "rgb black output", "output black", "black output") else 0.0, 0.0) / 255.0, 0.0, 0.95)
-    out_wht = _clamp(_as_float(_find_param(pmap, "rgb white output", "output white", "white output").current_value if _find_param(pmap, "rgb white output", "output white", "white output") else 255.0, 255.0) / 255.0, max(0.05, out_blk + 0.02), 1.0)
+    in_blk = _clamp(_as_float(_param_val(pmap, "rgb black input", "input black", "black input", default=0.0), 0.0) / 255.0, 0.0, 0.95)
+    in_wht = _clamp(_as_float(_param_val(pmap, "rgb white input", "input white", "white input", default=255.0), 255.0) / 255.0, max(0.05, in_blk + 0.02), 1.0)
+    gamma = _clamp(_as_float(_param_val(pmap, "rgb gamma", "gamma", default=1.0), 1.0) * 0.25, 0.02, 1.0)
+    out_blk = _clamp(_as_float(_param_val(pmap, "rgb black output", "output black", "black output", default=0.0), 0.0) / 255.0, 0.0, 0.95)
+    out_wht = _clamp(_as_float(_param_val(pmap, "rgb white output", "output white", "white output", default=255.0), 255.0) / 255.0, max(0.05, out_blk + 0.02), 1.0)
     mlt = MltFilterSpec(
         service="frei0r.levels",
         media_type="video",
@@ -2236,8 +2242,8 @@ def _map_vignette(comp: EffectComponent, ctx: MappingContext) -> MappedEffectRes
 def _map_color_key(comp: EffectComponent, ctx: MappingContext) -> MappedEffectResult:
     """Map Premiere Color Key / Chroma Key -> avfilter.colorkey."""
     pmap = comp.param_map()
-    tol = _clamp(_as_float(_find_param(pmap, "color tolerance", "tolerance", "similarity").current_value if _find_param(pmap, "color tolerance", "tolerance", "similarity") else 22.0, 22.0) / 100.0, 0.01, 0.9)
-    feather = _clamp(_as_float(_find_param(pmap, "edge feather", "feather", "blend").current_value if _find_param(pmap, "edge feather", "feather", "blend") else 10.0, 10.0) / 100.0, 0.0, 1.0)
+    tol = _clamp(_as_float(_param_val(pmap, "color tolerance", "tolerance", "similarity", default=22.0), 22.0) / 100.0, 0.01, 0.9)
+    feather = _clamp(_as_float(_param_val(pmap, "edge feather", "feather", "blend", default=10.0), 10.0) / 100.0, 0.0, 1.0)
     mlt = MltFilterSpec(
         service="avfilter.colorkey",
         media_type="video",
@@ -2255,8 +2261,8 @@ def _map_color_key(comp: EffectComponent, ctx: MappingContext) -> MappedEffectRe
 def _map_alpha_adjust(comp: EffectComponent, ctx: MappingContext) -> MappedEffectResult:
     """Map Premiere Alpha Adjust -> frei0r.alpha0ps."""
     pmap = comp.param_map()
-    inv_v = _as_float(_find_param(pmap, "invert alpha", "invert").current_value if _find_param(pmap, "invert alpha", "invert") else 0.0, 0.0)
-    amt_v = _clamp(_as_float(_find_param(pmap, "opacity", "shrink", "expand", "amount").current_value if _find_param(pmap, "opacity", "shrink", "expand", "amount") else 50.0, 50.0) / 100.0, 0.0, 1.0)
+    inv_v = _as_float(_param_val(pmap, "invert alpha", "invert", default=0.0), 0.0)
+    amt_v = _clamp(_as_float(_param_val(pmap, "opacity", "shrink", "expand", "amount", default=50.0), 50.0) / 100.0, 0.0, 1.0)
     mlt = MltFilterSpec(
         service="frei0r.alpha0ps",
         media_type="video",
@@ -2284,8 +2290,8 @@ def _map_warp_stabilizer(comp: EffectComponent, ctx: MappingContext) -> MappedEf
     smooth_p = _find_param(pmap, "smoothness", "radius", "rx")
     radius = int(_clamp(round(_as_float(smooth_p.current_value if smooth_p else 32.0, 32.0) * 0.64), 16, 64))
     notes = [
-        "Premiere Warp Stabilizer approximated via single-pass 2D avfilter.deshake; "
-        "Adobe 3D subspace warp and rolling-shutter repair are unavailable natively."
+        ("Premiere Warp Stabilizer approximated via single-pass 2D avfilter.deshake; "
+        "Adobe 3D subspace warp and rolling-shutter repair are unavailable natively.")
     ]
     mlt = MltFilterSpec(
         service="avfilter.deshake",
@@ -2308,7 +2314,7 @@ def _map_posterize_time(comp: EffectComponent, ctx: MappingContext) -> MappedEff
     pmap = comp.param_map()
     rate_p = _find_param(pmap, "frame rate", "fps", "rate")
     target_fps = max(1.0, _as_float(rate_p.current_value if rate_p else 12.0, 12.0))
-    interval = max(1, int(round(ctx.fps / target_fps)))
+    interval = max(1, round(ctx.fps / target_fps))
     notes = [f"Premiere Posterize Time ({target_fps:.1f} fps) mapped to MLT strobe interval={interval}."]
     mlt = MltFilterSpec(
         service="strobe",
@@ -2355,8 +2361,8 @@ def _map_timewarp(comp: EffectComponent, ctx: MappingContext) -> MappedEffectRes
     speed_p = _find_param(pmap, "speed", "rate")
     speed = _as_float(speed_p.current_value if speed_p else 50.0, 50.0)
     notes = [
-        f"Premiere Timewarp (speed={speed:.1f}%) approximated with avfilter.tmix frame blending; "
-        "exact variable-speed time remapping requires timeline clip speed/time_remap adjustment."
+        (f"Premiere Timewarp (speed={speed:.1f}%) approximated with avfilter.tmix frame blending; "
+        "exact variable-speed time remapping requires timeline clip speed/time_remap adjustment.")
     ]
     mlt = MltFilterSpec(
         service="avfilter.tmix",
@@ -2382,7 +2388,7 @@ def _map_dissolve_transition(
     dur_p = _find_param(pmap, "duration", "frames")
     nb_frames = int(_clamp(round(_as_float(dur_p.current_value if dur_p else ctx.fps * 0.5, ctx.fps * 0.5)), 2, 250))
     W, H = ctx.width, ctx.height
-    notes: List[str] = []
+    notes: list[str] = []
     status = CompatibilityStatus.EXACT_VALIDATED
     if is_film:
         status = CompatibilityStatus.APPROXIMATED
@@ -2441,8 +2447,8 @@ def _map_motion_transition(
     dur_p = _find_param(pmap, "duration", "frames")
     nb_frames = int(_clamp(round(_as_float(dur_p.current_value if dur_p else 12.0, 12.0)), 2, 250))
     W, H = ctx.width, ctx.height
-    filters: List[MltFilterSpec] = []
-    notes: List[str] = []
+    filters: list[MltFilterSpec] = []
+    notes: list[str] = []
 
     if mode == "wipe":
         filters.append(
@@ -2528,7 +2534,7 @@ def _map_motion_transition(
 def _map_essential_audio(comp: EffectComponent, ctx: MappingContext) -> MappedEffectResult:
     """Map Adobe Essential Sound / Essential Audio -> broadcast voice chain."""
     pmap = comp.param_map()
-    target_lufs = _clamp(_as_float(_find_param(pmap, "target loudness", "loudness").current_value if _find_param(pmap, "target loudness", "loudness") else -16.0, -16.0), -30.0, -8.0)
+    target_lufs = _clamp(_as_float(_param_val(pmap, "target loudness", "loudness", default=-16.0), -16.0), -30.0, -8.0)
     notes = ["Adobe Essential Audio mapped to native FFmpeg broadcast chain (highpass + clarity EQ + compressor + loudnorm)."]
     filters = [
         MltFilterSpec(
@@ -2569,8 +2575,8 @@ def _map_essential_audio(comp: EffectComponent, ctx: MappingContext) -> MappedEf
 def _map_analog_delay(comp: EffectComponent, ctx: MappingContext) -> MappedEffectResult:
     """Map Premiere Analog Delay / Multitap Delay -> avfilter.aecho."""
     pmap = comp.param_map()
-    delay_ms = int(_clamp(_as_float(_find_param(pmap, "delay", "delay time", "time").current_value if _find_param(pmap, "delay", "delay time", "time") else 240.0, 240.0), 10.0, 2000.0))
-    fb = _clamp(_as_float(_find_param(pmap, "feedback", "decay").current_value if _find_param(pmap, "feedback", "decay") else 35.0, 35.0) / 100.0, 0.05, 0.85)
+    delay_ms = int(_clamp(_as_float(_param_val(pmap, "delay", "delay time", "time", default=240.0), 240.0), 10.0, 2000.0))
+    fb = _clamp(_as_float(_param_val(pmap, "feedback", "decay", default=35.0), 35.0) / 100.0, 0.05, 0.85)
     mlt = MltFilterSpec(
         service="avfilter.aecho",
         media_type="audio",
@@ -2596,7 +2602,7 @@ def _map_analog_delay(comp: EffectComponent, ctx: MappingContext) -> MappedEffec
 
 _TranslatorFn = Callable[[EffectComponent, MappingContext], MappedEffectResult]
 
-EXACT_MATCH_CATALOG: Dict[str, _TranslatorFn] = {
+EXACT_MATCH_CATALOG: dict[str, _TranslatorFn] = {
     # Transforms / Shake / Zoom / Slide / Distort
     "ae.adbe motion": lambda c, ctx: _map_motion_or_transform(c, ctx, is_transform_effect=False),
     "motion": lambda c, ctx: _map_motion_or_transform(c, ctx, is_transform_effect=False),
@@ -2814,7 +2820,7 @@ EXACT_MATCH_CATALOG: Dict[str, _TranslatorFn] = {
 
 
 # Canonical audit registry covering all 58+ Premiere Pro effect families
-PREMIERE_EFFECT_FAMILIES: Tuple[Dict[str, str], ...] = (
+PREMIERE_EFFECT_FAMILIES: tuple[dict[str, str], ...] = (
     # Motion & Transforms (8)
     {"family_id": "motion", "display_name": "Motion", "match_name": "AE.ADBE Motion", "category": "Motion & Transforms", "media_type": "video"},
     {"family_id": "transform", "display_name": "Transform", "match_name": "AE.ADBE Geometry2", "category": "Motion & Transforms", "media_type": "video"},
@@ -2903,7 +2909,7 @@ PREMIERE_EFFECT_FAMILIES: Tuple[Dict[str, str], ...] = (
 )
 
 
-def list_supported_effect_families() -> List[Dict[str, str]]:
+def list_supported_effect_families() -> list[dict[str, str]]:
     """Return a copy of the canonical Premiere Pro effect family registry."""
     return [dict(item) for item in PREMIERE_EFFECT_FAMILIES]
 

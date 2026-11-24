@@ -18,22 +18,24 @@ from __future__ import annotations
 import base64
 import gzip
 import hashlib
+import io
 import json
+import logging
 import re
 import xml.etree.ElementTree as StdET
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import Any
 from xml.etree.ElementTree import Element
 
 from .models import (
+    PR_SENTINEL_TICK_THRESHOLD,
+    PR_TICKS_PER_SECOND,
     EffectComponent,
     InterpolationMode,
     Keyframe,
     Parameter,
     ParsedPreset,
-    PR_SENTINEL_TICK_THRESHOLD,
-    PR_TICKS_PER_SECOND,
     SourceArchiveInfo,
 )
 from .security import (
@@ -48,6 +50,8 @@ from .security import (
     safe_read_zip_entries,
     sanitize_xml_snippet,
 )
+
+logger = logging.getLogger(__name__)
 
 # Sidecar extensions recognized as bundled asset files (LUTs, fonts, IR audio)
 BUNDLED_ASSET_EXTENSIONS = {
@@ -80,7 +84,7 @@ _PRESET_TYPE_MAP = {
     "anchor to out point": "anchor_out",
 }
 
-_INTERP_CODE_MAP: Dict[str, InterpolationMode] = {
+_INTERP_CODE_MAP: dict[str, InterpolationMode] = {
     "0": InterpolationMode.LINEAR,
     "1": InterpolationMode.EASE_IN,
     "2": InterpolationMode.EASE_OUT,
@@ -109,10 +113,10 @@ class ParsedSourceBundle:
     """Result of ingesting a ZIP archive, directory, or single .prfpset file."""
 
     archive_info: SourceArchiveInfo
-    presets: List[ParsedPreset] = field(default_factory=list)
-    bundled_assets: Dict[str, str] = field(default_factory=dict)  # lowercase basename -> virtual/real path
-    audit_data: Optional[Dict[str, Any]] = None
-    parse_warnings: List[str] = field(default_factory=list)
+    presets: list[ParsedPreset] = field(default_factory=list)
+    bundled_assets: dict[str, str] = field(default_factory=dict)  # lowercase basename -> virtual/real path
+    audit_data: dict[str, Any] | None = None
+    parse_warnings: list[str] = field(default_factory=list)
 
 
 def ticks_to_seconds(ticks: int) -> float:
@@ -124,7 +128,7 @@ def ticks_to_frame(ticks: int, fps: float = 25.0) -> int:
     """Convert Adobe Premiere Pro ticks to nearest integer frame at `fps`."""
     if fps <= 0:
         raise ValueError(f"fps must be positive, got {fps}")
-    return int(round(ticks_to_seconds(ticks) * fps))
+    return round(ticks_to_seconds(ticks) * fps)
 
 
 def _slugify(text: str) -> str:
@@ -132,13 +136,13 @@ def _slugify(text: str) -> str:
     return slug or "preset"
 
 
-def _make_preset_id(pack: str, folder_path: List[str], name: str, index: int) -> str:
+def _make_preset_id(pack: str, folder_path: list[str], name: str, index: int) -> str:
     raw = f"{pack}|{'/'.join(folder_path)}|{name}|{index}"
     short_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:10]
     return f"{_slugify(pack)[:24]}__{_slugify(name)[:36]}__{short_hash}"
 
 
-def _parse_scalar_or_point(token: str) -> Union[float, Tuple[float, ...], str]:
+def _parse_scalar_or_point(token: str) -> float | tuple[float, ...] | str:
     """Parse a Premiere keyframe value token (float, colon-separated 2D/4D point, or string)."""
     cleaned = token.strip()
     if ":" in cleaned:
@@ -162,7 +166,7 @@ def parse_premiere_keyframes(
     raw_text: str,
     fps: float = 25.0,
     is_point: bool = False,
-) -> List[Keyframe]:
+) -> list[Keyframe]:
     """Parse Premiere Pro semicolon/comma-separated keyframe string into Keyframe objects.
 
     Supports formats observed across real Premiere Pro .prfpset exports:
@@ -174,7 +178,7 @@ def parse_premiere_keyframes(
     if not raw_text or not raw_text.strip():
         return []
 
-    keyframes: List[Keyframe] = []
+    keyframes: list[Keyframe] = []
     entries = [seg.strip() for seg in raw_text.strip().split(";") if seg.strip()]
 
     for entry in entries:
@@ -190,7 +194,7 @@ def parse_premiere_keyframes(
         is_sentinel = raw_ticks <= PR_SENTINEL_TICK_THRESHOLD
 
         # Detect point format: either colon-separated `x:y` in fields[1], or comma-separated `x,y`
-        val: Union[float, Tuple[float, ...], str]
+        val: float | tuple[float, ...] | str
         interp_idx = 2
         if ":" in fields[1]:
             val = _parse_scalar_or_point(fields[1])
@@ -215,7 +219,7 @@ def parse_premiere_keyframes(
 
         # Premiere Bezier handles typically appear at indices [interp+2 .. interp+5]
         # (fields[interp+1] is flags/tangent mode)
-        bezier_handles: Optional[Tuple[float, float, float, float]] = None
+        bezier_handles: tuple[float, float, float, float] | None = None
         handle_start = interp_idx + 2
         if len(fields) >= handle_start + 4:
             try:
@@ -247,9 +251,9 @@ def parse_premiere_keyframes(
     return keyframes
 
 
-def _normalize_preset_keyframes(effects: List[EffectComponent], fps: float) -> None:
+def _normalize_preset_keyframes(effects: list[EffectComponent], fps: float) -> None:
     """Rebase non-sentinel keyframe times relative to the earliest keyframe tick in the preset."""
-    non_sentinel_ticks: List[int] = []
+    non_sentinel_ticks: list[int] = []
     for eff in effects:
         for param in eff.parameters:
             for kf in param.keyframes:
@@ -272,7 +276,7 @@ def _normalize_preset_keyframes(effects: List[EffectComponent], fps: float) -> N
                     kf.frame = ticks_to_frame(delta_ticks, fps=fps)
 
 
-def _first_text(elem: Element, paths: List[str]) -> str:
+def _first_text(elem: Element, paths: list[str]) -> str:
     """Return stripped text of the first matching child path, or empty string."""
     for p in paths:
         node = elem.find(p)
@@ -281,10 +285,10 @@ def _first_text(elem: Element, paths: List[str]) -> str:
     return ""
 
 
-def _build_object_index(root: Element) -> Tuple[Dict[str, Element], Dict[str, Element]]:
+def _build_object_index(root: Element) -> tuple[dict[str, Element], dict[str, Element]]:
     """Index all XML elements by ObjectID and ObjectUID for fast O(1) ObjectRef resolution."""
-    by_id: Dict[str, Element] = {}
-    by_uid: Dict[str, Element] = {}
+    by_id: dict[str, Element] = {}
+    by_uid: dict[str, Element] = {}
     for elem in root.iter():
         oid = elem.attrib.get("ObjectID")
         if oid:
@@ -296,10 +300,10 @@ def _build_object_index(root: Element) -> Tuple[Dict[str, Element], Dict[str, El
 
 
 def _resolve_ref(
-    ref_elem: Optional[Element],
-    by_id: Dict[str, Element],
-    by_uid: Dict[str, Element],
-) -> Optional[Element]:
+    ref_elem: Element | None,
+    by_id: dict[str, Element],
+    by_uid: dict[str, Element],
+) -> Element | None:
     if ref_elem is None:
         return None
     oid = ref_elem.attrib.get("ObjectRef")
@@ -331,12 +335,12 @@ def _decode_arb_data(raw_text: str) -> str:
             # Extract ASCII printable sequences (length >= 4) and UTF-16LE printable sequences
             ascii_strings = re.findall(rb"[\x20-\x7e]{4,}", decoded)
             utf16_strings = re.findall(rb"(?:[\x20-\x7e]\x00){4,}", decoded)
-            fragments: List[str] = [s.decode("ascii", errors="ignore") for s in ascii_strings]
+            fragments: list[str] = [s.decode("ascii", errors="ignore") for s in ascii_strings]
             fragments.extend(s.decode("utf-16le", errors="ignore") for s in utf16_strings)
             if fragments:
                 return " | ".join(fragments)[:4096]
-        except Exception:
-            pass
+        except ValueError as exc:
+            logger.debug("Arbitrary payload was not valid base64 text: %s", exc)
     return text[:4096]
 
 
@@ -407,11 +411,11 @@ def _parse_parameter(param_elem: Element, fps: float) -> Parameter:
 
 def _parse_component(
     comp_elem: Element,
-    by_id: Dict[str, Element],
-    by_uid: Dict[str, Element],
+    by_id: dict[str, Element],
+    by_uid: dict[str, Element],
     fps: float,
-    referenced_ids: Set[str],
-) -> Optional[EffectComponent]:
+    referenced_ids: set[str],
+) -> EffectComponent | None:
     """Parse a VideoFilterComponent or AudioFilterComponent (including inner <Component> ref)."""
     if comp_elem.attrib.get("ObjectID"):
         referenced_ids.add(comp_elem.attrib["ObjectID"])
@@ -454,8 +458,8 @@ def _parse_component(
     bypass = bypass_text in ("true", "1", "yes")
 
     # Collect parameters from both comp_elem and inner_comp
-    param_elements: List[Element] = []
-    seen_param_ids: Set[int] = set()
+    param_elements: list[Element] = []
+    seen_param_ids: set[int] = set()
 
     for container in [c for c in (comp_elem, inner_comp) if c is not None]:
         params_node = container.find("Params")
@@ -490,35 +494,35 @@ def _parse_component(
 
 def _serialize_preset_snippet(
     preset_elem: Element,
-    referenced_ids: Set[str],
-    by_id: Dict[str, Element],
+    referenced_ids: set[str],
+    by_id: dict[str, Element],
 ) -> str:
     """Build a bounded, sanitized XML snippet preserving the preset and its referenced components."""
-    parts: List[str] = ["<PremierePresetSnippet>"]
+    parts: list[str] = ["<PremierePresetSnippet>"]
     try:
         parts.append(StdET.tostring(preset_elem, encoding="unicode"))
         preset_oid = preset_elem.attrib.get("ObjectID")
         for oid in sorted(referenced_ids):
             if oid != preset_oid and oid in by_id:
                 parts.append(StdET.tostring(by_id[oid], encoding="unicode"))
-    except Exception:
-        pass
+    except (TypeError, ValueError) as exc:
+        logger.debug("Failed to serialize original XML snippet fragment: %s", exc)
     parts.append("</PremierePresetSnippet>")
     return sanitize_xml_snippet("\n".join(parts))
 
 
 def _extract_preset_from_item(
     item_elem: Element,
-    by_id: Dict[str, Element],
-    by_uid: Dict[str, Element],
-    folder_path: List[str],
+    by_id: dict[str, Element],
+    by_uid: dict[str, Element],
+    folder_path: list[str],
     pack_name: str,
     source_file: str,
     index: int,
     fps: float,
-) -> Optional[ParsedPreset]:
+) -> ParsedPreset | None:
     """Extract a ParsedPreset from a <FilterPresetItem> (or <FilterPreset>) element."""
-    referenced_ids: Set[str] = set()
+    referenced_ids: set[str] = set()
     if item_elem.attrib.get("ObjectID"):
         referenced_ids.add(item_elem.attrib["ObjectID"])
 
@@ -551,8 +555,8 @@ def _extract_preset_from_item(
     preset_type = _PRESET_TYPE_MAP.get(raw_type, "scale" if not raw_type else "unknown")
 
     # Collect component references from <Components>, <Filter>, <AudioFilter>, <VideoFilter>
-    comp_elements: List[Element] = []
-    seen_comp_ids: Set[int] = set()
+    comp_elements: list[Element] = []
+    seen_comp_ids: set[int] = set()
 
     for container in [c for c in (item_elem, inner_preset) if c is not None]:
         # <Components><Component ObjectRef="..."/>...</Components> or inline components
@@ -571,12 +575,14 @@ def _extract_preset_from_item(
             for child in container.findall(single_tag):
                 resolved = _resolve_ref(child, by_id, by_uid)
                 target = resolved if resolved is not None else child
-                if target.tag in ("VideoFilterComponent", "AudioFilterComponent") or target.find("MatchName") is not None:
-                    if id(target) not in seen_comp_ids:
-                        seen_comp_ids.add(id(target))
-                        comp_elements.append(target)
+                if (
+                    target.tag in ("VideoFilterComponent", "AudioFilterComponent")
+                    or target.find("MatchName") is not None
+                ) and id(target) not in seen_comp_ids:
+                    seen_comp_ids.add(id(target))
+                    comp_elements.append(target)
 
-    effects: List[EffectComponent] = []
+    effects: list[EffectComponent] = []
     for comp in comp_elements:
         parsed_comp = _parse_component(comp, by_id, by_uid, fps=fps, referenced_ids=referenced_ids)
         if parsed_comp is not None:
@@ -604,11 +610,11 @@ def _extract_preset_from_item(
 
 def _walk_bin_tree(
     node: Element,
-    by_id: Dict[str, Element],
-    by_uid: Dict[str, Element],
-    current_path: List[str],
-    visited: Set[int],
-    discovered: List[Tuple[Element, List[str]]],
+    by_id: dict[str, Element],
+    by_uid: dict[str, Element],
+    current_path: list[str],
+    visited: set[int],
+    discovered: list[tuple[Element, list[str]]],
 ) -> None:
     """Recursively walk Premiere <BinTreeItem> / <TreeItem> folder hierarchies."""
     if id(node) in visited:
@@ -646,9 +652,9 @@ def _maybe_decompress_prfpset(raw_bytes: bytes) -> bytes:
     """Safely decompress gzipped .prfpset payloads with strict bomb limits."""
     if len(raw_bytes) >= 2 and raw_bytes[:2] == b"\x1f\x8b":
         comp_len = max(len(raw_bytes), 1)
-        out_chunks: List[bytes] = []
+        out_chunks: list[bytes] = []
         total = 0
-        with gzip.GzipFile(fileobj=_BytesView(raw_bytes), mode="rb") as gz:
+        with gzip.GzipFile(fileobj=io.BytesIO(raw_bytes), mode="rb") as gz:
             while True:
                 chunk = gz.read(65_536)
                 if not chunk:
@@ -667,29 +673,12 @@ def _maybe_decompress_prfpset(raw_bytes: bytes) -> bytes:
     return raw_bytes
 
 
-class _BytesView:
-    """Minimal file-like bytes wrapper for gzip.GzipFile."""
-
-    def __init__(self, data: bytes) -> None:
-        self._data = data
-        self._pos = 0
-
-    def read(self, n: int = -1) -> bytes:
-        if n < 0:
-            chunk = self._data[self._pos :]
-            self._pos = len(self._data)
-            return chunk
-        chunk = self._data[self._pos : self._pos + n]
-        self._pos += len(chunk)
-        return chunk
-
-
 def parse_prfpset_bytes(
     raw_bytes: bytes,
     source_file: str,
-    pack_name: Optional[str] = None,
+    pack_name: str | None = None,
     fps: float = 25.0,
-) -> List[ParsedPreset]:
+) -> list[ParsedPreset]:
     """Parse a single Premiere Pro .prfpset XML document into ParsedPreset records."""
     xml_bytes = _maybe_decompress_prfpset(raw_bytes)
     root = safe_parse_xml(xml_bytes)
@@ -698,7 +687,7 @@ def parse_prfpset_bytes(
     by_id, by_uid = _build_object_index(root)
 
     # Find root BinTreeItems (those NOT referenced by another BinTreeItem's <Items>)
-    referenced_bins: Set[str] = set()
+    referenced_bins: set[str] = set()
     for bin_elem in root.iter():
         if bin_elem.tag in ("BinTreeItem", "TreeItem", "Bin"):
             items_node = bin_elem.find("Items")
@@ -708,8 +697,8 @@ def parse_prfpset_bytes(
                     if ref:
                         referenced_bins.add(ref)
 
-    discovered: List[Tuple[Element, List[str]]] = []
-    visited: Set[int] = set()
+    discovered: list[tuple[Element, list[str]]] = []
+    visited: set[int] = set()
 
     # Walk from top-level / unreferenced BinTreeItems first to preserve full folder_path
     for elem in list(root):
@@ -732,7 +721,7 @@ def parse_prfpset_bytes(
                 discovered.append((elem, []))
                 discovered_ids.add(id(elem))
 
-    presets: List[ParsedPreset] = []
+    presets: list[ParsedPreset] = []
     for idx, (preset_elem, folder_path) in enumerate(discovered):
         parsed = _extract_preset_from_item(
             item_elem=preset_elem,
@@ -750,7 +739,7 @@ def parse_prfpset_bytes(
     return presets
 
 
-def load_audit_json(audit_path: Union[str, Path]) -> Dict[str, Any]:
+def load_audit_json(audit_path: str | Path) -> dict[str, Any]:
     """Load an optional Bang_on_pro_premiere_preset_audit.json for count & attribution cross-checks."""
     path = Path(audit_path)
     raw = path.read_bytes()
@@ -758,13 +747,13 @@ def load_audit_json(audit_path: Union[str, Path]) -> Dict[str, Any]:
         raise ArchiveLimitError(f"Audit JSON exceeds single-file limit: {len(raw)}")
     data = json.loads(raw.decode("utf-8"))
     if not isinstance(data, dict):
-        raise ValueError("Audit JSON root must be a JSON object")
+        raise TypeError("Audit JSON root must be a JSON object")
     return data
 
 
-def _apply_audit_metadata(presets: List[ParsedPreset], audit_data: Dict[str, Any]) -> None:
+def _apply_audit_metadata(presets: list[ParsedPreset], audit_data: dict[str, Any]) -> None:
     """Enrich preset attribution and pack metadata from optional audit JSON."""
-    pack_meta: Dict[str, Dict[str, Any]] = {}
+    pack_meta: dict[str, dict[str, Any]] = {}
     for entry in audit_data.get("packs", []) or []:
         if isinstance(entry, dict):
             key = str(entry.get("name") or entry.get("file") or "").strip().lower()
@@ -774,7 +763,7 @@ def _apply_audit_metadata(presets: List[ParsedPreset], audit_data: Dict[str, Any
             if file_key:
                 pack_meta[file_key] = entry
 
-    preset_meta: Dict[str, Dict[str, Any]] = {}
+    preset_meta: dict[str, dict[str, Any]] = {}
     for entry in audit_data.get("presets", []) or []:
         if isinstance(entry, dict):
             pname = str(entry.get("name", "")).strip().lower()
@@ -804,20 +793,21 @@ def _apply_audit_metadata(presets: List[ParsedPreset], audit_data: Dict[str, Any
 
 
 def parse_premiere_input(
-    input_path: Union[str, Path],
-    audit_json_path: Optional[Union[str, Path]] = None,
+    input_path: str | Path,
+    audit_json_path: str | Path | None = None,
     fps: float = 25.0,
-    limits: ArchiveSecurityLimits = ArchiveSecurityLimits(),
+    limits: ArchiveSecurityLimits | None = None,
     redistribution_restricted: bool = True,
 ) -> ParsedSourceBundle:
     """Ingest a .zip archive, a directory of .prfpset files, or a single .prfpset file."""
+    limits = limits or ArchiveSecurityLimits()
     path = Path(input_path)
     if not path.exists():
         raise FileNotFoundError(f"Input path does not exist: {path}")
 
-    presets: List[ParsedPreset] = []
-    bundled_assets: Dict[str, str] = {}
-    warnings: List[str] = []
+    presets: list[ParsedPreset] = []
+    bundled_assets: dict[str, str] = {}
+    warnings: list[str] = []
     file_count = 0
 
     if path.is_file() and path.suffix.lower() == ".zip":
@@ -884,7 +874,7 @@ def parse_premiere_input(
     else:
         raise ValueError(f"Unsupported input path type: {path}")
 
-    audit_data: Optional[Dict[str, Any]] = None
+    audit_data: dict[str, Any] | None = None
     if audit_json_path is not None:
         audit_data = load_audit_json(audit_json_path)
         _apply_audit_metadata(presets, audit_data)

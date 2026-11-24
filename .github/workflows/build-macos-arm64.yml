@@ -13,9 +13,9 @@ on:
   workflow_dispatch:
     inputs:
       release_version:
-        description: "Release version label (defaults to 1.0.0 or git tag)"
+        description: "Release version label (defaults to 1.1.0 or git tag)"
         required: false
-        default: "1.0.0"
+        default: "1.1.0"
       build_mode:
         description: "Dependency resolution mode (craft uses KDE CraftMaster Qt6/KF6 binary cache)"
         required: false
@@ -54,6 +54,7 @@ jobs:
         run: |
           echo "OS: $(sw_vers -productVersion)"
           echo "Arch: $(uname -m)"
+          echo "CPU: $(sysctl -n machdep.cpu.brand_string 2>/dev/null || uname -m)"
           test "$(uname -m)" = "arm64"
           xcode-select -p
 
@@ -67,7 +68,7 @@ jobs:
           elif [[ -n "${INPUT_RELEASE_VERSION:-}" ]]; then
             VER="${INPUT_RELEASE_VERSION}"
           else
-            VER="1.0.0"
+            VER="1.1.0"
           fi
           echo "app_version=${VER}" >> "$GITHUB_OUTPUT"
           echo "Resolved Bang On Pro version: ${VER}"
@@ -216,37 +217,39 @@ jobs:
             --output-dir dist/macos-arm64
           ccache --show-stats || true
 
-      - name: Run Python QA, security & Apple Silicon performance checks on macOS arm64
+      - name: Run Python QA, security & sustained Apple Silicon benchmark on macOS arm64
         run: |
+          set -euo pipefail
           APP_ABS="${PWD}/dist/macos-arm64/Bang On Pro.app"
           BUNDLED_PY="${APP_ABS}/Contents/Resources/python-env/bin/python3"
-          if [[ -x "${BUNDLED_PY}" ]]; then
-            PATH="${APP_ABS}/Contents/MacOS:${CRAFT_PREFIX}/bin:${PATH}" \
-            MLT_REPOSITORY="${APP_ABS}/Contents/PlugIns/mlt" \
-            MLT_DATA="${APP_ABS}/Contents/Resources/mlt" \
-            FREI0R_PATH="${APP_ABS}/Contents/PlugIns/frei0r-1" \
-              "${BUNDLED_PY}" -m pytest -v \
-              tests/bangonpro/test_security_and_compliance.py \
-              tests/bangonpro/test_project_integrity.py \
-              tests/bangonpro/test_macos_perf.py
-            mkdir -p dist/macos-arm64/benchmarks
-            PATH="${APP_ABS}/Contents/MacOS:${CRAFT_PREFIX}/bin:${PATH}" \
-            MLT_REPOSITORY="${APP_ABS}/Contents/PlugIns/mlt" \
-            MLT_DATA="${APP_ABS}/Contents/Resources/mlt" \
-            FREI0R_PATH="${APP_ABS}/Contents/PlugIns/frei0r-1" \
-              "${BUNDLED_PY}" -m bangonpro.macos.benchmark \
-              --comprehensive \
-              --duration 1.5 \
-              --output-dir dist/macos-arm64/benchmarks || true
-            if [[ -f dist/macos-arm64/benchmarks/benchmark_report.md ]]; then
-              cat dist/macos-arm64/benchmarks/benchmark_report.md
-            fi
-          else
-            python3 -m pip install --user -r requirements-bangonpro.txt PyYAML Pillow || true
-            python3 -m pytest -v \
-              tests/bangonpro/test_security_and_compliance.py \
-              tests/bangonpro/test_project_integrity.py
+          if [[ ! -x "${BUNDLED_PY}" ]]; then
+            echo "::error::Bundled self-contained Python runtime missing at ${BUNDLED_PY}"
+            exit 1
           fi
+
+          PATH="${APP_ABS}/Contents/MacOS:${CRAFT_PREFIX}/bin:${PATH}" \
+          MLT_REPOSITORY="${APP_ABS}/Contents/PlugIns/mlt" \
+          MLT_DATA="${APP_ABS}/Contents/Resources/mlt" \
+          FREI0R_PATH="${APP_ABS}/Contents/PlugIns/frei0r-1" \
+            "${BUNDLED_PY}" -m pytest -v \
+            tests/bangonpro/test_security_and_compliance.py \
+            tests/bangonpro/test_project_integrity.py \
+            tests/bangonpro/test_macos_perf.py
+
+          mkdir -p dist/macos-arm64/benchmarks
+          PATH="${APP_ABS}/Contents/MacOS:${CRAFT_PREFIX}/bin:${PATH}" \
+          MLT_REPOSITORY="${APP_ABS}/Contents/PlugIns/mlt" \
+          MLT_DATA="${APP_ABS}/Contents/Resources/mlt" \
+          FREI0R_PATH="${APP_ABS}/Contents/PlugIns/frei0r-1" \
+            "${BUNDLED_PY}" -m bangonpro.macos.benchmark \
+            --sustained \
+            --duration 10.0 \
+            --duration-4k 10.0 \
+            --output-dir dist/macos-arm64/benchmarks
+
+          test -s dist/macos-arm64/benchmarks/benchmark_results.json
+          test -s dist/macos-arm64/benchmarks/benchmark_report.md
+          cat dist/macos-arm64/benchmarks/benchmark_report.md
 
       - name: Annotate artifact signing state in workflow summary
         if: always()
@@ -284,7 +287,7 @@ jobs:
             rm -f "${MACOS_NOTARY_KEY_PATH}"
           fi
 
-      - name: Upload BangOnPro-arm64.dmg, checksums & verification log
+      - name: Upload BangOnPro-arm64.dmg, checksums, verification log & sustained benchmarks
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -313,7 +316,7 @@ jobs:
           merge-multiple: true
           path: release-assets
 
-      - name: Publish GitHub Release with arm64 DMG, SHA-256 & signing status
+      - name: Publish GitHub Release with arm64 DMG, SHA-256, benchmarks & signing status
         uses: softprops/action-gh-release@v2
         with:
           draft: false
@@ -339,3 +342,6 @@ jobs:
             release-assets/SHA256SUMS.txt
             release-assets/SIGNING_STATUS.txt
             release-assets/BUILD_VERIFICATION.log
+            release-assets/benchmarks/benchmark_report.md
+            release-assets/benchmarks/benchmark_results.json
+

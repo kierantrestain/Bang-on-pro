@@ -20,7 +20,6 @@ import stat
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Union
 from xml.etree.ElementTree import Element
 
 import defusedxml.ElementTree as DefusedET
@@ -77,7 +76,7 @@ def compute_sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def compute_sha256_file(path: Union[str, Path]) -> str:
+def compute_sha256_file(path: str | Path) -> str:
     """Compute SHA-256 of a file using bounded streaming reads."""
     digest = hashlib.sha256()
     with Path(path).open("rb") as handle:
@@ -110,7 +109,7 @@ def validate_member_path(member_name: str) -> str:
         raise ZipSlipError(f"Path traversal ('..') rejected in archive member: {member_name!r}")
 
     clean = posixpath.normpath("/".join(parts)) if parts else ""
-    if clean in ("", ".", "..") or clean.startswith("../") or clean.startswith("/"):
+    if clean in ("", ".", "..") or clean.startswith(("../", "/")):
         raise ZipSlipError(f"Unsafe normalized path rejected in archive member: {member_name!r}")
 
     return clean
@@ -123,9 +122,9 @@ def _is_zip_symlink(info: zipfile.ZipInfo) -> bool:
 
 
 def safe_read_zip_entries(
-    zip_path: Union[str, Path],
+    zip_path: str | Path,
     limits: ArchiveSecurityLimits = ArchiveSecurityLimits(),
-) -> Dict[str, bytes]:
+) -> dict[str, bytes]:
     """Safely inspect and read all regular files from a ZIP archive into memory.
 
     Never extracts directly onto the filesystem and strictly enforces:
@@ -140,7 +139,7 @@ def safe_read_zip_entries(
     if not path.is_file():
         raise FileNotFoundError(f"Archive not found: {path}")
 
-    entries: Dict[str, bytes] = {}
+    entries: dict[str, bytes] = {}
     total_bytes = 0
     file_count = 0
 
@@ -150,7 +149,7 @@ def safe_read_zip_entries(
         raise SecurityViolationError(f"Corrupt or invalid ZIP archive: {path.name}") from exc
 
     with zf:
-        infos: List[zipfile.ZipInfo] = zf.infolist()
+        infos: list[zipfile.ZipInfo] = zf.infolist()
 
         for info in infos:
             # Always check symlinks even if flagged as directory
@@ -159,7 +158,7 @@ def safe_read_zip_entries(
 
             # Skip pure directory entries (still validate their path!)
             raw_name = info.filename
-            if raw_name.endswith("/") or raw_name.endswith("\\"):
+            if raw_name.endswith(("/", "\\")):
                 trimmed = raw_name.rstrip("/\\")
                 if trimmed:
                     validate_member_path(trimmed)
@@ -195,7 +194,7 @@ def safe_read_zip_entries(
                 )
 
             # Streaming bounded read to defeat spoofed ZIP headers
-            chunks: List[bytes] = []
+            chunks: list[bytes] = []
             member_bytes = 0
             comp_denom = max(info.compress_size, 1)
 
@@ -229,7 +228,7 @@ def safe_read_zip_entries(
     return entries
 
 
-def safe_parse_xml(xml_data: Union[bytes, str]) -> Element:
+def safe_parse_xml(xml_data: bytes | str) -> Element:
     """Parse XML strictly with defusedxml (DTD, entity expansion, XXE all forbidden)."""
     raw: bytes
     if isinstance(xml_data, str):

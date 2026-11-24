@@ -43,7 +43,7 @@ class MediaAsset:
     height: int
     fps_num: int
     fps_den: int
-    video_codec: str
+    video_codec: str | None
     audio_codec: str | None
     audio_sample_rate: int
     audio_channels: int
@@ -51,8 +51,22 @@ class MediaAsset:
     verified: bool = True
 
     @property
+    def has_video(self) -> bool:
+        return bool(self.video_codec)
+
+    @property
+    def has_audio(self) -> bool:
+        return bool(self.audio_codec)
+
+    @property
+    def is_audio_only(self) -> bool:
+        return (not self.has_video) and self.has_audio
+
+    @property
     def fps(self) -> float:
-        return float(self.fps_num) / float(self.fps_den) if self.fps_den else 25.0
+        if self.fps_num <= 0 or self.fps_den <= 0:
+            return 0.0
+        return float(self.fps_num) / float(self.fps_den)
 
 
 @dataclass
@@ -72,6 +86,22 @@ class SyncResult:
 
 
 @dataclass
+class AsrBackendReport:
+    """Honest runtime report for the ASR / VAD stage (never conflates DSP VAD with neural Whisper)."""
+
+    backend_id: str = "deterministic_multimic_vad"
+    model_id: str | None = None
+    is_neural_inference: bool = False
+    fallback_used: bool = False
+    fallback_reason: str | None = None
+    transcript_quality: str = "vad_speech_segments_only"
+    backend_package_installed: bool = False
+    model_available_on_disk: bool = False
+    actual_inference_executed: bool = False
+    segments_transcribed: int = 0
+
+
+@dataclass
 class TranscriptSegment:
     """Timestamped speaker-diarised transcript segment on the master sync timeline."""
 
@@ -87,6 +117,8 @@ class TranscriptSegment:
     spectral_centroid_hz: float = 0.0
     section_label: str = "Main"
     backend: str = "deterministic_multimic_vad"
+    is_neural_inference: bool = False
+    transcript_quality: str = "vad_speech_segments_only"
     speaker_name: str = ""
     is_overlap: bool = False
     overlap_speakers: list[str] = field(default_factory=list)
@@ -177,6 +209,8 @@ class LowerThirdSpec:
     out_frame: int
     accent_hex: str
     kdenlive_title_xml: str
+    template: str = "studio_clean_bar"
+    position: str = "bottom_left"
 
 
 @dataclass
@@ -214,21 +248,85 @@ class QCReport:
 
 @dataclass
 class ProductionIntent:
-    """Parsed intent from natural-language user instructions."""
+    """Parsed intent from natural-language user instructions.
+
+    All mutating editorial flags default to ``False`` so actions only execute
+    when explicitly requested or explicitly opted into via ``full_production()``.
+    """
 
     raw_instruction: str = ""
-    sync_cameras: bool = True
-    remove_setup_delay: bool = True
-    remove_silence: bool = True
-    build_rough_cut: bool = True
-    multicam_switch: bool = True
-    restore_audio: bool = True
-    add_captions: bool = True
-    add_lower_thirds: bool = True
-    run_qc: bool = True
+    sync_cameras: bool = False
+    transcribe: bool = False
+    remove_setup_delay: bool = False
+    remove_silence: bool = False
+    build_rough_cut: bool = False
+    multicam_switch: bool = False
+    restore_audio: bool = False
+    add_captions: bool = False
+    add_lower_thirds: bool = False
+    run_qc: bool = False
     export_video: bool = False
+    needs_clarification: bool = False
+    clarification_question: str = ""
     profile_hint: str | None = None
     parsed_actions: list[str] = field(default_factory=list)
+    target_clips: list[str] = field(default_factory=list)
+    target_tracks: list[str] = field(default_factory=list)
+    time_range_sec: tuple[float, float] | None = None
+    target_speakers: list[str] = field(default_factory=list)
+    loudness_target_lufs: float | None = None
+    silence_threshold_db: float | None = None
+    min_pause_sec: float | None = None
+    intent_confidence: float = 1.0
+    scope: str = "none"
+
+    @property
+    def has_mutating_actions(self) -> bool:
+        """Return True if any timeline-mutating or rendering flag is enabled."""
+        return any(
+            (
+                self.sync_cameras,
+                self.remove_setup_delay,
+                self.remove_silence,
+                self.build_rough_cut,
+                self.multicam_switch,
+                self.restore_audio,
+                self.add_captions,
+                self.add_lower_thirds,
+                self.export_video,
+            )
+        )
+
+    @classmethod
+    def full_production(
+        cls,
+        raw_instruction: str = "",
+        *,
+        export_video: bool = False,
+        profile_hint: str | None = None,
+        parsed_actions: list[str] | None = None,
+    ) -> ProductionIntent:
+        """Explicitly construct a full end-to-end production workflow intent."""
+        return cls(
+            raw_instruction=raw_instruction,
+            sync_cameras=True,
+            transcribe=True,
+            remove_setup_delay=True,
+            remove_silence=True,
+            build_rough_cut=True,
+            multicam_switch=True,
+            restore_audio=True,
+            add_captions=True,
+            add_lower_thirds=True,
+            run_qc=True,
+            export_video=export_video,
+            needs_clarification=False,
+            clarification_question="",
+            profile_hint=profile_hint,
+            parsed_actions=list(parsed_actions or ["default_full_production_pipeline"]),
+            intent_confidence=1.0,
+            scope="full_production",
+        )
 
 
 class ProjectAnalysisState:
@@ -275,6 +373,7 @@ class ProjectAnalysisState:
         self.audio_sample_rate: int = 16000
 
         self.transcript_backend: str = "deterministic_multimic_vad"
+        self.asr_backend_report: AsrBackendReport = AsrBackendReport()
         self.transcript_segments: list[TranscriptSegment] = []
         self.transcript_document: dict[str, Any] | None = None
         self.silence_intervals: list[TimeInterval] = []
@@ -312,7 +411,7 @@ class ProjectAnalysisState:
         return float(self.fps_num) / float(self.fps_den)
 
     def sec_to_frame(self, sec: float) -> int:
-        return max(0, int(round(sec * self.fps)))
+        return max(0, round(sec * self.fps))
 
     def frame_to_sec(self, frame: int) -> float:
         return float(frame) / self.fps
@@ -351,6 +450,9 @@ class ProjectAnalysisState:
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize state metadata (excluding raw audio arrays) to a JSON-safe dict."""
+        intent_dict = asdict(self.intent)
+        if intent_dict.get("time_range_sec") is not None:
+            intent_dict["time_range_sec"] = list(intent_dict["time_range_sec"])
         return {
             "project_id": self.project_id,
             "sequence_id": self.sequence_id,
@@ -359,11 +461,12 @@ class ProjectAnalysisState:
             "state_version": self.state_version,
             "dry_run": self.dry_run,
             "instruction": self.instruction,
-            "intent": asdict(self.intent),
+            "intent": intent_dict,
             "media_assets": {k: asdict(v) for k, v in self.media_assets.items()},
             "missing_media": list(self.missing_media),
             "sync_result": asdict(self.sync_result) if self.sync_result else None,
             "transcript_backend": self.transcript_backend,
+            "asr_backend_report": asdict(self.asr_backend_report),
             "transcript_segments": [asdict(s) for s in self.transcript_segments],
             "silence_intervals": [asdict(i) for i in self.silence_intervals],
             "interruption_intervals": [asdict(i) for i in self.interruption_intervals],

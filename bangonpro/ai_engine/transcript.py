@@ -12,6 +12,7 @@ from __future__ import annotations
 import copy
 import json
 import re
+from dataclasses import asdict
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
@@ -50,7 +51,7 @@ _SILENCE_MARKER_RE = re.compile(
 
 
 def _sec_to_frame(sec: float, fps: float) -> int:
-    return max(0, int(round(max(0.0, float(sec)) * float(fps))))
+    return max(0, round(max(0.0, float(sec)) * float(fps)))
 
 
 def _fps_to_rational(fps: float) -> tuple[int, int]:
@@ -150,21 +151,21 @@ def build_words_for_segment(
 def validate_transcript(transcript: dict[str, Any]) -> dict[str, Any]:
     """Validate structural invariants of a Bang On Pro ``transcript.json`` document."""
     if not isinstance(transcript, dict):
-        raise ValueError("Transcript must be a JSON object")
+        raise ValueError("Transcript must be a JSON object")  # noqa: TRY004
     for req_key in ("schema_version", "project_id", "sequence_id", "fps", "speakers", "segments"):
         if req_key not in transcript:
             raise ValueError(f"Transcript missing required field '{req_key}'")
     if float(transcript["fps"]) <= 0:
         raise ValueError("Transcript 'fps' must be > 0")
     if not isinstance(transcript["speakers"], list):
-        raise ValueError("Transcript 'speakers' must be a list")
+        raise ValueError("Transcript 'speakers' must be a list")  # noqa: TRY004
     if not isinstance(transcript["segments"], list):
-        raise ValueError("Transcript 'segments' must be a list")
+        raise ValueError("Transcript 'segments' must be a list")  # noqa: TRY004
 
     seen_seg_ids: set[str] = set()
     for seg in transcript["segments"]:
         if not isinstance(seg, dict):
-            raise ValueError("Every transcript segment must be a JSON object")
+            raise ValueError("Every transcript segment must be a JSON object")  # noqa: TRY004
         seg_id = str(seg.get("segment_id", "")).strip()
         if not seg_id:
             raise ValueError("Transcript segment missing non-empty 'segment_id'")
@@ -264,15 +265,21 @@ def build_transcript_document(
                     ed_e = round(min(edited_duration, cursor + (ov_e - iv.start_sec)), 4)
                     if ed_e > ed_s + 0.05:
                         part_idx += 1
-                        seg_id_out = seg.segment_id if part_idx == 1 else f"{seg.segment_id}_p{part_idx}"
+                        seg_id_out = (
+                            seg.segment_id if part_idx == 1 else f"{seg.segment_id}_p{part_idx}"
+                        )
                         s_f = _sec_to_frame(ed_s, fps)
                         e_f = max(s_f + 1, _sec_to_frame(ed_e, fps))
-                        words = build_words_for_segment(
-                            seg.text,
-                            ed_s,
-                            ed_e,
-                            fps,
-                            confidence=seg.confidence,
+                        words = (
+                            build_words_for_segment(
+                                seg.text,
+                                ed_s,
+                                ed_e,
+                                fps,
+                                confidence=seg.confidence,
+                            )
+                            if seg.is_neural_inference
+                            else []
                         )
                         entry: dict[str, Any] = {
                             "segment_id": seg_id_out,
@@ -285,10 +292,14 @@ def build_transcript_document(
                             "end_frame": e_f,
                             "text": seg.text,
                             "confidence": round(float(seg.confidence), 4),
+                            "backend_id": seg.backend,
+                            "is_neural_inference": bool(seg.is_neural_inference),
+                            "transcript_quality": seg.transcript_quality,
                             "is_overlap": bool(seg.is_overlap),
                             "overlap_speakers": overlap_names,
                             "is_filler_or_silence": bool(
-                                seg.is_filler_or_silence or is_filler_or_silence_text(seg.text)
+                                seg.is_filler_or_silence
+                                or (seg.is_neural_inference and is_filler_or_silence_text(seg.text))
                             ),
                             "deleted": bool(seg.deleted),
                             "words": words,
@@ -301,13 +312,17 @@ def build_transcript_document(
         else:
             s_f = _sec_to_frame(seg.start_sec, fps)
             e_f = max(s_f + 1, _sec_to_frame(seg.end_sec, fps))
-            words = build_words_for_segment(
-                seg.text,
-                seg.start_sec,
-                seg.end_sec,
-                fps,
-                confidence=seg.confidence,
-                explicit_words=seg.words or None,
+            words = (
+                build_words_for_segment(
+                    seg.text,
+                    seg.start_sec,
+                    seg.end_sec,
+                    fps,
+                    confidence=seg.confidence,
+                    explicit_words=seg.words or None,
+                )
+                if (seg.is_neural_inference or bool(seg.words))
+                else []
             )
             doc_segments.append(
                 {
@@ -321,10 +336,14 @@ def build_transcript_document(
                     "end_frame": e_f,
                     "text": seg.text,
                     "confidence": round(float(seg.confidence), 4),
+                    "backend_id": seg.backend,
+                    "is_neural_inference": bool(seg.is_neural_inference),
+                    "transcript_quality": seg.transcript_quality,
                     "is_overlap": bool(seg.is_overlap),
                     "overlap_speakers": overlap_names,
                     "is_filler_or_silence": bool(
-                        seg.is_filler_or_silence or is_filler_or_silence_text(seg.text)
+                        seg.is_filler_or_silence
+                        or (seg.is_neural_inference and is_filler_or_silence_text(seg.text))
                     ),
                     "deleted": bool(seg.deleted),
                     "words": words,
@@ -336,6 +355,7 @@ def build_transcript_document(
         "project_id": state.project_id,
         "sequence_id": state.sequence_id,
         "fps": round(fps, 6),
+        "asr_backend": asdict(state.asr_backend_report),
         "speakers": speakers_list,
         "segments": doc_segments,
     }

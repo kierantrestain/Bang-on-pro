@@ -14,11 +14,13 @@ SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import ssl
 import subprocess
 import sys
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List
@@ -29,10 +31,17 @@ _REPO_ROOT = str(Path(__file__).resolve().parents[2])
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from bangonpro.macos.benchmark import get_peak_rss_mb, run_comprehensive_benchmarks, run_full_benchmark
+from bangonpro.macos.benchmark import (
+    _build_host_environment,
+    get_peak_rss_mb,
+    run_comprehensive_benchmarks,
+    run_full_benchmark,
+    run_sustained_benchmarks,
+)
 from bangonpro.macos.hardware_profiles import (
     HardwareCapabilities,
     assess_metal_mlt_support,
+    classify_host_tier,
     generate_decode_args,
     generate_export_profile,
     list_profile_names,
@@ -43,6 +52,7 @@ from bangonpro.macos.hardware_profiles import (
 from bangonpro.macos.proxy_cache_manager import (
     CacheBudgetManager,
     MediaProbeInfo,
+    ProxyCancelledError,
     ProxyPolicy,
     StorageAndModelManager,
     StorageBudgetConfig,
@@ -786,4 +796,221 @@ def test_comprehensive_benchmarks_with_4k_and_report_artifacts(tmp_path: Path) -
     assert "proxy_4k_to_720p" in md_text
     assert "multicam_4cam_sync_and_mlt_render" in md_text
     assert "ai_vad_transcription" in md_text
+
+
+# ---------------------------------------------------------------------------
+# 9. V1.1.0 Virtualized vs Bare-Metal Apple Silicon Attribution & Sustained Mode
+# ---------------------------------------------------------------------------
+
+
+def test_virtualized_vs_bare_metal_apple_silicon_and_linux_host_tier() -> None:
+    """Verify bare-metal Apple Silicon, virtualized CI Apple Silicon, and Linux CPU tiers are distinct."""
+    assert classify_host_tier("darwin", "arm64", "Apple M1 (Virtual)") == (
+        "macos_arm64_virtualized_ci",
+        True,
+    )
+    assert classify_host_tier("darwin", "arm64", "Apple M3 Max") == (
+        "macos_arm64_bare_metal",
+        False,
+    )
+    assert classify_host_tier("darwin", "arm64", "Apple M2", hypervisor_present=True) == (
+        "macos_arm64_virtualized_ci",
+        True,
+    )
+    assert classify_host_tier("linux", "x86_64", "AMD EPYC 7763 64-Core Processor") == (
+        "linux_cpu_fallback",
+        False,
+    )
+
+    bare_caps = _simulated_apple_silicon_caps()
+    assert bare_caps.host_tier == "macos_arm64_bare_metal"
+    assert bare_caps.is_virtualized is False
+    bare_env = _build_host_environment(bare_caps)
+    assert bare_env["host_tier"] == "macos_arm64_bare_metal"
+    assert bare_env["is_virtualized"] is False
+    assert "bare-metal" in bare_env["measurement_disclaimer"].lower()
+
+    virt_caps = HardwareCapabilities(
+        platform_system="darwin",
+        machine="arm64",
+        is_apple_silicon=True,
+        cpu_brand="Apple M1 (Virtual)",
+        cpu_cores_logical=3,
+        total_ram_gb=7.0,
+        free_disk_gb=34.0,
+        videotoolbox_available=True,
+    )
+    assert virt_caps.host_tier == "macos_arm64_virtualized_ci"
+    assert virt_caps.is_virtualized is True
+    virt_env = _build_host_environment(virt_caps)
+    assert virt_env["host_tier"] == "macos_arm64_virtualized_ci"
+    assert virt_env["is_virtualized"] is True
+    assert "NOT bare-metal" in virt_env["measurement_disclaimer"]
+    assert "Virtualized CI" in virt_env["environment_label"]
+
+    linux_caps = HardwareCapabilities(
+        platform_system="linux",
+        machine="x86_64",
+        is_apple_silicon=False,
+        cpu_brand="Intel Xeon",
+        cpu_cores_logical=4,
+        total_ram_gb=16.0,
+        free_disk_gb=80.0,
+    )
+    assert linux_caps.host_tier == "linux_cpu_fallback"
+    linux_env = _build_host_environment(linux_caps)
+    assert linux_env["host_tier"] == "linux_cpu_fallback"
+    assert "NOT Apple Silicon" in linux_env["measurement_disclaimer"]
+
+
+def test_sustained_benchmarks_metrics_cache_growth_and_attribution(tmp_path: Path) -> None:
+    """Verify --sustained default duration contract and full sustained telemetry metrics."""
+    sig = inspect.signature(run_sustained_benchmarks)
+    assert sig.parameters["duration_sec"].default >= 10.0
+    assert sig.parameters["duration_4k_sec"].default >= 10.0
+
+    out_dir = tmp_path / "sustained_bench"
+    report = run_sustained_benchmarks(
+        out_dir,
+        include_4k=True,
+        duration_sec=1.5,
+        duration_4k_sec=1.0,
+        multicam_duration_sec=1.5,
+        audio_duration_sec=10.0,
+        roto_frames=12,
+    )
+
+    assert report.summary["benchmark_mode"] == "sustained"
+    assert report.summary["all_workloads_succeeded"] is True
+    assert report.summary["host_tier"] in (
+        "macos_arm64_bare_metal",
+        "macos_arm64_virtualized_ci",
+        "linux_cpu_fallback",
+    )
+    assert isinstance(report.summary["is_virtualized"], bool)
+    assert report.summary["total_cache_growth_mb"] > 0.0
+    assert report.summary["total_dropped_frames_estimate"] >= 0
+
+    for name, wl in report.workloads.items():
+        if wl.skipped:
+            continue
+        assert wl.succeeded is True, f"Sustained workload '{name}' failed: {wl.error}"
+        assert wl.elapsed_sec > 0.0
+        assert wl.fps > 0.0
+        assert wl.realtime_factor > 0.0
+        assert wl.peak_rss_mb > 0.0
+        assert wl.cpu_percent_estimate >= 0.0
+        assert wl.dropped_frames_estimate >= 0
+
+    assert report.workloads["proxy_4k_to_720p"].cache_growth_mb > 0.0
+    assert report.workloads["export_1080p"].cache_growth_mb > 0.0
+    assert report.workloads["export_4k"].cache_growth_mb > 0.0
+
+    parsed = json.loads((out_dir / "benchmark_results.json").read_text(encoding="utf-8"))
+    assert parsed["summary"]["benchmark_mode"] == "sustained"
+    assert parsed["host_environment"]["host_tier"] == report.summary["host_tier"]
+    assert "cache_growth_mb" in parsed["workloads"]["proxy_4k_to_720p"]
+    assert "cpu_percent_estimate" in parsed["workloads"]["export_1080p"]
+    assert "dropped_frames_estimate" in parsed["workloads"]["export_1080p"]
+
+    md_text = (out_dir / "benchmark_report.md").read_text(encoding="utf-8")
+    assert "**Benchmark Mode:** `sustained`" in md_text
+    assert "**Host Tier:**" in md_text
+    assert "Cache Growth (MB)" in md_text
+    assert "CPU (%)" in md_text
+    assert "Dropped Frames" in md_text
+
+
+def test_proxy_cancellation_cleanup_corrupt_cache_recovery_and_url_creds(tmp_path: Path) -> None:
+    """Verify proxy task cancellation removes partial temps, corrupt caches recover, and URL creds fail."""
+    # Remote GPU endpoint rejects embedded credentials
+    with pytest.raises(InsecureTransportError, match="Embedded credentials"):
+        RemoteGpuOffloadClient(
+            RemoteGpuEndpointConfig(endpoint_url="https://user:secret@gpu.example.com/v1/offload")
+        )
+
+    source_dir = tmp_path / "src_media"
+    source_dir.mkdir()
+    src_clip = _create_synthetic_video(
+        source_dir / "long_clip.mp4", width=1280, height=720, fps=30, duration_sec=3.0
+    )
+    baseline_bytes = src_clip.read_bytes()
+
+    mgr = StorageAndModelManager(
+        tmp_path / "cache_store",
+        config=StorageBudgetConfig(max_cache_gb=1.0, max_models_gb=1.0, protected_dirs=(source_dir,)),
+    )
+
+    # 1. Pre-cancelled event aborts immediately without writing anything
+    pre_cancel = threading.Event()
+    pre_cancel.set()
+    with pytest.raises(ProxyCancelledError):
+        generate_proxy(
+            src_clip,
+            mgr,
+            timeline_fps=25.0,
+            policy=ProxyPolicy(proxy_target_width=640, proxy_target_height=360, force_proxy=True),
+            cancel_event=pre_cancel,
+        )
+    assert list(mgr.proxies_dir.glob("*")) == []
+
+    # 2. Mid-flight cancellation cleans up temporary files and preserves source media
+    mid_cancel = threading.Event()
+    timer = threading.Timer(0.03, mid_cancel.set)
+    timer.start()
+    try:
+        try:
+            generate_proxy(
+                src_clip,
+                mgr,
+                timeline_fps=25.0,
+                policy=ProxyPolicy(proxy_target_width=640, proxy_target_height=360, force_proxy=True),
+                cancel_event=mid_cancel,
+            )
+        except ProxyCancelledError:
+            # Verify ZERO orphaned .tmp. files remain after cancellation
+            leftover_tmps = [p for p in mgr.proxies_dir.glob("*.tmp.*")]
+            assert leftover_tmps == []
+    finally:
+        timer.cancel()
+
+    assert src_clip.read_bytes() == baseline_bytes
+
+    # 3. Valid proxy creation followed by corrupt cache auto-recovery
+    created = generate_proxy(
+        src_clip,
+        mgr,
+        timeline_fps=25.0,
+        policy=ProxyPolicy(proxy_target_width=640, proxy_target_height=360, force_proxy=True),
+    )
+    assert created.created is True or created.reused_cached is True
+    proxy_file = Path(created.proxy_path)
+    assert proxy_file.is_file()
+
+    # Corrupt cached proxy file on disk and verify generate_proxy regenerates cleanly
+    proxy_file.write_bytes(b"CORRUPT_TRUNCATED_MP4_HEADER")
+    recovered = generate_proxy(
+        src_clip,
+        mgr,
+        timeline_fps=25.0,
+        policy=ProxyPolicy(proxy_target_width=640, proxy_target_height=360, force_proxy=True),
+    )
+    assert recovered.created is True
+    assert recovered.reused_cached is False
+    assert recovered.proxy_probe is not None
+    assert recovered.proxy_probe.width == 640
+
+    # 4. Orphaned temp file cleanup removes stale .*.tmp.* while preserving valid proxies & .kdenlive
+    orphan = mgr.proxies_dir / ".stale_job.99999.tmp.mp4"
+    orphan.write_bytes(b"partial-temp-data")
+    stray_proj = mgr.proxies_dir / "keep_me.kdenlive"
+    stray_proj.write_text("<mlt/>", encoding="utf-8")
+
+    removed = mgr.cleanup_orphaned_temp_files()
+    assert str(orphan.resolve()) in removed
+    assert not orphan.exists()
+    assert proxy_file.exists()
+    assert stray_proj.exists()
+    assert mgr.verify_no_duplicate_media([src_clip]).verified_clean is True
+
 

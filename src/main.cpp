@@ -375,7 +375,7 @@ int main(int argc, char *argv[])
         break;
     }
 
-    KAboutData aboutData(QByteArray("kdenlive"), i18n("Bang On Pro"), QStringLiteral("1.0.0 (Kdenlive %1)").arg(QStringLiteral(KDENLIVE_VERSION)),
+    KAboutData aboutData(QByteArray("kdenlive"), i18n("Bang On Pro"), QStringLiteral("1.1.0 (Kdenlive %1)").arg(QStringLiteral(KDENLIVE_VERSION)),
                          i18n("AI-Native Professional Video Editor built on Kdenlive & MLT."), KAboutLicense::GPL_V3,
                          i18n("Copyright © 2026 Bang On Pro Contributors; Built on Kdenlive (Copyright © 2007–2024 Kdenlive authors)"), otherText,
                          QStringLiteral("https://github.com/kierantrestain/Bang-on-pro"));
@@ -438,7 +438,7 @@ int main(int argc, char *argv[])
     QCommandLineOption renderOption(QStringLiteral("render"), i18n("Directly render the project and exit."));
     parser.addOption(renderOption);
 
-    QCommandLineOption presetOption(QStringLiteral("render-preset"), i18n("Kdenlive render preset name (MP4-H264/AAC will be used if none given)."),
+    QCommandLineOption presetOption(QStringLiteral("render-preset"), i18n("Bang On Pro / Kdenlive render preset name (MP4-H264/AAC will be used if none given)."),
                                     QStringLiteral("renderPreset"), QString());
     parser.addOption(presetOption);
 
@@ -446,7 +446,7 @@ int main(int argc, char *argv[])
                                   i18n("Exit after (detached) render process started, without this flag it exists only after it finished."));
     parser.addOption(exitOption);
 
-    parser.addPositionalArgument(QStringLiteral("file"), i18n("Kdenlive document to open."));
+    parser.addPositionalArgument(QStringLiteral("file"), i18n("Bang On Pro / Kdenlive project (.kdenlive) to open."));
     parser.addPositionalArgument(QStringLiteral("rendering"), i18n("Output file for rendered video."));
 
     // Parse command line

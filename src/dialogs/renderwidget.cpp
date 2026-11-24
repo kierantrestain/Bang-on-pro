@@ -58,6 +58,7 @@
 #include <QTemporaryFile>
 #include <QThread>
 #include <QTreeWidgetItem>
+#include <utility>
 #include <QtGlobal>
 
 #include <Purpose/AlternativesModel>
@@ -79,7 +80,8 @@ enum {
     LastTimeRole,
     LastFrameRole,
     OpenBrowserRole,
-    PlayAfterRole
+    PlayAfterRole,
+    TempFilesRole
 };
 
 // Running job status
@@ -399,10 +401,87 @@ RenderWidget::~RenderWidget()
     saveConfig();
     m_view.running_jobs->blockSignals(true);
     m_view.scripts_list->blockSignals(true);
+    // Clean up any leftover Kdenlive-owned temporary playlist/subtitle files in QDir::tempPath()
+    // without touching user source media, delayed render scripts, active running jobs, or
+    // waiting jobs handed off to a detached shutdown script (m_blockProcessing == true).
+    for (int i = 0; i < m_view.running_jobs->topLevelItemCount(); ++i) {
+        auto *item = static_cast<RenderJobItem *>(m_view.running_jobs->topLevelItem(i));
+        if (!item) {
+            continue;
+        }
+        const int st = item->status();
+        const bool shouldClean = (st == FINISHEDJOB || st == FAILEDJOB || st == ABORTEDJOB) || (!m_blockProcessing && st == WAITINGJOB);
+        if (shouldClean) {
+            cleanupJobItemTempFiles(item);
+        }
+    }
     m_view.running_jobs->clear();
     m_view.scripts_list->clear();
     delete m_jobsDelegate;
     delete m_scriptsDelegate;
+}
+
+bool RenderWidget::isOwnedTempRenderFile(const QString &filePath)
+{
+    if (filePath.isEmpty()) {
+        return false;
+    }
+    const QFileInfo fi(filePath);
+    if (!fi.exists() || !fi.isFile() || fi.isSymLink()) {
+        return false;
+    }
+    const QString tempDirCanonical = QFileInfo(QDir::tempPath()).canonicalFilePath();
+    const QString fileDirCanonical = QFileInfo(fi.absolutePath()).canonicalFilePath();
+    if (tempDirCanonical.isEmpty() || fileDirCanonical != tempDirCanonical) {
+        return false;
+    }
+    const QString name = fi.fileName();
+    if (!name.startsWith(QLatin1String("kdenlive-"))) {
+        return false;
+    }
+    return name.endsWith(QLatin1String(".mlt")) || name.endsWith(QLatin1String(".srt")) || name.endsWith(QLatin1String(".sh")) ||
+           name.endsWith(QLatin1String(".bat"));
+}
+
+void RenderWidget::cleanupTempRenderFiles(const QStringList &paths, const RenderJobItem *excludingItem) const
+{
+    for (const QString &path : paths) {
+        if (!isOwnedTempRenderFile(path)) {
+            continue;
+        }
+        // Do not delete a temporary file if another active/waiting job still references it
+        // (for example, pass 1 and pass 2 sharing a temporary .srt subtitle file).
+        bool stillReferenced = false;
+        for (int i = 0; i < m_view.running_jobs->topLevelItemCount(); ++i) {
+            auto *other = static_cast<RenderJobItem *>(m_view.running_jobs->topLevelItem(i));
+            if (!other || other == excludingItem) {
+                continue;
+            }
+            const int st = other->status();
+            if (st != WAITINGJOB && st != STARTINGJOB && st != RUNNINGJOB) {
+                continue;
+            }
+            const QStringList otherFiles = other->data(1, TempFilesRole).toStringList();
+            if (otherFiles.contains(path)) {
+                stillReferenced = true;
+                break;
+            }
+        }
+        if (!stillReferenced) {
+            QFile::remove(path);
+        }
+    }
+}
+
+void RenderWidget::cleanupJobItemTempFiles(const RenderJobItem *item) const
+{
+    if (!item) {
+        return;
+    }
+    const QStringList tempFiles = item->data(1, TempFilesRole).toStringList();
+    if (!tempFiles.isEmpty()) {
+        cleanupTempRenderFiles(tempFiles, item);
+    }
 }
 
 void RenderWidget::saveConfig()
@@ -696,27 +775,27 @@ void RenderWidget::slotPrepareExport2(bool delayedRendering)
     }
     saveRenderProfile();
 
-    RenderRequest *request = new RenderRequest();
+    RenderRequest request;
 
-    request->setOutputFile(m_view.out_file->url().toLocalFile());
+    request.setOutputFile(m_view.out_file->url().toLocalFile());
 
-    request->setPresetParams(m_params);
-    request->setDelayedRendering(delayedRendering);
-    request->setProxyRendering(m_view.proxy_render->isChecked());
-    request->setEmbedSubtitles(m_view.embed_subtitles->isEnabled() && m_view.embed_subtitles->isChecked());
-    request->setTwoPass(m_view.checkTwoPass->isChecked());
-    request->setAudioFilePerTrack(m_view.stemAudioExport->isChecked() && m_view.stemAudioExport->isEnabled());
+    request.setPresetParams(m_params);
+    request.setDelayedRendering(delayedRendering);
+    request.setProxyRendering(m_view.proxy_render->isChecked());
+    request.setEmbedSubtitles(m_view.embed_subtitles->isEnabled() && m_view.embed_subtitles->isChecked());
+    request.setTwoPass(m_view.checkTwoPass->isChecked());
+    request.setAudioFilePerTrack(m_view.stemAudioExport->isChecked() && m_view.stemAudioExport->isEnabled());
 
     bool guideMultiExport = m_view.guide_multi_box->isChecked();
     int guideCategory = m_view.guideCategoryChooser->currentCategory();
-    request->setGuideParams(m_guidesModel, guideMultiExport, guideCategory);
+    request.setGuideParams(m_guidesModel, guideMultiExport, guideCategory);
 
-    request->setOverlayData(m_view.tc_type->currentData().toString());
-    request->setAspectRatio(m_view.aspect_ratio_type->currentData().toString());
+    request.setOverlayData(m_view.tc_type->currentData().toString());
+    request.setAspectRatio(m_view.aspect_ratio_type->currentData().toString());
 
     if (m_view.render_zone->isChecked()) {
         Monitor *pMon = pCore->getMonitor(Kdenlive::ProjectMonitor);
-        request->setBounds(pMon->getZoneStart(), pMon->getZoneEnd() - 1);
+        request.setBounds(pMon->getZoneStart(), pMon->getZoneEnd() - 1);
     } else if (m_view.render_guide->isChecked()) {
         double guideStart = m_view.guide_start->itemData(m_view.guide_start->currentIndex()).toDouble();
         double guideEnd = m_view.guide_end->itemData(m_view.guide_end->currentIndex()).toDouble();
@@ -725,13 +804,13 @@ void RenderWidget::slotPrepareExport2(bool delayedRendering)
         int in = int(GenTime(qMin(guideStart, guideEnd)).frames(fps));
         // End rendering at frame before last guide
         int out = int(GenTime(qMax(guideStart, guideEnd)).frames(fps)) - 1;
-        request->setBounds(in, out);
+        request.setBounds(in, out);
     } // else: full project is the default
 
-    std::vector<RenderRequest::RenderJob> jobs = request->process();
+    std::vector<RenderRequest::RenderJob> jobs = request.process();
 
-    if (!request->errorMessages().isEmpty()) {
-        KMessageBox::errorList(this, i18n("The following errors occurred while trying to render"), request->errorMessages());
+    if (!request.errorMessages().isEmpty()) {
+        KMessageBox::errorList(this, i18n("The following errors occurred while trying to render"), request.errorMessages());
     }
 
     // Create jobs
@@ -746,11 +825,33 @@ void RenderWidget::slotPrepareExport2(bool delayedRendering)
         return;
     }
 
+    // RenderRequest::generatePlaylistFile creates a base empty kdenlive-XXXXXX.mlt file in QDir::tempPath()
+    // and then writes numbered section playlists (kdenlive-XXXXXX-1.mlt, ...), leaving the 0-byte base orphaned.
+    for (const auto &job : jobs) {
+        if (job.playlistPath.endsWith(QStringLiteral("-1.mlt"))) {
+            const QString baseTempPlaylist = job.playlistPath.left(job.playlistPath.size() - 6) + QStringLiteral(".mlt");
+            if (isOwnedTempRenderFile(baseTempPlaylist) && QFileInfo(baseTempPlaylist).size() == 0) {
+                QFile::remove(baseTempPlaylist);
+            }
+            break;
+        }
+    }
+
     QList<RenderJobItem *> jobList;
     for (auto &job : jobs) {
         RenderJobItem *renderItem = createRenderJob(job);
         if (renderItem != nullptr) {
             jobList << renderItem;
+        } else {
+            // Job was rejected (e.g., duplicate active output path); clean up its newly created temp files.
+            QStringList orphanedFiles;
+            if (isOwnedTempRenderFile(job.playlistPath)) {
+                orphanedFiles << job.playlistPath;
+            }
+            if (isOwnedTempRenderFile(job.subtitlePath)) {
+                orphanedFiles << job.subtitlePath;
+            }
+            cleanupTempRenderFiles(orphanedFiles);
         }
     }
     if (jobList.count() > 0) {
@@ -777,6 +878,7 @@ RenderJobItem *RenderWidget::createRenderJob(const RenderRequest::RenderJob &job
             return nullptr;
         }
         // There is an existing job that already finished
+        cleanupJobItemTempFiles(renderItem);
         delete renderItem;
         renderItem = nullptr;
     }
@@ -789,6 +891,14 @@ RenderJobItem *RenderWidget::createRenderJob(const RenderRequest::RenderJob &job
     QStringList argsJob = RenderRequest::argsByJob(job);
 
     renderItem->setData(1, ParametersRole, argsJob);
+    QStringList ownedTempFiles;
+    if (isOwnedTempRenderFile(job.playlistPath)) {
+        ownedTempFiles << job.playlistPath;
+    }
+    if (isOwnedTempRenderFile(job.subtitlePath)) {
+        ownedTempFiles << job.subtitlePath;
+    }
+    renderItem->setData(1, TempFilesRole, ownedTempFiles);
     qDebug() << "* CREATED JOB WITH ARGS: " << argsJob;
     renderItem->setData(1, OpenBrowserRole, m_view.open_browser->isChecked());
     renderItem->setData(1, PlayAfterRole, m_view.play_after->isChecked());
@@ -826,16 +936,23 @@ void RenderWidget::checkRenderStatus()
             item->setData(1, LastTimeRole, t);
             waitingJob = true;
             startRendering(item);
-            // Check for 2 pass encoding
+            if (item->status() == FAILEDJOB) {
+                item = static_cast<RenderJobItem *>(m_view.running_jobs->itemBelow(item));
+                continue;
+            }
+            // Check for 2 pass encoding (playlist path is at index 2 in RenderRequest::argsByJob)
             QStringList jobData = item->data(1, ParametersRole).toStringList();
-            if (jobData.size() > 2 && jobData.at(1).endsWith(QStringLiteral("-pass2.mlt"))) {
+            const int playlistIdx = (jobData.size() > 2 && jobData.at(2).endsWith(QStringLiteral("-pass2.mlt")))
+                                        ? 2
+                                        : ((jobData.size() > 1 && jobData.at(1).endsWith(QStringLiteral("-pass2.mlt"))) ? 1 : -1);
+            if (playlistIdx >= 0) {
                 // Find and remove 1st pass job
                 QTreeWidgetItem *above = m_view.running_jobs->itemAbove(item);
-                QString firstPassName = jobData.at(1).section(QLatin1Char('-'), 0, -2) + QStringLiteral(".mlt");
+                QString firstPassName = jobData.at(playlistIdx).section(QLatin1Char('-'), 0, -2) + QStringLiteral(".mlt");
                 while (above) {
                     QStringList aboveData = above->data(1, ParametersRole).toStringList();
-                    qDebug() << "// GOT  JOB: " << aboveData.at(1);
-                    if (aboveData.size() > 2 && aboveData.at(1) == firstPassName) {
+                    if (aboveData.size() > playlistIdx && aboveData.at(playlistIdx) == firstPassName) {
+                        cleanupJobItemTempFiles(static_cast<RenderJobItem *>(above));
                         delete above;
                         break;
                     }
@@ -858,6 +975,7 @@ void RenderWidget::startRendering(RenderJobItem *item)
     qDebug() << "starting kdenlive_render process using: " << KdenliveSettings::kdenliverendererpath();
     if (!QProcess::startDetached(KdenliveSettings::kdenliverendererpath(), rendererArgs)) {
         item->setStatus(FAILEDJOB);
+        cleanupJobItemTempFiles(item);
     } else {
         KNotification::event(QStringLiteral("RenderStarted"), i18n("Rendering <i>%1</i> started", item->text(1)), QPixmap());
     }
@@ -1334,9 +1452,11 @@ void RenderWidget::setRenderStatus(const QString &dest, int status, const QStrin
                 job->start();
             }
         }
+        cleanupJobItemTempFiles(item);
     } else if (status == -2) {
         // Rendering crashed
         item->setStatus(FAILEDJOB);
+        cleanupJobItemTempFiles(item);
         m_view.error_log->append(i18n("<strong>Rendering of %1 crashed</strong><br />", dest));
         m_view.error_log->append(error);
         m_view.error_log->append(QStringLiteral("<hr />"));
@@ -1344,7 +1464,9 @@ void RenderWidget::setRenderStatus(const QString &dest, int status, const QStrin
     } else if (status == -3) {
         // User aborted job
         item->setStatus(ABORTEDJOB);
+        cleanupJobItemTempFiles(item);
     } else {
+        cleanupJobItemTempFiles(item);
         delete item;
     }
     slotCheckJob();
@@ -1355,9 +1477,10 @@ void RenderWidget::slotAbortCurrentJob()
 {
     auto *current = static_cast<RenderJobItem *>(m_view.running_jobs->currentItem());
     if (current) {
-        if (current->status() == RUNNINGJOB) {
+        if (current->status() == RUNNINGJOB || current->status() == STARTINGJOB) {
             Q_EMIT abortProcess(current->text(1));
         } else {
+            cleanupJobItemTempFiles(current);
             delete current;
             slotCheckJob();
             checkRenderStatus();
@@ -1406,6 +1529,7 @@ void RenderWidget::slotCleanUpJobs()
     auto *current = static_cast<RenderJobItem *>(m_view.running_jobs->topLevelItem(ix));
     while (current != nullptr) {
         if (current->status() == FINISHEDJOB || current->status() == ABORTEDJOB) {
+            cleanupJobItemTempFiles(current);
             delete current;
         } else {
             ix++;
@@ -1512,6 +1636,7 @@ void RenderWidget::slotStartScript()
                     i18n("Already running"));
                 return;
             }
+            cleanupJobItemTempFiles(renderItem);
             delete renderItem;
             renderItem = nullptr;
         }
@@ -1676,6 +1801,19 @@ void RenderWidget::saveRenderProfile()
 
 bool RenderWidget::startWaitingRenderJobs()
 {
+    QList<RenderJobItem *> waitingItems;
+    auto *item = static_cast<RenderJobItem *>(m_view.running_jobs->topLevelItem(0));
+    while (item != nullptr) {
+        if (item->status() == WAITINGJOB) {
+            waitingItems << item;
+        }
+        item = static_cast<RenderJobItem *>(m_view.running_jobs->itemBelow(item));
+    }
+    if (waitingItems.isEmpty()) {
+        m_blockProcessing = false;
+        return false;
+    }
+
     m_blockProcessing = true;
 #ifdef Q_OS_WIN
     const QLatin1String ScriptFormat(".bat");
@@ -1685,48 +1823,96 @@ bool RenderWidget::startWaitingRenderJobs()
     QTemporaryFile tmp(QDir::temp().absoluteFilePath(QStringLiteral("kdenlive-XXXXXX") + ScriptFormat));
     if (!tmp.open()) {
         // Something went wrong
-        return false;
-    }
-    tmp.close();
-    QString autoscriptFile = tmp.fileName();
-    QFile file(autoscriptFile);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
-        qCWarning(KDENLIVE_LOG) << "//////  ERROR writing to file: " << autoscriptFile;
-        KMessageBox::error(nullptr, i18n("Cannot write to file %1", autoscriptFile));
-        return false;
-    }
-
-    QTextStream outStream(&file);
-#if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
-    outStream.setCodec("UTF-8");
-#endif
-#ifndef Q_OS_WIN
-    outStream << "#!/bin/sh\n\n";
-#endif
-    auto *item = static_cast<RenderJobItem *>(m_view.running_jobs->topLevelItem(0));
-    while (item != nullptr) {
-        if (item->status() == WAITINGJOB) {
-            // Add render process for item
-            const QString params = item->data(1, ParametersRole).toStringList().join(QLatin1Char(' '));
-            outStream << '\"' << KdenliveSettings::kdenliverendererpath() << "\" " << params << '\n';
-        }
-        item = static_cast<RenderJobItem *>(m_view.running_jobs->itemBelow(item));
-    }
-// erase itself when rendering is finished
-#ifndef Q_OS_WIN
-    outStream << "rm \"" << autoscriptFile << "\"\n";
-#else
-    outStream << "del \"" << autoscriptFile << "\"\n";
-#endif
-    if (file.error() != QFile::NoError) {
-        KMessageBox::error(nullptr, i18n("Cannot write to file %1", autoscriptFile));
-        file.close();
         m_blockProcessing = false;
         return false;
     }
-    file.close();
-    QFile::setPermissions(autoscriptFile, file.permissions() | QFile::ExeUser);
-    QProcess::startDetached(autoscriptFile, QStringList());
+    const QString autoscriptFile = tmp.fileName();
+
+#ifndef Q_OS_WIN
+    auto quoteShellArg = [](const QString &arg) -> QString {
+        QString escaped = arg;
+        escaped.replace(QLatin1Char('\''), QStringLiteral("'\\''"));
+        return QLatin1Char('\'') + escaped + QLatin1Char('\'');
+    };
+#else
+    auto quoteShellArg = [](const QString &arg) -> QString {
+        QString escaped = arg;
+        escaped.replace(QLatin1Char('"'), QStringLiteral("\"\""));
+        return QLatin1Char('"') + escaped + QLatin1Char('"');
+    };
+#endif
+
+    QTextStream outStream(&tmp);
+#if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
+    outStream.setCodec("UTF-8");
+#endif
+    QStringList ownedTempFilesToClean;
+    ownedTempFilesToClean << autoscriptFile;
+    for (const RenderJobItem *waitingItem : std::as_const(waitingItems)) {
+        const QStringList tempFiles = waitingItem->data(1, TempFilesRole).toStringList();
+        for (const QString &tempPath : tempFiles) {
+            if (isOwnedTempRenderFile(tempPath) && !ownedTempFilesToClean.contains(tempPath)) {
+                ownedTempFilesToClean << tempPath;
+            }
+        }
+    }
+
+#ifndef Q_OS_WIN
+    outStream << "#!/bin/sh\n\n";
+    QStringList quotedCleanupPaths;
+    quotedCleanupPaths.reserve(ownedTempFilesToClean.size());
+    for (const QString &path : std::as_const(ownedTempFilesToClean)) {
+        quotedCleanupPaths << quoteShellArg(path);
+    }
+    // Always remove the generated runner script and Kdenlive-owned temporary render files
+    // on normal completion, interruption, or crash without touching user media.
+    outStream << "cleanup() {\n    rm -f -- " << quotedCleanupPaths.join(QLatin1Char(' ')) << "\n}\n";
+    outStream << "trap cleanup EXIT INT TERM HUP\n\n";
+#endif
+
+    for (const RenderJobItem *waitingItem : std::as_const(waitingItems)) {
+        // Add render process for item
+        QStringList quotedArgs;
+        const QStringList rawParams = waitingItem->data(1, ParametersRole).toStringList();
+        quotedArgs.reserve(rawParams.size());
+        for (const QString &param : rawParams) {
+            quotedArgs << quoteShellArg(param);
+        }
+        outStream << quoteShellArg(KdenliveSettings::kdenliverendererpath());
+        if (!quotedArgs.isEmpty()) {
+            outStream << QLatin1Char(' ') << quotedArgs.join(QLatin1Char(' '));
+        }
+        outStream << '\n';
+    }
+
+#ifdef Q_OS_WIN
+    for (const QString &path : std::as_const(ownedTempFilesToClean)) {
+        if (path != autoscriptFile) {
+            outStream << "del /F /Q " << quoteShellArg(QDir::toNativeSeparators(path)) << '\n';
+        }
+    }
+    // erase itself when rendering is finished
+    outStream << "del /F /Q " << quoteShellArg(QDir::toNativeSeparators(autoscriptFile)) << '\n';
+#endif
+
+    outStream.flush();
+    if (tmp.error() != QFile::NoError || outStream.status() != QTextStream::Ok) {
+        qCWarning(KDENLIVE_LOG) << "//////  ERROR writing to file: " << autoscriptFile;
+        KMessageBox::error(nullptr, i18n("Cannot write to file %1", autoscriptFile));
+        tmp.close();
+        m_blockProcessing = false;
+        return false;
+    }
+    tmp.setPermissions(tmp.permissions() | QFile::ExeUser);
+    tmp.setAutoRemove(false);
+    tmp.close();
+
+    if (!QProcess::startDetached(autoscriptFile, QStringList())) {
+        qCWarning(KDENLIVE_LOG) << "//////  ERROR launching waiting render script: " << autoscriptFile;
+        QFile::remove(autoscriptFile);
+        m_blockProcessing = false;
+        return false;
+    }
     return true;
 }
 

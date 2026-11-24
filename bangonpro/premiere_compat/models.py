@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any
 
 # Adobe Premiere Pro internal timebase: 254,016,000,000 ticks per second
 # (LCM of 24, 25, 29.97, 30, 48, 50, 59.94, 60, 44100, 48000, 96000)
@@ -28,6 +28,22 @@ class CompatibilityStatus(str, Enum):
     MISSING_DEPENDENCY = "missing_dependency"
 
 
+class VisualEquivalenceEvidence(str, Enum):
+    """Explicit evidence backing a preset's visual-equivalence classification.
+
+    NEVER claims pixel-identical Premiere equivalence solely because ``melt``
+    rendered without error.
+    """
+
+    PIXEL_VERIFIED_REFERENCE = "pixel_verified_reference"
+    MATHEMATICALLY_EQUIVALENT_MAPPING = "mathematically_equivalent_mapping"
+    APPROXIMATED_NATIVE_EQUIVALENT = "approximated_native_equivalent"
+    MELT_RENDER_ONLY_UNVERIFIED = "melt_render_only_unverified"
+    PREMIERE_REFERENCE_MISMATCH = "premiere_reference_mismatch"
+    BLOCKED_MISSING_DEPENDENCY = "blocked_missing_dependency"
+    UNSUPPORTED_PROPRIETARY = "unsupported_proprietary"
+
+
 class InterpolationMode(str, Enum):
     """Normalized keyframe interpolation mode."""
 
@@ -45,14 +61,14 @@ class Keyframe:
     raw_ticks: int
     time_seconds: float
     frame: int
-    value: Union[float, Tuple[float, ...], str]
+    value: float | tuple[float, ...] | str
     interpolation: InterpolationMode = InterpolationMode.LINEAR
-    bezier_handles: Optional[Tuple[float, float, float, float]] = None
+    bezier_handles: tuple[float, float, float, float] | None = None
     is_sentinel: bool = False
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         val: Any = list(self.value) if isinstance(self.value, tuple) else self.value
-        data: Dict[str, Any] = {
+        data: dict[str, Any] = {
             "raw_ticks": self.raw_ticks,
             "time_seconds": round(self.time_seconds, 6),
             "frame": self.frame,
@@ -75,14 +91,14 @@ class Parameter:
     param_type: str = "scalar"
     current_value: Any = None
     start_value: Any = None
-    keyframes: List[Keyframe] = field(default_factory=list)
+    keyframes: list[Keyframe] = field(default_factory=list)
     raw_arb_data: str = ""
     is_animated: bool = False
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         val = list(self.current_value) if isinstance(self.current_value, tuple) else self.current_value
         start = list(self.start_value) if isinstance(self.start_value, tuple) else self.start_value
-        data: Dict[str, Any] = {
+        data: dict[str, Any] = {
             "name": self.name,
             "match_name": self.match_name,
             "param_type": self.param_type,
@@ -105,12 +121,12 @@ class EffectComponent:
     display_name: str
     media_type: str = "video"  # "video" or "audio"
     bypass: bool = False
-    parameters: List[Parameter] = field(default_factory=list)
+    parameters: list[Parameter] = field(default_factory=list)
     object_id: str = ""
 
-    def param_map(self) -> Dict[str, Parameter]:
+    def param_map(self) -> dict[str, Parameter]:
         """Case-insensitive lookup map by parameter name and match_name."""
-        out: Dict[str, Parameter] = {}
+        out: dict[str, Parameter] = {}
         for p in self.parameters:
             if p.name:
                 out[p.name.strip().lower()] = p
@@ -118,7 +134,7 @@ class EffectComponent:
                 out[p.match_name.strip().lower()] = p
         return out
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "match_name": self.match_name,
             "display_name": self.display_name,
@@ -140,8 +156,8 @@ class MissingDependency:
     resolved: bool = False
     remediation: str = ""
 
-    def to_dict(self) -> Dict[str, Any]:
-        data: Dict[str, Any] = {
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
             "kind": self.kind,
             "name": self.name,
             "effect_match_name": self.effect_match_name,
@@ -160,12 +176,12 @@ class MltFilterSpec:
 
     service: str
     media_type: str = "video"  # "video" or "audio"
-    properties: Dict[str, str] = field(default_factory=dict)
+    properties: dict[str, str] = field(default_factory=dict)
     source_effect: str = ""
-    notes: List[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
 
-    def to_dict(self) -> Dict[str, Any]:
-        data: Dict[str, Any] = {
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
             "service": self.service,
             "media_type": self.media_type,
             "properties": dict(self.properties),
@@ -184,11 +200,11 @@ class ParsedPreset:
     name: str
     pack: str
     source_file: str
-    folder_path: List[str] = field(default_factory=list)
+    folder_path: list[str] = field(default_factory=list)
     attribution: str = ""
     description: str = ""
     preset_type: str = "scale"  # "scale", "anchor_in", "anchor_out", "unknown"
-    effects: List[EffectComponent] = field(default_factory=list)
+    effects: list[EffectComponent] = field(default_factory=list)
     original_xml: str = ""
     original_xml_preserved: bool = True
     fps: float = 25.0
@@ -200,18 +216,29 @@ class MappedEffectResult:
 
     component: EffectComponent
     status: CompatibilityStatus
-    mlt_filters: List[MltFilterSpec] = field(default_factory=list)
-    missing_dependencies: List[MissingDependency] = field(default_factory=list)
-    notes: List[str] = field(default_factory=list)
-    mapped_services: List[str] = field(default_factory=list)
+    mlt_filters: list[MltFilterSpec] = field(default_factory=list)
+    missing_dependencies: list[MissingDependency] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+    mapped_services: list[str] = field(default_factory=list)
 
-    def to_chain_entry(self) -> Dict[str, Any]:
+    def to_chain_entry(self) -> dict[str, Any]:
         entry = self.component.to_dict()
         entry["compatibility_status"] = self.status.value
         entry["mapped_mlt_services"] = list(self.mapped_services)
         if self.notes:
             entry["notes"] = list(self.notes)
         return entry
+
+
+def default_visual_equivalence_evidence(status: CompatibilityStatus) -> str:
+    """Return the honest default visual-equivalence evidence tag for ``status``."""
+    if status == CompatibilityStatus.EXACT_VALIDATED:
+        return VisualEquivalenceEvidence.MATHEMATICALLY_EQUIVALENT_MAPPING.value
+    if status == CompatibilityStatus.APPROXIMATED:
+        return VisualEquivalenceEvidence.APPROXIMATED_NATIVE_EQUIVALENT.value
+    if status == CompatibilityStatus.MISSING_DEPENDENCY:
+        return VisualEquivalenceEvidence.BLOCKED_MISSING_DEPENDENCY.value
+    return VisualEquivalenceEvidence.UNSUPPORTED_PROPRIETARY.value
 
 
 @dataclass
@@ -222,26 +249,32 @@ class MappedPreset:
     name: str
     pack: str
     attribution: str
-    folder_path: List[str]
+    folder_path: list[str]
     source_file: str
     preset_type: str
     compatibility_status: CompatibilityStatus
-    notes: List[str] = field(default_factory=list)
-    effect_chain: List[Dict[str, Any]] = field(default_factory=list)
-    missing_dependencies: List[MissingDependency] = field(default_factory=list)
-    mlt_filters: List[MltFilterSpec] = field(default_factory=list)
-    kdenlive_effect_xml: Optional[str] = None
+    notes: list[str] = field(default_factory=list)
+    effect_chain: list[dict[str, Any]] = field(default_factory=list)
+    missing_dependencies: list[MissingDependency] = field(default_factory=list)
+    mlt_filters: list[MltFilterSpec] = field(default_factory=list)
+    kdenlive_effect_xml: str | None = None
     original_xml_preserved: bool = True
     original_xml: str = ""
     description: str = ""
     category: str = ""
-    tags: List[str] = field(default_factory=list)
-    preview_before_path: Optional[str] = None
-    preview_after_path: Optional[str] = None
-    preview_split_path: Optional[str] = None
+    tags: list[str] = field(default_factory=list)
+    preview_before_path: str | None = None
+    preview_after_path: str | None = None
+    preview_split_path: str | None = None
+    visual_equivalence_evidence: str = ""
 
-    def to_dict(self) -> Dict[str, Any]:
-        data: Dict[str, Any] = {
+    def __post_init__(self) -> None:
+        if not self.visual_equivalence_evidence:
+            self.visual_equivalence_evidence = default_visual_equivalence_evidence(self.compatibility_status)
+
+    def to_dict(self) -> dict[str, Any]:
+        evidence = self.visual_equivalence_evidence or default_visual_equivalence_evidence(self.compatibility_status)
+        data: dict[str, Any] = {
             "preset_id": self.preset_id,
             "name": self.name,
             "pack": self.pack,
@@ -250,6 +283,7 @@ class MappedPreset:
             "source_file": self.source_file,
             "preset_type": self.preset_type,
             "compatibility_status": self.compatibility_status.value,
+            "visual_equivalence_evidence": evidence,
             "notes": list(self.notes),
             "effect_chain": list(self.effect_chain),
             "missing_dependencies": [d.to_dict() for d in self.missing_dependencies],
@@ -283,7 +317,7 @@ class SourceArchiveInfo:
     file_count: int
     redistribution_restricted: bool = True
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
             "sha256": self.sha256,
@@ -301,7 +335,7 @@ class MissingSourceInput:
     reason: str
     remediation: str
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "input_name": self.input_name,
             "expected_path": self.expected_path,
@@ -317,11 +351,11 @@ class CompatibilityReport:
     schema_version: str
     generated_at: str
     source_archive: SourceArchiveInfo
-    presets: List[MappedPreset]
-    audit_reconciliation: Optional[Dict[str, Any]] = None
-    missing_source_inputs: List[MissingSourceInput] = field(default_factory=list)
+    presets: list[MappedPreset]
+    audit_reconciliation: dict[str, Any] | None = None
+    missing_source_inputs: list[MissingSourceInput] = field(default_factory=list)
 
-    def summary(self) -> Dict[str, int]:
+    def summary(self) -> dict[str, int]:
         distinct_effects = set()
         counts = {
             CompatibilityStatus.EXACT_VALIDATED: 0,
@@ -344,8 +378,8 @@ class CompatibilityReport:
             "missing_dependency": counts[CompatibilityStatus.MISSING_DEPENDENCY],
         }
 
-    def to_dict(self) -> Dict[str, Any]:
-        data: Dict[str, Any] = {
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
             "schema_version": self.schema_version,
             "generated_at": self.generated_at,
             "source_archive": self.source_archive.to_dict(),

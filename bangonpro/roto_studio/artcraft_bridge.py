@@ -27,7 +27,11 @@ from __future__ import annotations
 import copy
 import importlib.util
 import json
+import logging
 import math
+import shutil
+import subprocess
+import tempfile
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -38,12 +42,90 @@ from PIL import Image, ImageDraw
 
 from bangonpro.ai_engine.commands import TimelineCommandBuilder
 
+logger = logging.getLogger(__name__)
+
 ARTCRAFT_ATTRIBUTION_NOTICE = (
     "Selectively incorporates 2D canvas, mask normalization, storyboard, and model-catalog "
     "patterns adapted from ArtCraft (https://github.com/storytold/artcraft), Copyright (c) 2026 "
     "ArtCraft Team and Contributors, licensed under MIT OR Apache-2.0. Excluded third-party "
     "media assets listed in ArtCraft's NOTICE are NOT included."
 )
+
+ARTCRAFT_EXCLUDED_THIRD_PARTY_ASSETS: tuple[str, ...] = (
+    "sound/",
+    "memes/",
+    "skybox/",
+    "pose/",
+    "characters_gif/",
+)
+
+ARTCRAFT_PROVENANCE_MANIFEST: dict[str, Any] = {
+    "upstream_reference": "https://github.com/storytold/artcraft",
+    "upstream_license": "MIT OR Apache-2.0",
+    "bangonpro_license": "GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL",
+    "excluded_third_party_assets_included": False,
+    "excluded_asset_directories": list(ARTCRAFT_EXCLUDED_THIRD_PARTY_ASSETS),
+    "artcraft_inspired_modules": [
+        {
+            "symbol": "normalize_matte_mask",
+            "inspired_by": "normalize_image_bytes_to_flux_mask.rs",
+            "upstream_license": "MIT OR Apache-2.0",
+            "implementation": "Independent Python/NumPy implementation adapted from ArtCraft mask-normalization contract",
+        },
+        {
+            "symbol": "point_in_polygon",
+            "inspired_by": "pointInPolygon.ts",
+            "upstream_license": "MIT OR Apache-2.0",
+            "implementation": "Independent Python ray-casting hit test adapted from ArtCraft 2D layer geometry",
+        },
+        {
+            "symbol": "pack_collage_rects",
+            "inspired_by": "packCollage.ts",
+            "upstream_license": "MIT OR Apache-2.0",
+            "implementation": "Independent Python grid auto-packing layout adapted from ArtCraft collage pattern",
+        },
+        {
+            "symbol": "Canvas2DComposer",
+            "inspired_by": "MoodboardStore.ts / MoodboardHistoryStore.ts",
+            "upstream_license": "MIT OR Apache-2.0",
+            "implementation": "Independent Python RGBA compositor with undo/redo, blend modes, rotation, per-layer masks, JSON persistence, and PNG/MP4 output",
+        },
+        {
+            "symbol": "StoryboardEngine",
+            "inspired_by": "StoryboardStore.ts",
+            "upstream_license": "MIT OR Apache-2.0",
+            "implementation": "Independent Python storyboard card workflow exporting local studio plates and Timeline Command API v1 animatics",
+        },
+        {
+            "symbol": "list_generative_models",
+            "inspired_by": "artcraft-native/src/models.rs",
+            "upstream_license": "MIT OR Apache-2.0",
+            "implementation": "Independent local-first & consent-gated provider registry",
+        },
+    ],
+    "independently_implemented_modules": [
+        {
+            "symbol": "bangonpro.roto_studio.mask_engine",
+            "license": "GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL",
+            "description": "SAM 2.1 / MobileSAM ONNX / OpenCV GrabCut segmentation, guided edge refinement, optical-flow tracking, LRU cache, clip timing alignment, and MLT matte/spline export",
+        },
+        {
+            "symbol": "inpaint_masked_region / inpaint_masked_region_detailed",
+            "license": "GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL",
+            "description": "Local deterministic OpenCV Telea / Navier-Stokes and NumPy harmonic-diffusion inpainting",
+        },
+        {
+            "symbol": "src/bangonpro/roto_ui/RotoMaskCanvasWidget & RotoStudioDock",
+            "license": "GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL",
+            "description": "Native Qt5/Qt6 interactive rotoscoping canvas, multi-mask manager, 2D compositor tab, and storyboard dock",
+        },
+    ],
+}
+
+
+def get_artcraft_provenance() -> dict[str, Any]:
+    """Return a deep copy of the license & ArtCraft-vs-native provenance manifest."""
+    return copy.deepcopy(ARTCRAFT_PROVENANCE_MANIFEST)
 
 
 class GenerativeConsentError(PermissionError):
@@ -62,6 +144,18 @@ class GenerativeModelSpec:
     requires_consent: bool
     license: str
     description: str
+    execution_mode: str = "local_deterministic"  # "local_deterministic" | "external_generative_api"
+
+
+@dataclass
+class InpaintResult:
+    """Detailed local inpainting result distinguishing OpenCV Telea/NS from harmonic fallback."""
+
+    image_rgb: np.ndarray
+    method_used: str  # "opencv_telea" | "opencv_ns" | "harmonic_diffusion_fallback" | "noop_empty_mask"
+    is_local_deterministic: bool = True
+    fallback_used: bool = False
+    warnings: list[str] = field(default_factory=list)
 
 
 def list_generative_models() -> list[GenerativeModelSpec]:
@@ -70,22 +164,24 @@ def list_generative_models() -> list[GenerativeModelSpec]:
         GenerativeModelSpec(
             model_id="local_plate_renderer",
             display_name="Bang On Pro Local 2D Plate & Storyboard Renderer",
-            family="Local Native",
+            family="Local Deterministic",
             media_kind="storyboard_plate",
             is_local=True,
             requires_consent=False,
             license="GPL-3.0-only",
             description="Instant local RGBA studio plates, gradients, lower-third cards, and annotated storyboard frames.",
+            execution_mode="local_deterministic",
         ),
         GenerativeModelSpec(
             model_id="local_opencv_inpaint",
-            display_name="Local Mask Inpainting (OpenCV Telea / Harmonic Diffusion)",
-            family="Local Native",
+            display_name="Local Mask Inpainting (OpenCV Telea / Navier-Stokes)",
+            family="Local Deterministic",
             media_kind="inpaint",
             is_local=True,
             requires_consent=False,
             license="Apache-2.0 / GPL-3.0-only",
-            description="Offline local object removal & clean-plate background fill inside a mask region.",
+            description="Offline deterministic object removal & clean-plate background fill inside a mask region.",
+            execution_mode="local_deterministic",
         ),
         GenerativeModelSpec(
             model_id="local_bg_cutout",
@@ -96,6 +192,7 @@ def list_generative_models() -> list[GenerativeModelSpec]:
             requires_consent=False,
             license="Apache-2.0 / GPL-3.0-only",
             description="Isolate foreground cutouts into transparent RGBA 2D layers using Bang On Pro Roto Engine.",
+            execution_mode="local_deterministic",
         ),
         GenerativeModelSpec(
             model_id="external_flux_image",
@@ -106,6 +203,7 @@ def list_generative_models() -> list[GenerativeModelSpec]:
             requires_consent=True,
             license="External API Terms",
             description="Optional external text-to-image plate generation; requires user API endpoint + explicit consent.",
+            execution_mode="external_generative_api",
         ),
     ]
 
@@ -164,8 +262,8 @@ def pack_collage_rects(
     count = len(item_sizes)
     if count == 0:
         return []
-    cols = max(1, int(math.ceil(math.sqrt(count))))
-    rows = max(1, int(math.ceil(count / float(cols))))
+    cols = max(1, math.ceil(math.sqrt(count)))
+    rows = max(1, math.ceil(count / float(cols)))
     cell_w = max(16, (canvas_width - padding * (cols + 1)) // cols)
     cell_h = max(16, (canvas_height - padding * (rows + 1)) // rows)
 
@@ -174,30 +272,52 @@ def pack_collage_rects(
         r = idx // cols
         c = idx % cols
         scale = min(cell_w / float(max(1, iw)), cell_h / float(max(1, ih)))
-        dw = max(8, int(round(iw * scale)))
-        dh = max(8, int(round(ih * scale)))
+        dw = max(8, round(iw * scale))
+        dh = max(8, round(ih * scale))
         cx = padding + c * (cell_w + padding) + (cell_w - dw) // 2
         cy = padding + r * (cell_h + padding) + (cell_h - dh) // 2
         placements.append((cx, cy, dw, dh))
     return placements
 
 
-def inpaint_masked_region(frame_rgb: np.ndarray, alpha_mask: np.ndarray, *, radius: int = 5) -> np.ndarray:
-    """Cleanly inpaint/fill a masked region locally (OpenCV Telea with NumPy fallback)."""
+def inpaint_masked_region_detailed(
+    frame_rgb: np.ndarray,
+    alpha_mask: np.ndarray,
+    *,
+    radius: int = 5,
+    method: str = "telea",
+) -> InpaintResult:
+    """Inpaint a masked region locally using OpenCV Telea/NS with honest method reporting."""
     src = np.asarray(frame_rgb, dtype=np.uint8)
     mask_u8 = (np.asarray(alpha_mask, dtype=np.float32) > 0.5).astype(np.uint8) * 255
     if not np.any(mask_u8):
-        return src.copy()
+        return InpaintResult(
+            image_rgb=src.copy(),
+            method_used="noop_empty_mask",
+            is_local_deterministic=True,
+            fallback_used=False,
+        )
 
-    if importlib.util.find_spec("cv2") is not None:
+    req_method = method.strip().lower()
+    if req_method not in ("telea", "ns", "harmonic"):
+        req_method = "telea"
+
+    if req_method in ("telea", "ns") and importlib.util.find_spec("cv2") is not None:
         try:
             import cv2
 
             bgr = cv2.cvtColor(src, cv2.COLOR_RGB2BGR)
-            inpainted = cv2.inpaint(bgr, mask_u8, max(1, int(radius)), cv2.INPAINT_TELEA)
-            return cv2.cvtColor(inpainted, cv2.COLOR_BGR2RGB)
-        except Exception:  # noqa: BLE001
-            pass
+            cv_flag = cv2.INPAINT_NS if req_method == "ns" else cv2.INPAINT_TELEA
+            inpainted = cv2.inpaint(bgr, mask_u8, max(1, int(radius)), cv_flag)
+            rgb = cv2.cvtColor(inpainted, cv2.COLOR_BGR2RGB)
+            return InpaintResult(
+                image_rgb=rgb,
+                method_used="opencv_ns" if req_method == "ns" else "opencv_telea",
+                is_local_deterministic=True,
+                fallback_used=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("OpenCV inpaint (%s) failed, using harmonic diffusion fallback: %s", req_method, exc)
 
     # Pure-NumPy iterative harmonic boundary diffusion fallback
     out = src.astype(np.float32).copy()
@@ -213,7 +333,28 @@ def inpaint_masked_region(frame_rgb: np.ndarray, alpha_mask: np.ndarray, *, radi
             + np.roll(out, -1, axis=1)
         ) * 0.25
         out[mask_bool] = avg[mask_bool]
-    return np.clip(out, 0.0, 255.0).astype(np.uint8)
+    return InpaintResult(
+        image_rgb=np.clip(out, 0.0, 255.0).astype(np.uint8),
+        method_used="harmonic_diffusion_fallback",
+        is_local_deterministic=True,
+        fallback_used=req_method != "harmonic",
+        warnings=(
+            ["OpenCV unavailable; used deterministic NumPy harmonic boundary diffusion fallback."]
+            if req_method != "harmonic"
+            else []
+        ),
+    )
+
+
+def inpaint_masked_region(
+    frame_rgb: np.ndarray,
+    alpha_mask: np.ndarray,
+    *,
+    radius: int = 5,
+    method: str = "telea",
+) -> np.ndarray:
+    """Cleanly inpaint/fill a masked region locally (OpenCV Telea/NS with NumPy fallback)."""
+    return inpaint_masked_region_detailed(frame_rgb, alpha_mask, radius=radius, method=method).image_rgb
 
 
 @dataclass
@@ -222,7 +363,7 @@ class ArtCraftLayer:
 
     layer_id: str
     name: str
-    kind: str = "solid"  # "image" | "cutout" | "solid" | "gradient" | "text"
+    kind: str = "solid"  # "image" | "cutout" | "solid" | "gradient" | "text" | "text_card"
     x: float = 0.0
     y: float = 0.0
     width: int = 320
@@ -235,6 +376,8 @@ class ArtCraftLayer:
     locked: bool = False
     z_index: int = 0
     image_path: str | None = None
+    alpha_mask_path: str | None = None
+    alpha_mask: np.ndarray | None = field(default=None, repr=False, compare=False)
     color_rgba: tuple[int, int, int, int] = (255, 90, 31, 255)
     secondary_color_rgba: tuple[int, int, int, int] = (18, 21, 27, 255)
     text: str = ""
@@ -242,12 +385,86 @@ class ArtCraftLayer:
     def bounding_polygon(self) -> list[tuple[float, float]]:
         w = float(self.width) * float(self.scale)
         h = float(self.height) * float(self.scale)
-        return [
+        corners = [
             (self.x, self.y),
             (self.x + w, self.y),
             (self.x + w, self.y + h),
             (self.x, self.y + h),
         ]
+        if abs(self.rotation_deg) < 1e-6:
+            return corners
+        cx = self.x + w * 0.5
+        cy = self.y + h * 0.5
+        rad = math.radians(float(self.rotation_deg))
+        cos_a = math.cos(rad)
+        sin_a = math.sin(rad)
+        rotated: list[tuple[float, float]] = []
+        for px, py in corners:
+            dx = px - cx
+            dy = py - cy
+            rotated.append((cx + dx * cos_a - dy * sin_a, cy + dx * sin_a + dy * cos_a))
+        return rotated
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "layer_id": str(self.layer_id),
+            "name": str(self.name),
+            "kind": str(self.kind),
+            "x": float(self.x),
+            "y": float(self.y),
+            "width": int(self.width),
+            "height": int(self.height),
+            "scale": float(self.scale),
+            "rotation_deg": float(self.rotation_deg),
+            "opacity": float(np.clip(self.opacity, 0.0, 1.0)),
+            "blend_mode": str(self.blend_mode),
+            "visible": bool(self.visible),
+            "locked": bool(self.locked),
+            "z_index": int(self.z_index),
+            "image_path": self.image_path,
+            "alpha_mask_path": self.alpha_mask_path,
+            "color_rgba": [int(c) for c in self.color_rgba[:4]],
+            "secondary_color_rgba": [int(c) for c in self.secondary_color_rgba[:4]],
+            "text": str(self.text),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ArtCraftLayer:
+        raw_c = data.get("color_rgba") or [255, 90, 31, 255]
+        raw_s = data.get("secondary_color_rgba") or [18, 21, 27, 255]
+        c_rgba = (
+            int(raw_c[0]),
+            int(raw_c[1]),
+            int(raw_c[2]),
+            int(raw_c[3]) if len(raw_c) >= 4 else 255,
+        )
+        s_rgba = (
+            int(raw_s[0]),
+            int(raw_s[1]),
+            int(raw_s[2]),
+            int(raw_s[3]) if len(raw_s) >= 4 else 255,
+        )
+        return cls(
+            layer_id=str(data.get("layer_id", f"layer_{uuid.uuid4().hex[:8]}")),
+            name=str(data.get("name", "Layer")),
+            kind=str(data.get("kind", "solid")),
+            x=float(data.get("x", 0.0)),
+            y=float(data.get("y", 0.0)),
+            width=max(1, int(data.get("width", 320))),
+            height=max(1, int(data.get("height", 180))),
+            scale=max(0.01, float(data.get("scale", 1.0))),
+            rotation_deg=float(data.get("rotation_deg", 0.0)),
+            opacity=float(np.clip(float(data.get("opacity", 1.0)), 0.0, 1.0)),
+            blend_mode=str(data.get("blend_mode", "normal")),
+            visible=bool(data.get("visible", True)),
+            locked=bool(data.get("locked", False)),
+            z_index=int(data.get("z_index", 0)),
+            image_path=data.get("image_path") or None,
+            alpha_mask_path=data.get("alpha_mask_path") or None,
+            color_rgba=c_rgba,
+            secondary_color_rgba=s_rgba,
+            text=str(data.get("text", "")),
+        )
 
 
 class Canvas2DComposer:
@@ -298,10 +515,10 @@ class Canvas2DComposer:
 
     def remove_layer(self, layer_id: str) -> bool:
         before = len(self.layers)
-        if not any(l.layer_id == layer_id for l in self.layers):
+        if not any(layer.layer_id == layer_id for layer in self.layers):
             return False
         self._snapshot()
-        self.layers = [l for l in self.layers if l.layer_id != layer_id]
+        self.layers = [layer for layer in self.layers if layer.layer_id != layer_id]
         self._sync_z()
         return len(self.layers) < before
 
@@ -327,7 +544,7 @@ class Canvas2DComposer:
             return
         self._snapshot()
         rects = pack_collage_rects(
-            [(l.width, l.height) for l in self.layers],
+            [(layer.width, layer.height) for layer in self.layers],
             self.width,
             self.height,
             padding=padding,
@@ -338,39 +555,82 @@ class Canvas2DComposer:
             layer.width = int(rw)
             layer.height = int(rh)
             layer.scale = 1.0
+            layer.rotation_deg = 0.0
 
-    def _render_layer_rgba(self, layer: ArtCraftLayer) -> np.ndarray:
-        dw = max(1, int(round(layer.width * layer.scale)))
-        dh = max(1, int(round(layer.height * layer.scale)))
+    def _apply_layer_alpha_mask(self, rgba: np.ndarray, layer: ArtCraftLayer) -> np.ndarray:
+        """Multiply layer alpha channel by per-layer ``alpha_mask`` or ``alpha_mask_path``."""
+        sh, sw = rgba.shape[:2]
+        mask_arr: np.ndarray | None = None
+        if layer.alpha_mask is not None:
+            raw = np.asarray(layer.alpha_mask, dtype=np.float32)
+            if raw.ndim == 3:
+                raw = raw[..., -1]
+            if float(np.max(raw)) > 1.0:
+                raw = raw / 255.0
+            mask_arr = np.clip(raw, 0.0, 1.0)
+        elif layer.alpha_mask_path and Path(layer.alpha_mask_path).is_file():
+            with Image.open(layer.alpha_mask_path) as m_img:
+                mask_arr = np.asarray(m_img.convert("L"), dtype=np.float32) / 255.0
+
+        if mask_arr is None:
+            return rgba
+
+        if mask_arr.shape != (sh, sw):
+            resample = getattr(Image, "Resampling", Image).BILINEAR
+            m_pil = Image.fromarray(np.clip(mask_arr * 255.0, 0.0, 255.0).astype(np.uint8), mode="L").resize(
+                (sw, sh), resample
+            )
+            mask_arr = np.asarray(m_pil, dtype=np.float32) / 255.0
+
+        out = rgba.copy()
+        out[..., 3] = np.clip(out[..., 3] * mask_arr, 0.0, 255.0)
+        return out
+
+    def _render_layer_rgba(self, layer: ArtCraftLayer) -> tuple[np.ndarray, int, int]:
+        dw = max(1, round(layer.width * layer.scale))
+        dh = max(1, round(layer.height * layer.scale))
+        resample = getattr(Image, "Resampling", Image).BILINEAR
 
         if layer.kind in ("image", "cutout") and layer.image_path and Path(layer.image_path).is_file():
-            img = Image.open(layer.image_path).convert("RGBA").resize((dw, dh), Image.BILINEAR)
-            return np.asarray(img, dtype=np.float32)
-
-        if layer.kind == "gradient":
+            with Image.open(layer.image_path) as src_img:
+                img = src_img.convert("RGBA").resize((dw, dh), resample)
+                rgba = np.asarray(img, dtype=np.float32)
+        elif layer.kind == "gradient":
             c0 = np.array(layer.color_rgba, dtype=np.float32)
             c1 = np.array(layer.secondary_color_rgba, dtype=np.float32)
             t = np.linspace(0.0, 1.0, dh, dtype=np.float32)[:, None, None]
             grad = c0 * (1.0 - t) + c1 * t
-            return np.broadcast_to(grad, (dh, dw, 4)).copy()
+            rgba = np.broadcast_to(grad, (dh, dw, 4)).copy()
+        else:
+            img = Image.new("RGBA", (dw, dh), tuple(int(c) for c in layer.color_rgba))
+            if layer.kind in ("text", "text_card") and layer.text:
+                draw = ImageDraw.Draw(img)
+                draw.rectangle([0, 0, dw - 1, dh - 1], outline=(255, 90, 31, 255), width=2)
+                draw.text((14, max(8, dh // 3)), layer.text, fill=(242, 241, 238, 255))
+            rgba = np.asarray(img, dtype=np.float32)
 
-        img = Image.new("RGBA", (dw, dh), tuple(int(c) for c in layer.color_rgba))
-        if layer.kind == "text" and layer.text:
-            draw = ImageDraw.Draw(img)
-            draw.rectangle([0, 0, dw - 1, dh - 1], outline=(255, 90, 31, 255), width=2)
-            draw.text((14, max(8, dh // 3)), layer.text, fill=(242, 241, 238, 255))
-        return np.asarray(img, dtype=np.float32)
+        rgba = self._apply_layer_alpha_mask(rgba, layer)
+
+        x0 = round(layer.x)
+        y0 = round(layer.y)
+        if abs(layer.rotation_deg) > 1e-3:
+            pil_layer = Image.fromarray(np.clip(rgba, 0.0, 255.0).astype(np.uint8), mode="RGBA")
+            rotated = pil_layer.rotate(-float(layer.rotation_deg), resample=resample, expand=True)
+            rw, rh = rotated.size
+            x0 = round(layer.x + (dw - rw) * 0.5)
+            y0 = round(layer.y + (dh - rh) * 0.5)
+            rgba = np.asarray(rotated, dtype=np.float32)
+
+        return rgba, x0, y0
 
     def render_rgba(self) -> np.ndarray:
-        """Flatten all visible 2D layers with blend modes and opacity to an HxWx4 uint8 RGBA plate."""
+        """Flatten all visible 2D layers with transforms, masks, blend modes & opacity to HxWx4 RGBA."""
         canvas = np.zeros((self.height, self.width, 4), dtype=np.float32)
-        for layer in sorted(self.layers, key=lambda l: l.z_index):
+        for layer in sorted(self.layers, key=lambda item: item.z_index):
             if not layer.visible or layer.opacity <= 0.0:
                 continue
-            src = self._render_layer_rgba(layer)
+            src, x0, y0 = self._render_layer_rgba(layer)
             sh, sw = src.shape[:2]
-            x0 = int(round(layer.x))
-            y0 = int(round(layer.y))
             x1 = min(self.width, x0 + sw)
             y1 = min(self.height, y0 + sh)
             sx0 = max(0, -x0)
@@ -414,12 +674,91 @@ class Canvas2DComposer:
         Image.fromarray(rgba, mode="RGBA").save(out)
         return out
 
+    def render_to_mp4(
+        self,
+        output_path: str | Path,
+        *,
+        duration_sec: float = 3.0,
+        fps: float = 25.0,
+    ) -> Path:
+        """Render the flattened 2D composition into a deterministic H.264 MP4 clip via FFmpeg."""
+        if not shutil.which("ffmpeg"):
+            raise RuntimeError("ffmpeg binary is required to render 2D composition to MP4.")
+        out = Path(output_path).resolve()
+        out.parent.mkdir(parents=True, exist_ok=True)
+        dur = max(0.2, float(duration_sec))
+        rate = max(1.0, float(fps))
+        with tempfile.TemporaryDirectory(prefix="bangonpro_2d_mp4_") as tmp:
+            png_path = Path(tmp) / "plate.png"
+            self.render_to_png(png_path)
+            # Ensure even dimensions for yuv420p H.264 compatibility
+            vf = "scale=trunc(iw/2)*2:trunc(ih/2)*2"
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-loop",
+                "1",
+                "-framerate",
+                f"{rate:.3f}",
+                "-i",
+                str(png_path),
+                "-t",
+                f"{dur:.3f}",
+                "-vf",
+                vf,
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-crf",
+                "18",
+                "-movflags",
+                "+faststart",
+                str(out),
+            ]
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60, check=False, shell=False)
+            if proc.returncode != 0 or not out.is_file():
+                raise RuntimeError(f"FFmpeg MP4 render failed: {proc.stderr.strip()}")
+        return out
+
     def to_dict(self) -> dict[str, Any]:
         return {
+            "schema_version": "1.0",
             "width": self.width,
             "height": self.height,
-            "layers": [asdict(l) for l in self.layers],
+            "layers": [layer.to_dict() for layer in self.layers],
         }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Canvas2DComposer:
+        comp = cls(width=int(data.get("width", 1920)), height=int(data.get("height", 1080)))
+        raw_layers = sorted(
+            data.get("layers", []),
+            key=lambda item: int(item.get("z_index", 0)) if isinstance(item, dict) else 0,
+        )
+        for lraw in raw_layers:
+            if isinstance(lraw, dict):
+                comp.layers.append(ArtCraftLayer.from_dict(lraw))
+        comp._sync_z()
+        return comp
+
+    def save_json(self, output_path: str | Path) -> Path:
+        """Persist 2D layer composition (transforms, blend modes, opacity, mask paths) to JSON."""
+        out = Path(output_path).resolve()
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(self.to_dict(), indent=2) + "\n", encoding="utf-8")
+        return out
+
+    @classmethod
+    def load_json(cls, input_path: str | Path) -> Canvas2DComposer:
+        """Restore a Canvas2DComposer from a saved JSON composition file."""
+        data = json.loads(Path(input_path).read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise TypeError("Canvas2D JSON root must be an object")
+        return cls.from_dict(data)
 
 
 @dataclass
@@ -496,13 +835,20 @@ class StoryboardEngine:
         height: int = 720,
         model_id: str = "local_plate_renderer",
         external_consent_granted: bool = False,
+        external_endpoint_url: str | None = None,
     ) -> Path:
-        """Render a shot visual plate locally (or enforce explicit consent for external models)."""
+        """Render a local deterministic shot plate or enforce strict consent for external models."""
         spec = next((m for m in list_generative_models() if m.model_id == model_id), None)
-        if spec is not None and not spec.is_local and not external_consent_granted:
-            raise GenerativeConsentError(
-                f"Model '{model_id}' requires external network transmission and explicit user consent."
-            )
+        if spec is not None and not spec.is_local:
+            if not external_consent_granted:
+                raise GenerativeConsentError(
+                    f"Model '{model_id}' requires external network transmission and explicit user consent."
+                )
+            if not (external_endpoint_url or "").strip():
+                raise ValueError(
+                    f"Model '{model_id}' requires a configured external endpoint URL; "
+                    "local deterministic plate rendering will not silently substitute for external AI generation."
+                )
 
         out = Path(output_path).resolve()
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -518,7 +864,11 @@ class StoryboardEngine:
         draw.rectangle([0, max(0, header_h - 3), width, header_h], fill=(255, 90, 31, 255))
         if width - margin_x > margin_x and box_bot > box_top:
             draw.rectangle([margin_x, box_top, width - margin_x, box_bot], outline=(58, 67, 86, 255), width=2)
-        draw.text((max(8, margin_x // 2), max(4, header_h // 3)), f"SHOT {shot.shot_number:02d} | {shot.title} ({shot.duration_sec:.1f}s)", fill=(232, 236, 242, 255))
+        draw.text(
+            (max(8, margin_x // 2), max(4, header_h // 3)),
+            f"SHOT {shot.shot_number:02d} | {shot.title} ({shot.duration_sec:.1f}s)",
+            fill=(232, 236, 242, 255),
+        )
         if shot.action:
             draw.text((margin_x + 10, box_top + 10), f"ACTION: {shot.action}", fill=(200, 208, 220, 255))
         if shot.prompt and box_top + 32 < box_bot:
@@ -526,7 +876,11 @@ class StoryboardEngine:
         if shot.dialogue:
             d_top = max(box_bot + 4, height - dialogue_h - 6)
             d_bot = max(d_top + 10, height - 6)
-            draw.rectangle([margin_x, d_top, max(margin_x + 10, width - margin_x), d_bot], fill=(11, 13, 17, 230), outline=(42, 48, 60, 255))
+            draw.rectangle(
+                [margin_x, d_top, max(margin_x + 10, width - margin_x), d_bot],
+                fill=(11, 13, 17, 230),
+                outline=(42, 48, 60, 255),
+            )
             draw.text((margin_x + 10, d_top + 6), f'"{shot.dialogue}"', fill=(255, 198, 132, 255))
         img.save(out)
         shot.image_path = str(out)
@@ -557,7 +911,7 @@ class StoryboardEngine:
             transaction_label=f"Import Storyboard Animatic ({len(self.shots)} shots)",
             requires_approval=False,
             dry_run=False,
-            fps_num=max(1, int(round(fps))),
+            fps_num=max(1, round(fps)),
             fps_den=1,
         )
 
@@ -575,7 +929,7 @@ class StoryboardEngine:
                 plate_path = Path(shot.image_path).resolve()
             generated_plates.append(str(plate_path))
 
-            dur_frames = max(1, int(round(shot.duration_sec * fps)))
+            dur_frames = max(1, round(shot.duration_sec * fps))
             media_ref = f"sb_media_{shot.shot_number:03d}"
             clip_id = f"sb_clip_{shot.shot_number:03d}"
 
@@ -630,6 +984,7 @@ class StoryboardEngine:
             "shot_count": len(self.shots),
             "total_frames": cursor_frame,
             "plates": generated_plates,
+            "plate_generation_mode": "local_deterministic",
             "command_batch": batch,
             "command_batch_path": str(batch_path),
         }
@@ -637,8 +992,14 @@ class StoryboardEngine:
     def to_dict(self) -> dict[str, Any]:
         return {"title": self.title, "shots": [asdict(s) for s in self.shots]}
 
+    def save_json(self, output_path: str | Path) -> Path:
+        out = Path(output_path).resolve()
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(self.to_dict(), indent=2) + "\n", encoding="utf-8")
+        return out
+
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "StoryboardEngine":
+    def from_dict(cls, data: dict[str, Any]) -> StoryboardEngine:
         eng = cls(title=str(data.get("title", "Bang On Pro Storyboard")))
         for raw in data.get("shots", []):
             eng.add_shot(
@@ -651,3 +1012,10 @@ class StoryboardEngine:
                 prompt=str(raw.get("prompt", "")),
             )
         return eng
+
+    @classmethod
+    def load_json(cls, input_path: str | Path) -> StoryboardEngine:
+        data = json.loads(Path(input_path).read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise TypeError("Storyboard JSON root must be an object")
+        return cls.from_dict(data)

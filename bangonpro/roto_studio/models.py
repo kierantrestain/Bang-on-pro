@@ -43,7 +43,7 @@ class BrushStroke:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "BrushStroke":
+    def from_dict(cls, data: dict[str, Any]) -> BrushStroke:
         pts = [(float(p[0]), float(p[1])) for p in data.get("points", []) if len(p) >= 2]
         return cls(
             points=pts,
@@ -94,7 +94,7 @@ class MaskShape:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "MaskShape":
+    def from_dict(cls, data: dict[str, Any]) -> MaskShape:
         raw_bbox = data.get("bbox")
         bbox = (
             (float(raw_bbox[0]), float(raw_bbox[1]), float(raw_bbox[2]), float(raw_bbox[3]))
@@ -162,7 +162,7 @@ class RotoSession:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "RotoSession":
+    def from_dict(cls, data: dict[str, Any]) -> RotoSession:
         bg = data.get("background_color") or [18, 21, 27]
         return cls(
             clip_path=str(data.get("clip_path", "")),

@@ -1,10 +1,12 @@
 """Transcription, Energy/Spectral-Centroid VAD & Multi-Mic Speaker Diarisation Agent.
 
-Features pluggable ASR backend detection (``whisperx`` / ``faster_whisper`` when
-installed and explicitly enabled) paired with a real, deterministic CPU engine
-using ``numpy``/``scipy`` short-time spectral analysis and per-camera microphone
-loudness diarisation so multi-camera studio shoots run accurately offline with
-zero multi-GB model downloads.
+Executes genuine local Whisper-family neural ASR (``faster-whisper`` or
+``openai-whisper``) when the backend package and local model weights are
+installed and selected. When neural ASR is unavailable or not enabled, falls
+back honestly to deterministic CPU DSP spectral-centroid VAD and multi-mic
+loudness diarisation — explicitly reporting ``is_neural_inference=False``,
+``fallback_used=True``, ``fallback_reason``, and
+``transcript_quality="vad_speech_segments_only"`` without fabricating spoken words.
 
 SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
 """
@@ -12,16 +14,24 @@ SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
 from __future__ import annotations
 
 import importlib.util
+import itertools
+from collections.abc import Callable
+from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 from scipy.ndimage import uniform_filter1d
 
-from bangonpro.ai_engine.agents.ingest_sync import extract_mono_pcm, iter_mono_pcm_chunks
+from bangonpro.ai_engine.agents.ingest_sync import (
+    extract_mono_pcm,
+    iter_mono_pcm_chunks,
+)
 from bangonpro.ai_engine.commands import TimelineCommandBuilder
+from bangonpro.ai_engine.model_manager import ModelManager
 from bangonpro.ai_engine.orchestrator import CancellationToken
 from bangonpro.ai_engine.state import (
+    AsrBackendReport,
     ProjectAnalysisState,
     StorySection,
     TimeInterval,
@@ -33,14 +43,29 @@ from bangonpro.ai_engine.transcript import (
     is_filler_or_silence_text,
     save_transcript,
 )
+from bangonpro.show_profiles.loader import get_effective_profile_settings
 
 
 def detect_available_asr_backends() -> dict[str, bool]:
-    """Feature-detect optional heavy ML ASR backends without importing them eagerly."""
+    """Feature-detect optional ML ASR packages without importing them eagerly."""
     return {
         "whisperx": importlib.util.find_spec("whisperx") is not None,
         "faster_whisper": importlib.util.find_spec("faster_whisper") is not None,
+        "openai_whisper": importlib.util.find_spec("whisper") is not None,
         "deterministic_multimic_vad": True,
+    }
+
+
+def inspect_asr_backend_status(model_dir: str | Path | None = None) -> dict[str, Any]:
+    """Return honest ASR package vs disk-weights status via ``ModelManager``."""
+    mgr = ModelManager(model_dir=model_dir)
+    asr_models = mgr.list_models(family="asr_whisper")
+    return {
+        "packages_installed": detect_available_asr_backends(),
+        "any_neural_package_installed": any(m.backend_package_installed for m in asr_models),
+        "any_model_available_on_disk": any(m.model_available_on_disk for m in asr_models),
+        "ready_models": [m.model_id for m in asr_models if m.status in ("ready", "loaded")],
+        "models": [m.to_dict() for m in asr_models],
     }
 
 
@@ -55,7 +80,7 @@ def _align_pcm_to_master(
     if pcm.size == 0 or total_samples <= 0:
         return out
 
-    src_start = int(round(offset_sec * sample_rate))
+    src_start = round(offset_sec * sample_rate)
     if src_start >= 0:
         if src_start < pcm.size:
             copy_len = min(total_samples, pcm.size - src_start)
@@ -75,8 +100,8 @@ def _compute_frame_spectral_features(
     hop_sec: float = 0.01,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Compute per-frame full RMS dB, speech-band (250-3500 Hz) RMS dB, speech ratio, and spectral centroid."""
-    frame_len = max(32, int(round(frame_sec * sample_rate)))
-    hop_len = max(16, int(round(hop_sec * sample_rate)))
+    frame_len = max(32, round(frame_sec * sample_rate))
+    hop_len = max(16, round(hop_sec * sample_rate))
 
     if pcm.size < frame_len:
         padded = np.pad(pcm, (0, frame_len - pcm.size))
@@ -127,12 +152,14 @@ def compute_frame_spectral_features_chunked(
     chunk_duration_sec: float = 30.0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Compute per-frame spectral features in O(1)-RAM bounded windows of ``chunk_duration_sec``."""
-    frame_len = max(32, int(round(frame_sec * sample_rate)))
-    hop_len = max(16, int(round(hop_sec * sample_rate)))
-    chunk_samples = max(frame_len * 2, int(round(max(0.5, chunk_duration_sec) * sample_rate)))
+    frame_len = max(32, round(frame_sec * sample_rate))
+    hop_len = max(16, round(hop_sec * sample_rate))
+    chunk_samples = max(frame_len * 2, round(max(0.5, chunk_duration_sec) * sample_rate))
 
     if pcm.size <= chunk_samples:
-        return _compute_frame_spectral_features(pcm, sample_rate, frame_sec=frame_sec, hop_sec=hop_sec)
+        return _compute_frame_spectral_features(
+            pcm, sample_rate, frame_sec=frame_sec, hop_sec=hop_sec
+        )
 
     total_frames = 1 + (max(pcm.size, frame_len) - frame_len) // hop_len
     full_out = np.empty(total_frames, dtype=np.float32)
@@ -148,7 +175,9 @@ def compute_frame_spectral_features_chunked(
         s_end = s_start + (batch_frames - 1) * hop_len + frame_len
         sub_pcm = pcm[s_start : min(pcm.size, s_end)]
         if sub_pcm.size < (batch_frames - 1) * hop_len + frame_len:
-            sub_pcm = np.pad(sub_pcm, (0, (batch_frames - 1) * hop_len + frame_len - sub_pcm.size))
+            sub_pcm = np.pad(
+                sub_pcm, (0, (batch_frames - 1) * hop_len + frame_len - sub_pcm.size)
+            )
         f_db, s_db, s_rat, c_hz = _compute_frame_spectral_features(
             sub_pcm, sample_rate, frame_sec=frame_sec, hop_sec=hop_sec
         )
@@ -173,8 +202,8 @@ def compute_frame_spectral_features_streaming(
     chunk_duration_sec: float = 30.0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Stream audio from ``media_path`` in bounded chunks to compute aligned spectral features in O(1) RAM."""
-    frame_len = max(32, int(round(frame_sec * sample_rate)))
-    hop_len = max(16, int(round(hop_sec * sample_rate)))
+    frame_len = max(32, round(frame_sec * sample_rate))
+    hop_len = max(16, round(hop_sec * sample_rate))
     eff_samples = max(total_samples, frame_len)
     n_frames_expected = 1 + (eff_samples - frame_len) // hop_len
 
@@ -183,7 +212,7 @@ def compute_frame_spectral_features_streaming(
     ratio_out = np.zeros(n_frames_expected, dtype=np.float32)
     cent_out = np.zeros(n_frames_expected, dtype=np.float32)
 
-    src_start = int(round(offset_sec * sample_rate))
+    src_start = round(offset_sec * sample_rate)
     if src_start >= 0:
         stream_start_sec = float(src_start) / float(sample_rate)
         carry = np.zeros(0, dtype=np.float32)
@@ -192,7 +221,9 @@ def compute_frame_spectral_features_streaming(
         stream_start_sec = 0.0
         lead_zeros = min(eff_samples, -src_start)
         carry = np.zeros(lead_zeros, dtype=np.float32)
-        needed_stream_sec = max(0.5, float(eff_samples - lead_zeros) / float(sample_rate) + 0.5)
+        needed_stream_sec = max(
+            0.5, float(eff_samples - lead_zeros) / float(sample_rate) + 0.5
+        )
 
     frame_cursor = 0
 
@@ -232,10 +263,7 @@ def compute_frame_spectral_features_streaming(
     ):
         if frame_cursor >= n_frames_expected:
             break
-        if carry.size == 0:
-            carry = chunk
-        else:
-            carry = np.concatenate((carry, chunk))
+        carry = chunk if carry.size == 0 else np.concatenate((carry, chunk))
         _drain_carry(final=False)
 
     _drain_carry(final=True)
@@ -312,67 +340,267 @@ def _majority_smooth_labels(labels: list[int], half_window: int = 15) -> list[in
     return smoothed.tolist()
 
 
-def _try_optional_whisper_text(
+def _try_neural_whisper_asr(
     audio_path: str,
     state: ProjectAnalysisState,
-) -> tuple[str | None, list[dict[str, Any]] | None]:
-    """Attempt optional faster-whisper / whisperx transcription ONLY when explicitly opted in."""
-    if not state.metadata.get("enable_whisper", False):
-        return None, None
+) -> tuple[AsrBackendReport, list[dict[str, Any]] | None]:
+    """Attempt genuine local ``faster-whisper`` / ``openai-whisper`` inference with honest fallback reporting.
 
+    NEVER labels DSP VAD or synthetic text as neural Whisper inference.
+    """
+    provider_cfg = state.metadata.get("provider_config") or {}
+    provider_id = str(provider_cfg.get("provider_id", "local_deterministic"))
+    requested_model_id = str(state.metadata.get("asr_model_id") or "").strip() or None
+    model_dir = state.metadata.get("model_dir")
+    mgr = ModelManager(model_dir=model_dir)
     backends = detect_available_asr_backends()
-    model_size = str(state.metadata.get("whisper_model", "tiny"))
+
+    whisper_requested = bool(
+        state.metadata.get("enable_whisper", False)
+        or requested_model_id is not None
+        or provider_id in ("local_faster_whisper", "local_openai_whisper")
+    )
+
+    if not whisper_requested:
+        any_pkg = bool(backends["faster_whisper"] or backends["openai_whisper"])
+        any_disk = any(m.model_available_on_disk for m in mgr.list_models(family="asr_whisper"))
+        return (
+            AsrBackendReport(
+                backend_id="deterministic_multimic_vad",
+                model_id=None,
+                is_neural_inference=False,
+                fallback_used=True,
+                fallback_reason=(
+                    "Neural Whisper ASR was not enabled for this run; "
+                    "using deterministic DSP spectral VAD speech segmentation only."
+                ),
+                transcript_quality="vad_speech_segments_only",
+                backend_package_installed=any_pkg,
+                model_available_on_disk=any_disk,
+                actual_inference_executed=False,
+            ),
+            None,
+        )
+
     device = str(state.metadata.get("whisper_device", "cpu"))
+    preferred_backend = (
+        "openai_whisper"
+        if (
+            provider_id == "local_openai_whisper"
+            or (requested_model_id and requested_model_id.startswith("openai-whisper"))
+        )
+        else "faster_whisper"
+    )
+    fallback_reasons: list[str] = []
 
-    if backends["faster_whisper"]:
-        try:
-            from faster_whisper import WhisperModel  # type: ignore[import-not-found]
+    # 1. Genuine faster-whisper path
+    if preferred_backend == "faster_whisper" or backends["faster_whisper"]:
+        fw_model_id = (
+            requested_model_id
+            if (requested_model_id and requested_model_id.startswith("faster-whisper"))
+            else f"faster-whisper-{state.metadata.get('whisper_model', 'tiny')}"
+        )
+        local_model_path: Path | None = None
+        if fw_model_id in {m.model_id for m in mgr.list_catalog(family="asr_whisper")}:
+            local_model_path = mgr.resolve_installed_model_path(fw_model_id)
 
-            model = WhisperModel(model_size, device=device, local_files_only=True)
-            segments, _ = model.transcribe(audio_path, vad_filter=True, word_timestamps=True)
-            rows = []
-            for seg in segments:
-                text = str(seg.text).strip()
-                if not text:
-                    continue
-                seg_words = []
-                for w in getattr(seg, "words", None) or []:
-                    w_txt = str(getattr(w, "word", "")).strip()
-                    if w_txt:
-                        seg_words.append(
-                            {
-                                "word": w_txt,
-                                "start_sec": float(getattr(w, "start", seg.start)),
-                                "end_sec": float(getattr(w, "end", seg.end)),
-                                "confidence": float(getattr(w, "probability", 0.9)),
-                            }
-                        )
-                rows.append(
-                    {
-                        "start": float(seg.start),
-                        "end": float(seg.end),
-                        "text": text,
-                        "confidence": float(
-                            np.clip(np.exp(getattr(seg, "avg_logprob", -0.3)), 0.1, 0.99)
-                        ),
-                        "words": seg_words,
-                    }
+        if not backends["faster_whisper"]:
+            fallback_reasons.append("faster_whisper Python package is not installed")
+        else:
+            model_arg = (
+                str(local_model_path.parent)
+                if (local_model_path is not None and local_model_path.is_file())
+                else str(state.metadata.get("whisper_model", "tiny"))
+            )
+            try:
+                from faster_whisper import WhisperModel  # type: ignore[import-not-found]
+
+                model = WhisperModel(model_arg, device=device, local_files_only=True)
+                segments_iter, _ = model.transcribe(
+                    audio_path,
+                    vad_filter=True,
+                    word_timestamps=True,
                 )
-            if rows:
-                return "faster_whisper", rows
-        except Exception:  # noqa: BLE001
-            return None, None
+                rows: list[dict[str, Any]] = []
+                for seg in segments_iter:
+                    text = str(getattr(seg, "text", "")).strip()
+                    if not text:
+                        continue
+                    seg_words: list[dict[str, Any]] = []
+                    for w in getattr(seg, "words", None) or []:
+                        w_txt = str(getattr(w, "word", "")).strip()
+                        if w_txt:
+                            seg_words.append(
+                                {
+                                    "word": w_txt,
+                                    "start_sec": float(getattr(w, "start", seg.start)),
+                                    "end_sec": float(getattr(w, "end", seg.end)),
+                                    "confidence": float(getattr(w, "probability", 0.9)),
+                                }
+                            )
+                    rows.append(
+                        {
+                            "start": float(seg.start),
+                            "end": float(seg.end),
+                            "text": text,
+                            "confidence": float(
+                                np.clip(
+                                    np.exp(getattr(seg, "avg_logprob", -0.3)), 0.1, 0.99
+                                )
+                            ),
+                            "words": seg_words,
+                        }
+                    )
+                if rows:
+                    if fw_model_id in {m.model_id for m in mgr.list_catalog(family="asr_whisper")}:
+                        mgr.mark_loaded(fw_model_id)
+                        mgr.mark_inference_executed(fw_model_id)
+                    return (
+                        AsrBackendReport(
+                            backend_id="faster_whisper",
+                            model_id=fw_model_id,
+                            is_neural_inference=True,
+                            fallback_used=False,
+                            fallback_reason=None,
+                            transcript_quality="neural_asr",
+                            backend_package_installed=True,
+                            model_available_on_disk=True,
+                            actual_inference_executed=True,
+                            segments_transcribed=len(rows),
+                        ),
+                        rows,
+                    )
+                fallback_reasons.append(
+                    f"faster_whisper ({fw_model_id}) executed but returned zero spoken segments"
+                )
+            except Exception as exc:  # noqa: BLE001
+                fallback_reasons.append(f"faster_whisper unavailable/failed: {exc}")
 
-    return None, None
+    # 2. Genuine openai-whisper (PyTorch) path
+    if preferred_backend == "openai_whisper" or backends["openai_whisper"]:
+        ow_model_id = (
+            requested_model_id
+            if (requested_model_id and requested_model_id.startswith("openai-whisper"))
+            else f"openai-whisper-{state.metadata.get('whisper_model', 'tiny')}"
+        )
+        local_pt: Path | None = None
+        if ow_model_id in {m.model_id for m in mgr.list_catalog(family="asr_whisper")}:
+            local_pt = mgr.resolve_installed_model_path(ow_model_id)
+
+        if not backends["openai_whisper"]:
+            fallback_reasons.append("openai-whisper ('whisper') Python package is not installed")
+        elif local_pt is None or not local_pt.is_file():
+            fallback_reasons.append(
+                f"openai-whisper weights for '{ow_model_id}' are not installed on disk in BANGONPRO_MODEL_DIR"
+            )
+        else:
+            try:
+                import whisper  # type: ignore[import-not-found]
+
+                model_ow = whisper.load_model(str(local_pt), device=device)
+                result = model_ow.transcribe(audio_path, word_timestamps=True)
+                ow_rows: list[dict[str, Any]] = []
+                for seg in result.get("segments", []):
+                    text = str(seg.get("text", "")).strip()
+                    if not text:
+                        continue
+                    seg_words_ow: list[dict[str, Any]] = []
+                    for w in seg.get("words") or []:
+                        w_txt = str(w.get("word", "")).strip()
+                        if w_txt:
+                            seg_words_ow.append(
+                                {
+                                    "word": w_txt,
+                                    "start_sec": float(w.get("start", seg.get("start", 0.0))),
+                                    "end_sec": float(w.get("end", seg.get("end", 0.0))),
+                                    "confidence": float(w.get("probability", 0.9)),
+                                }
+                            )
+                    ow_rows.append(
+                        {
+                            "start": float(seg.get("start", 0.0)),
+                            "end": float(seg.get("end", 0.0)),
+                            "text": text,
+                            "confidence": float(
+                                np.clip(
+                                    np.exp(float(seg.get("avg_logprob", -0.3))), 0.1, 0.99
+                                )
+                            ),
+                            "words": seg_words_ow,
+                        }
+                    )
+                if ow_rows:
+                    mgr.mark_loaded(ow_model_id)
+                    mgr.mark_inference_executed(ow_model_id)
+                    return (
+                        AsrBackendReport(
+                            backend_id="openai_whisper",
+                            model_id=ow_model_id,
+                            is_neural_inference=True,
+                            fallback_used=False,
+                            fallback_reason=None,
+                            transcript_quality="neural_asr",
+                            backend_package_installed=True,
+                            model_available_on_disk=True,
+                            actual_inference_executed=True,
+                            segments_transcribed=len(ow_rows),
+                        ),
+                        ow_rows,
+                    )
+                fallback_reasons.append(
+                    f"openai_whisper ({ow_model_id}) executed but returned zero spoken segments"
+                )
+            except Exception as exc:  # noqa: BLE001
+                fallback_reasons.append(f"openai_whisper unavailable/failed: {exc}")
+
+    pkg_installed = bool(backends["faster_whisper"] or backends["openai_whisper"])
+    disk_installed = any(
+        m.model_available_on_disk for m in mgr.list_models(family="asr_whisper")
+    )
+    reason_str = (
+        "; ".join(fallback_reasons)
+        if fallback_reasons
+        else "No neural Whisper ASR backend executed; falling back to DSP VAD speech segmentation."
+    )
+    return (
+        AsrBackendReport(
+            backend_id="deterministic_multimic_vad",
+            model_id=requested_model_id,
+            is_neural_inference=False,
+            fallback_used=True,
+            fallback_reason=reason_str,
+            transcript_quality="vad_speech_segments_only",
+            backend_package_installed=pkg_installed,
+            model_available_on_disk=disk_installed,
+            actual_inference_executed=False,
+        ),
+        None,
+    )
 
 
 def run_transcribe_diarise_agent(
     state: ProjectAnalysisState,
     token: CancellationToken,
     report_progress: Callable[[float, str], None],
-) -> dict[str, Any]:
-    """Run chunked/streaming VAD, multi-mic speaker diarisation, overlap/interruption detection, and transcript emit."""
+) -> dict[str, Any] | None:
+    """Run chunked/streaming VAD, optional genuine Whisper ASR, and multi-mic diarisation."""
     token.check("transcribe_diarise start")
+
+    # Respect strict editorial scoping: skip entirely if no stage needs VAD/transcription
+    needs_vad_or_asr = any(
+        (
+            state.intent.transcribe,
+            state.intent.add_captions,
+            state.intent.remove_silence,
+            state.intent.remove_setup_delay,
+            state.intent.build_rough_cut,
+            state.intent.multicam_switch,
+        )
+    )
+    if not needs_vad_or_asr:
+        report_progress(1.0, "Skipping transcription/VAD (not requested by instruction scope)")
+        return None
+
     if state.sync_result is None or not state.media_assets:
         raise RuntimeError("ingest_sync must complete before transcribe_diarise")
 
@@ -386,11 +614,11 @@ def run_transcribe_diarise_agent(
     common_duration = state.sync_result.common_duration_sec
     if common_duration <= 0.0:
         common_duration = min(a.duration_sec for a in state.media_assets.values())
-    total_samples = max(int(round(common_duration * sample_rate)), sample_rate // 2)
+    total_samples = max(round(common_duration * sample_rate), sample_rate // 2)
 
     report_progress(0.1, "Extracting aligned per-camera spectral features (chunked/streaming)")
 
-    # 1. Compute aligned spectral features per camera in O(1) bounded chunk memory
+    # 1. Compute aligned spectral features per asset in O(1) bounded chunk memory
     features_by_cam: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
     used_streaming_vad = False
 
@@ -434,18 +662,23 @@ def run_transcribe_diarise_agent(
     state.metadata["vad_chunk_duration_sec"] = chunk_duration_sec
     state.metadata["streaming_vad_used"] = used_streaming_vad
 
-    # Identify candidate speaker cameras (prefer speaker-labeled non-wide mics; fallback to all)
+    # Identify candidate speaker cameras (prefer speaker-labeled non-wide/non-recorder cams)
     speaker_cams = [
         cid
         for cid, asset in state.media_assets.items()
-        if asset.speaker_label and asset.camera_role not in ("wide", "broll", "reaction")
+        if asset.speaker_label
+        and asset.camera_role not in ("wide", "broll", "reaction", "audio_recorder")
     ]
     if not speaker_cams:
         speaker_cams = [
-            cid for cid, asset in state.media_assets.items() if asset.speaker_label
+            cid
+            for cid, asset in state.media_assets.items()
+            if asset.speaker_label and asset.camera_role != "audio_recorder"
         ]
     if not speaker_cams:
-        speaker_cams = list(state.media_assets.keys())
+        speaker_cams = [
+            cid for cid, asset in state.media_assets.items() if asset.has_video
+        ] or list(state.media_assets.keys())
 
     # Include reaction camera ONLY if it has a distinct speaker_label not already covered
     covered_speakers = {state.media_assets[cid].speaker_label for cid in speaker_cams}
@@ -453,16 +686,19 @@ def run_transcribe_diarise_agent(
         if (
             cid not in speaker_cams
             and asset.speaker_label
+            and asset.camera_role != "audio_recorder"
             and asset.speaker_label not in covered_speakers
         ):
             speaker_cams.append(cid)
             covered_speakers.add(asset.speaker_label)
 
-    # 2. Compute frame-wise VAD across all cameras
+    # 2. Compute frame-wise VAD across all audio-bearing assets
     report_progress(0.35, "Running energy & spectral-centroid VAD")
     min_len = min(features_by_cam[cid][1].size for cid in state.media_assets)
     all_speech_db = np.vstack([features_by_cam[cid][1][:min_len] for cid in state.media_assets])
-    all_speech_ratio = np.vstack([features_by_cam[cid][2][:min_len] for cid in state.media_assets])
+    all_speech_ratio = np.vstack(
+        [features_by_cam[cid][2][:min_len] for cid in state.media_assets]
+    )
     all_centroid = np.vstack([features_by_cam[cid][3][:min_len] for cid in state.media_assets])
 
     max_speech_db = np.max(all_speech_db, axis=0)
@@ -473,14 +709,25 @@ def run_transcribe_diarise_agent(
     best_centroid = all_centroid[best_overall_idx, frame_idx_arr]
 
     editing_rules = state.profile["editing_rules"]
-    profile_thresh_db = float(editing_rules["silence_threshold_db"])
-    min_silence_sec = float(editing_rules["min_silence_sec"])
+    effective = get_effective_profile_settings(state.profile)
+    profile_thresh_db = float(
+        state.intent.silence_threshold_db
+        if state.intent.silence_threshold_db is not None
+        else effective["silence_threshold_db"]
+    )
+    min_silence_sec = float(
+        state.intent.min_pause_sec
+        if state.intent.min_pause_sec is not None
+        else editing_rules["min_silence_sec"]
+    )
     interruption_gap_sec = float(editing_rules.get("interruption_gap_sec", 10.0))
     review_thresh = float(editing_rules.get("review_confidence_threshold", 0.72))
 
     peak_db = float(np.percentile(max_speech_db, 95)) if n_frames else -20.0
     floor_db = float(np.percentile(max_speech_db, 15)) if n_frames else -80.0
-    if peak_db - floor_db >= 14.0:
+    if state.intent.silence_threshold_db is not None:
+        speech_thresh_db = profile_thresh_db
+    elif peak_db - floor_db >= 14.0:
         adaptive_thresh = floor_db + 0.30 * (peak_db - floor_db)
         speech_thresh_db = max(profile_thresh_db, min(adaptive_thresh, peak_db - 10.0))
     else:
@@ -488,9 +735,8 @@ def run_transcribe_diarise_agent(
 
     raw_vad = (max_speech_db >= speech_thresh_db) & (best_speech_ratio >= 0.22)
 
-    min_gap_frames = max(3, int(round(min(0.28, min_silence_sec * 0.45) / hop_sec)))
-    # Require >= 0.28s sustained speech so brief slate clicks in setup/interruption gaps are ignored
-    min_speech_frames = max(10, int(round(0.28 / hop_sec)))
+    min_gap_frames = max(3, round(min(0.28, min_silence_sec * 0.45) / hop_sec))
+    min_speech_frames = max(10, round(0.28 / hop_sec))
     vad_mask = _morphological_clean_mask(
         raw_vad,
         min_gap_frames=min_gap_frames,
@@ -520,7 +766,7 @@ def run_transcribe_diarise_agent(
             )
         )
 
-    for prev_run, next_run in zip(speech_runs, speech_runs[1:]):
+    for prev_run, next_run in itertools.pairwise(speech_runs):
         gap_start = prev_run[1] * hop_sec
         gap_end = next_run[0] * hop_sec
         gap_dur = gap_end - gap_start
@@ -559,19 +805,26 @@ def run_transcribe_diarise_agent(
     if detected_interruptions:
         state.interruption_intervals = detected_interruptions
 
-    # 4. Multi-mic speaker diarisation & simultaneous overlapping-speech detection
-    report_progress(0.60, "Performing multi-camera speaker diarisation & overlap detection")
+    # 4. Multi-mic speaker diarisation & genuine neural Whisper ASR (when enabled & available)
+    report_progress(0.60, "Performing multi-camera speaker diarisation & ASR check")
     spk_db_matrix = np.vstack([features_by_cam[cid][1][:min_len] for cid in speaker_cams])
     num_spk_cams = len(speaker_cams)
 
-    # Optional Whisper override text (only when explicitly enabled & locally available)
-    ref_asset = state.media_assets[state.sync_result.reference_camera_id]
-    asr_backend, whisper_rows = _try_optional_whisper_text(ref_asset.file_path, state)
-    active_backend = asr_backend or "deterministic_multimic_vad"
+    # Prefer independent audio recorder as ASR audio source if available, else sync reference asset
+    recorder_ids = state.metadata.get("independent_audio_recorders") or []
+    asr_source_cam_id = (
+        recorder_ids[0]
+        if recorder_ids and recorder_ids[0] in state.media_assets
+        else state.sync_result.reference_camera_id
+    )
+    asr_source_asset = state.media_assets[asr_source_cam_id]
+    asr_report, whisper_rows = _try_neural_whisper_asr(asr_source_asset.file_path, state)
+    active_backend = asr_report.backend_id
     state.transcript_backend = active_backend
+    state.asr_backend_report = asr_report
 
     segments: list[TranscriptSegment] = []
-    min_turn_frames = max(12, int(round(0.40 / hop_sec)))
+    min_turn_frames = max(12, round(0.40 / hop_sec))
     overlap_margin_db = 4.0
 
     for run_start, run_end in speech_runs:
@@ -594,38 +847,41 @@ def run_transcribe_diarise_agent(
             overlap_raw = (smooth_margins < overlap_margin_db) & (active_cam_count >= 2)
             crosstalk_run_mask = _morphological_clean_mask(
                 overlap_raw,
-                min_gap_frames=max(5, int(round(0.20 / hop_sec))),
-                min_run_frames=max(20, int(round(0.45 / hop_sec))),
+                min_gap_frames=max(5, round(0.20 / hop_sec)),
+                min_run_frames=max(20, round(0.45 / hop_sec)),
             )
 
-            # Group contiguous (speaker_idx, is_overlap) runs; during overlap keep a single block
-            # rather than rapidly ping-ponging speaker winners back and forth!
             raw_groups: list[list[int]] = []
             for local_i, spk_idx in enumerate(smoothed_winners):
                 is_xtalk = 1 if crosstalk_run_mask[local_i] else 0
                 if not raw_groups:
-                    raw_groups.append([run_start + local_i, run_start + local_i + 1, spk_idx, is_xtalk])
-                elif is_xtalk == 1 and raw_groups[-1][3] == 1:
-                    # Coalesce contiguous overlap frames into one unified overlap segment
-                    raw_groups[-1][1] = run_start + local_i + 1
-                elif raw_groups[-1][2] == spk_idx and raw_groups[-1][3] == is_xtalk:
-                    raw_groups[-1][1] = run_start + local_i + 1
-                else:
-                    raw_groups.append([run_start + local_i, run_start + local_i + 1, spk_idx, is_xtalk])
-
-            # Merge tiny speaker blips (< min_turn_frames) into neighboring turn
-            merged_groups: list[list[int]] = []
-            for grp in raw_groups:
-                if merged_groups and (grp[1] - grp[0]) < min_turn_frames:
-                    merged_groups[-1][1] = grp[1]
-                elif merged_groups and (
-                    (merged_groups[-1][3] == 1 and grp[3] == 1)
-                    or (merged_groups[-1][2] == grp[2] and merged_groups[-1][3] == grp[3])
+                    raw_groups.append(
+                        [run_start + local_i, run_start + local_i + 1, spk_idx, is_xtalk]
+                    )
+                elif (is_xtalk == 1 and raw_groups[-1][3] == 1) or (
+                    raw_groups[-1][2] == spk_idx and raw_groups[-1][3] == is_xtalk
                 ):
-                    merged_groups[-1][1] = grp[1]
+                    raw_groups[-1][1] = run_start + local_i + 1
                 else:
-                    merged_groups.append(grp)
-            if len(merged_groups) >= 2 and (merged_groups[0][1] - merged_groups[0][0]) < min_turn_frames:
+                    raw_groups.append(
+                        [run_start + local_i, run_start + local_i + 1, spk_idx, is_xtalk]
+                    )
+
+            merged_groups: list[list[int]] = []
+            for raw_grp in raw_groups:
+                if merged_groups and (raw_grp[1] - raw_grp[0]) < min_turn_frames:
+                    merged_groups[-1][1] = raw_grp[1]
+                elif merged_groups and (
+                    (merged_groups[-1][3] == 1 and raw_grp[3] == 1)
+                    or (merged_groups[-1][2] == raw_grp[2] and merged_groups[-1][3] == raw_grp[3])
+                ):
+                    merged_groups[-1][1] = raw_grp[1]
+                else:
+                    merged_groups.append(raw_grp)
+            if (
+                len(merged_groups) >= 2
+                and (merged_groups[0][1] - merged_groups[0][0]) < min_turn_frames
+            ):
                 merged_groups[1][0] = merged_groups[0][0]
                 merged_groups.pop(0)
 
@@ -675,12 +931,13 @@ def run_transcribe_diarise_agent(
                 active_names: list[str] = []
                 for c_idx in np.argsort(per_cam_means)[::-1]:
                     c_mean = float(per_cam_means[int(c_idx)])
-                    if (winner_db - c_mean) <= (overlap_margin_db + 1.0) and c_mean >= (speech_thresh_db - 4.0):
+                    if (winner_db - c_mean) <= (overlap_margin_db + 1.0) and c_mean >= (
+                        speech_thresh_db - 4.0
+                    ):
                         cid_i = speaker_cams[int(c_idx)]
                         lbl = state.media_assets[cid_i].speaker_label or cid_i
                         if lbl not in active_names:
                             active_names.append(lbl)
-                # Ensure at least the top-2 speakers are listed whenever overlap is detected
                 if len(active_names) < 2:
                     for c_idx in np.argsort(per_cam_means)[::-1][:2]:
                         cid_i = speaker_cams[int(c_idx)]
@@ -690,45 +947,62 @@ def run_transcribe_diarise_agent(
                 overlap_speakers = active_names
 
             snr_above_thresh = winner_db - speech_thresh_db
-
-            # Confidence model: high when speech is clearly above threshold AND single mic dominates.
-            # Overlapping crosstalk drops cleanly below review threshold for editorial attention.
             energy_conf = float(np.clip((snr_above_thresh + 2.0) / 14.0, 0.25, 1.0))
             if is_overlap or (num_spk_cams > 1 and margin_db < 3.5):
                 diar_conf = float(np.clip(0.30 + 0.08 * margin_db, 0.28, 0.58))
-                confidence = round(float(np.clip(0.35 * energy_conf + 0.65 * diar_conf, 0.25, 0.68)), 4)
+                confidence = round(
+                    float(np.clip(0.35 * energy_conf + 0.65 * diar_conf, 0.25, 0.68)), 4
+                )
             else:
                 diar_conf = float(np.clip(0.55 + 0.45 * (margin_db / 6.0), 0.45, 0.99))
-                confidence = round(float(np.clip(0.5 * energy_conf + 0.5 * diar_conf, 0.20, 0.98)), 4)
+                confidence = round(
+                    float(np.clip(0.5 * energy_conf + 0.5 * diar_conf, 0.20, 0.98)), 4
+                )
 
-            # Match optional Whisper text & word timestamps if available
+            # Match genuine neural Whisper text & word timestamps when executed
             text = ""
             explicit_words: list[dict[str, Any]] | None = None
-            if whisper_rows:
+            seg_is_neural = False
+            seg_quality = "vad_speech_segments_only"
+
+            if whisper_rows and asr_report.is_neural_inference:
                 overlapping_rows = [
                     r for r in whisper_rows if r["end"] > start_sec and r["start"] < end_sec
                 ]
                 text = " ".join(r["text"] for r in overlapping_rows).strip()
-                gathered_words = [w for r in overlapping_rows for w in (r.get("words") or [])]
+                gathered_words = [
+                    w for r in overlapping_rows for w in (r.get("words") or [])
+                ]
                 if gathered_words:
                     explicit_words = gathered_words
+                if text:
+                    seg_is_neural = True
+                    seg_quality = "neural_asr"
 
             if not text:
+                # Honest VAD-only speech segment marker — NEVER fabricated spoken words!
                 dur = end_sec - start_sec
                 if is_overlap and len(overlap_speakers) >= 2:
                     joined = " & ".join(overlap_speakers)
-                    text = f"{joined}: overlapping dialogue ({dur:.1f}s)"
+                    text = (
+                        f"[VAD speech segment: {joined} overlap, {dur:.1f}s "
+                        "— install Whisper ASR for spoken transcript]"
+                    )
                 else:
-                    text = f"{speaker_id}: studio dialogue ({dur:.1f}s)"
-
-            words = build_words_for_segment(
-                text,
-                start_sec,
-                end_sec,
-                state.fps,
-                confidence=confidence,
-                explicit_words=explicit_words,
-            )
+                    text = (
+                        f"[VAD speech segment: {speaker_id}, {dur:.1f}s "
+                        "— install Whisper ASR for spoken transcript]"
+                    )
+                words: list[dict[str, Any]] = []
+            else:
+                words = build_words_for_segment(
+                    text,
+                    start_sec,
+                    end_sec,
+                    state.fps,
+                    confidence=confidence,
+                    explicit_words=explicit_words,
+                )
 
             seg_id = f"seg_{len(segments) + 1:04d}"
             segments.append(
@@ -744,10 +1018,14 @@ def run_transcribe_diarise_agent(
                     is_low_confidence=confidence < review_thresh,
                     energy_db=round(winner_db, 2),
                     spectral_centroid_hz=round(centroid_hz, 1),
-                    backend=active_backend,
+                    backend=active_backend if seg_is_neural else "deterministic_multimic_vad",
+                    is_neural_inference=seg_is_neural,
+                    transcript_quality=seg_quality,
                     is_overlap=is_overlap,
                     overlap_speakers=overlap_speakers,
-                    is_filler_or_silence=is_filler_or_silence_text(text),
+                    is_filler_or_silence=is_filler_or_silence_text(text)
+                    if seg_is_neural
+                    else False,
                     deleted=False,
                     words=words,
                 )
@@ -759,31 +1037,31 @@ def run_transcribe_diarise_agent(
     if segments:
         section_gap_sec = max(1.2, min_silence_sec * 1.4)
         cur_group: list[TranscriptSegment] = [segments[0]]
-        groups: list[list[TranscriptSegment]] = []
+        section_groups: list[list[TranscriptSegment]] = []
         for seg in segments[1:]:
             if (seg.start_sec - cur_group[-1].end_sec) >= section_gap_sec:
-                groups.append(cur_group)
+                section_groups.append(cur_group)
                 cur_group = [seg]
             else:
                 cur_group.append(seg)
-        groups.append(cur_group)
+        section_groups.append(cur_group)
 
-        for s_idx, grp in enumerate(groups, start=1):
+        for s_idx, sec_grp in enumerate(section_groups, start=1):
             label = "Opening" if s_idx == 1 else f"Section {s_idx}"
             dur_by_spk: dict[str, float] = {}
-            for seg in grp:
+            for seg in sec_grp:
                 seg.section_label = label
                 dur_by_spk[seg.speaker_id] = dur_by_spk.get(seg.speaker_id, 0.0) + (
                     seg.end_sec - seg.start_sec
                 )
-            dom_spk = max(dur_by_spk, key=dur_by_spk.get)
-            mean_c = float(np.mean([g.confidence for g in grp]))
+            dom_spk = max(dur_by_spk, key=lambda spk_key: dur_by_spk[spk_key])
+            mean_c = float(np.mean([g.confidence for g in sec_grp]))
             story_sections.append(
                 StorySection(
                     section_id=f"sec_{s_idx:02d}",
                     label=label,
-                    start_sec=grp[0].start_sec,
-                    end_sec=grp[-1].end_sec,
+                    start_sec=sec_grp[0].start_sec,
+                    end_sec=sec_grp[-1].end_sec,
                     dominant_speaker=dom_spk,
                     confidence=round(mean_c, 4),
                 )
@@ -792,10 +1070,10 @@ def run_transcribe_diarise_agent(
     state.transcript_segments = segments
     state.story_sections = story_sections
     state.metadata["asr_backends_available"] = detect_available_asr_backends()
+    state.metadata["asr_backend_report"] = asdict(asr_report)
     state.metadata["vad_threshold_db"] = round(speech_thresh_db, 2)
     state.metadata["overlap_segment_count"] = sum(1 for s in segments if s.is_overlap)
 
-    # Emit initial structured transcript.json artifact (later refined with edited timeline coords in audio_graphics_qc)
     out_dir = Path(state.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     transcript_doc = build_transcript_document(state, use_edited_timeline=False)
@@ -872,6 +1150,9 @@ def run_transcribe_diarise_agent(
                 "frame": sec_f,
                 "label": f"{sec.label} ({sec.dominant_speaker})",
                 "section_id": sec.section_id,
+                "backend_id": asr_report.backend_id,
+                "is_neural_inference": asr_report.is_neural_inference,
+                "transcript_quality": asr_report.transcript_quality,
             },
             confidence=sec.confidence,
             rationale=f"Story section '{sec.label}' identified from dialogue pacing",
@@ -922,11 +1203,17 @@ def run_transcribe_diarise_agent(
                 "category_index": 2,
                 "frame": 0,
                 "label": "Programme Start",
-                "backend": active_backend,
+                "backend_id": asr_report.backend_id,
+                "is_neural_inference": asr_report.is_neural_inference,
+                "transcript_quality": asr_report.transcript_quality,
             },
             confidence=0.9,
             rationale="Default programme start marker from transcription stage",
         )
 
-    report_progress(0.98, f"Diarised {len(segments)} segments across {len(story_sections)} sections")
+    report_progress(
+        0.98,
+        f"Diarised {len(segments)} segments across {len(story_sections)} sections "
+        f"(backend={asr_report.backend_id}, neural={asr_report.is_neural_inference})",
+    )
     return builder.build()

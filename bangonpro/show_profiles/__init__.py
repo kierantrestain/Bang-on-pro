@@ -6,6 +6,7 @@ SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
 from bangonpro.show_profiles.loader import (
     ShowProfileValidationError,
     create_custom_profile,
+    get_effective_profile_settings,
     get_profile_fps,
     get_profiles_dir,
     get_show_profile_schema_path,
@@ -19,6 +20,7 @@ from bangonpro.show_profiles.loader import (
 __all__ = [
     "ShowProfileValidationError",
     "create_custom_profile",
+    "get_effective_profile_settings",
     "get_profile_fps",
     "get_profiles_dir",
     "get_show_profile_schema_path",
