@@ -687,9 +687,9 @@ def _benchmark_ai_vad_transcription(audio_duration_sec: float = 10.0) -> StageBe
 
     asr_backends = detect_available_asr_backends()
     t0 = time.perf_counter()
-    energy_db, _zcr, _centroid = _compute_frame_spectral_features(pcm, sample_rate=sr)
+    energy_db, _speech_db, _speech_ratio, _centroid = _compute_frame_spectral_features(pcm, sample_rate=sr)
     raw_mask = energy_db > -35.0
-    cleaned = _morphological_clean_mask(raw_mask, min_on=5, min_off=5)
+    cleaned = _morphological_clean_mask(raw_mask, min_gap_frames=5, min_run_frames=5)
     runs = _extract_true_runs(cleaned)
     elapsed = max(1e-6, time.perf_counter() - t0)
 

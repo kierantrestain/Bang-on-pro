@@ -73,6 +73,12 @@ private:
     TimelineOperationResult handleSetKeyframe(const std::shared_ptr<TimelineItemModel> &timeline, const TimelineOperation &op);
     TimelineOperationResult handleSetAudioLevel(const std::shared_ptr<TimelineItemModel> &timeline, const TimelineOperation &op);
     TimelineOperationResult handleAddCaption(const std::shared_ptr<TimelineItemModel> &timeline, const TimelineOperation &op);
+    TimelineOperationResult handleUpdateCaption(const std::shared_ptr<TimelineItemModel> &timeline, const TimelineOperation &op);
+    TimelineOperationResult handleDeleteCaption(const std::shared_ptr<TimelineItemModel> &timeline, const TimelineOperation &op);
+    TimelineOperationResult handleAddLowerThird(const std::shared_ptr<TimelineItemModel> &timeline, const TimelineOperation &op);
+    TimelineOperationResult handleApplyMask(const std::shared_ptr<TimelineItemModel> &timeline, const TimelineOperation &op);
+    TimelineOperationResult handleAddTransition(const std::shared_ptr<TimelineItemModel> &timeline, const TimelineOperation &op);
+    TimelineOperationResult handleSetClipSpeed(const std::shared_ptr<TimelineItemModel> &timeline, const TimelineOperation &op);
     TimelineOperationResult handleAddMarker(const std::shared_ptr<TimelineItemModel> &timeline, const TimelineOperation &op);
     TimelineOperationResult handleExportSequence(const TimelineOperation &op, const QString &sequenceId);
 

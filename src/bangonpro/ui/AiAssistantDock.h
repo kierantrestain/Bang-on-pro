@@ -128,12 +128,31 @@ public:
     /** @brief Accessor for the proposed-changes diff tree (for inspection/testing). */
     QTreeWidget *diffTreeWidget() const;
 
+    /** @brief Return operation IDs currently checked for acceptance in the diff tree. */
+    QStringList selectedOperationIds() const;
+
+    /** @brief Check or uncheck all top-level proposed operations. */
+    void setAllOperationsChecked(bool checked);
+
+    /** @brief Uncheck all operations flagged below the review confidence threshold. */
+    void uncheckLowConfidenceOperations();
+
+    /** @brief True when the user prefers sourcing media directly from the open Project Bin. */
+    bool useProjectBinMedia() const;
+    void setUseProjectBinMedia(bool useBin);
+
+    /** @brief Update the compact storage/cache summary label inside the dock. */
+    void setStorageSummaryText(const QString &summary);
+
 Q_SIGNALS:
     /** @brief Emitted when the user requests a new AI edit proposal. */
     void proposalRequested(const QString &instruction, const QString &profileId, const QString &customProfilePath);
 
-    /** @brief Emitted when the user clicks Accept & Apply on the pending batch. */
+    /** @brief Emitted when the user clicks Accept & Apply on the pending batch (filtered to checked ops). */
     void batchApproveRequested(const BangOnPro::TimelineCommandBatch &batch);
+
+    /** @brief Emitted when the user toggles individual operation checkboxes in the diff tree. */
+    void selectedOperationIdsChanged(const QStringList &opIds);
 
     /** @brief Emitted when the user clicks Reject on the pending batch. */
     void batchRejectRequested(const QString &requestId);
@@ -153,6 +172,15 @@ Q_SIGNALS:
     /** @brief Emitted when the active Show Profile changes. */
     void showProfileChanged(const QString &profileId, const QString &customProfilePath);
 
+    /** @brief Emitted when the user clicks Edit Profile to open ShowProfileEditorDialog. */
+    void editProfileRequested();
+
+    /** @brief Emitted when the user clicks AI Providers & Consent to open ExternalProviderConsentDialog. */
+    void providerSettingsRequested();
+
+    /** @brief Emitted when the user clicks Clear Cache in the Storage & Models footer. */
+    void clearCacheRequested();
+
 private Q_SLOTS:
     void handleProfileSelectionChanged(int index);
     void handleLoadCustomProfileClicked();
@@ -164,6 +192,7 @@ private Q_SLOTS:
     void handleUndoClicked();
     void handleCancelClicked();
     void handleActivityToggle(bool expanded);
+    void handleDiffItemChanged(QTreeWidgetItem *item, int column);
 
 private:
     void buildUi();
@@ -184,16 +213,21 @@ private:
     // Show Profile selector
     QComboBox *m_profileCombo = nullptr;
     QPushButton *m_loadProfileButton = nullptr;
+    QPushButton *m_editProfileButton = nullptr;
+    QPushButton *m_providerSettingsButton = nullptr;
     QLabel *m_profileMetaLabel = nullptr;
 
     // Instruction + quick-action chips
     QPlainTextEdit *m_instructionInput = nullptr;
     QStringList m_quickPrompts;
     QVector<QPushButton *> m_quickChipButtons;
+    QPushButton *m_useBinMediaButton = nullptr;
 
-    // Proposal diff tree
+    // Proposal diff tree & per-change selection helpers
     QLabel *m_proposalSummaryLabel = nullptr;
     QTreeWidget *m_diffTree = nullptr;
+    QPushButton *m_selectAllOpsButton = nullptr;
+    QPushButton *m_uncheckLowConfButton = nullptr;
 
     // Action bar
     QPushButton *m_generateButton = nullptr;
@@ -203,13 +237,15 @@ private:
     QPushButton *m_refineButton = nullptr;
     QPushButton *m_undoButton = nullptr;
 
-    // Collapsible Activity Log & Task Progress
+    // Collapsible Activity Log, Task Progress & Storage strip
     QToolButton *m_activityToggleButton = nullptr;
     QWidget *m_activityContainer = nullptr;
     QLabel *m_taskStatusLabel = nullptr;
     QProgressBar *m_progressBar = nullptr;
     QPushButton *m_cancelButton = nullptr;
     QPlainTextEdit *m_activityLog = nullptr;
+    QLabel *m_storageSummaryLabel = nullptr;
+    QPushButton *m_clearCacheButton = nullptr;
 
     // State
     TimelineCommandBatch m_currentBatch;
@@ -217,6 +253,7 @@ private:
     bool m_hasAppliedProposal = false;
     bool m_canUndo = false;
     bool m_isBusy = false;
+    bool m_updatingDiffChecks = false;
     qint64 m_timelineRevision = 0;
     double m_reviewConfidenceThreshold = 0.72;
     QString m_customProfilePath;

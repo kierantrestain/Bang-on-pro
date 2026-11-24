@@ -75,7 +75,37 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--list-profiles",
         action="store_true",
-        help="List all built-in validated Show Profiles and exit",
+        help="List all built-in and custom validated Show Profiles and exit",
+    )
+    parser.add_argument(
+        "--save-profile",
+        default=None,
+        help="Validate and save a custom Show Profile JSON file to the output path (--output) and exit",
+    )
+    parser.add_argument(
+        "--list-providers",
+        action="store_true",
+        help="List local and optional external AI providers (and consent requirements) and exit",
+    )
+    parser.add_argument(
+        "--provider-config",
+        default=None,
+        help="Optional JSON file configuring AI provider ID and explicit external transmission consent",
+    )
+    parser.add_argument(
+        "--apply-transcript-edits",
+        default=None,
+        help="Path to an edited transcript.json to diff against --original-transcript into a Timeline Command batch",
+    )
+    parser.add_argument(
+        "--original-transcript",
+        default=None,
+        help="Path to the original transcript.json used with --apply-transcript-edits",
+    )
+    parser.add_argument(
+        "--output",
+        default=None,
+        help="Explicit output JSON file path for --apply-transcript-edits or --save-profile",
     )
     parser.add_argument(
         "--json",
@@ -86,6 +116,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    from pathlib import Path
+
     parser = build_arg_parser()
     args = parser.parse_args(argv)
 
@@ -111,8 +143,69 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
         return 0
 
+    if args.list_providers:
+        from bangonpro.ai_engine.providers import AiProviderRegistry
+
+        registry = AiProviderRegistry()
+        providers = [
+            {
+                "provider_id": p.provider_id,
+                "display_name": p.display_name,
+                "is_local": p.is_local,
+                "requires_consent": p.requires_consent,
+                "capabilities": list(p.capabilities),
+            }
+            for p in registry.list_providers()
+        ]
+        if args.json:
+            print(json.dumps(providers, indent=2))
+        else:
+            for p in providers:
+                tier = "LOCAL" if p["is_local"] else "EXTERNAL (consent required)"
+                print(f"{p['provider_id']:24s} | {tier:28s} | {p['display_name']}")
+        return 0
+
+    if args.save_profile:
+        from bangonpro.show_profiles.loader import save_custom_profile
+
+        src_path = Path(args.save_profile)
+        raw_profile = json.loads(src_path.read_text(encoding="utf-8"))
+        dest_path = Path(args.output) if args.output else src_path
+        saved = save_custom_profile(raw_profile, dest_path)
+        payload = {"saved": True, "path": str(saved), "profile_id": raw_profile["profile_id"]}
+        print(json.dumps(payload, indent=2) if args.json else f"Saved profile to {saved}")
+        return 0
+
+    if args.apply_transcript_edits:
+        from bangonpro.ai_engine.transcript import (
+            build_transcript_edit_command_batch,
+            load_transcript,
+        )
+
+        edited = load_transcript(args.apply_transcript_edits)
+        original = (
+            load_transcript(args.original_transcript)
+            if args.original_transcript
+            else edited
+        )
+        batch = build_transcript_edit_command_batch(
+            original,
+            edited,
+            sequence_id=args.sequence_id,
+        )
+        if args.output:
+            out_path = Path(args.output)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(json.dumps(batch, indent=2), encoding="utf-8")
+        print(json.dumps(batch, indent=2))
+        return 0
+
     if not args.inputs:
-        parser.error("--inputs is required unless --list-profiles is specified")
+        parser.error("--inputs is required unless a utility subcommand flag is specified")
+
+    provider_config = None
+    if args.provider_config:
+        provider_config = json.loads(Path(args.provider_config).read_text(encoding="utf-8"))
 
     def _on_progress(stage: str, pct: float, msg: str) -> None:
         if not args.json:
@@ -128,6 +221,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         dry_run=args.dry_run,
         sequence_id=args.sequence_id,
         rnnoise_model_path=args.rnnoise_model,
+        provider_config=provider_config,
         progress_callback=_on_progress,
     )
 
@@ -145,6 +239,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "lower_third_count": len(state.lower_thirds),
         "qc_passed": state.qc_report.passed,
         "qc_issue_count": len(state.qc_report.issues),
+        "missing_media_count": len(state.missing_media),
         "artifacts": state.artifacts,
         "stage_timings_sec": state.stage_timings_sec,
     }

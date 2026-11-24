@@ -105,6 +105,7 @@ def run_production_pipeline(
     sequence_id: str = "seq_main",
     rnnoise_model_path: str | None = None,
     require_edit_approval: bool = False,
+    provider_config: dict[str, Any] | None = None,
     progress_callback: ProgressCallback | None = None,
     approval_callback: ApprovalCallback | None = None,
     orchestrator: ProductionOrchestrator | None = None,
@@ -113,6 +114,28 @@ def run_production_pipeline(
     intent = parse_production_instruction(instruction, export_override=export_video)
     chosen_profile_ref = profile_ref or intent.profile_hint or "podcast_multicam"
     profile = load_show_profile(chosen_profile_ref)
+
+    orch = orchestrator or build_default_orchestrator(
+        require_edit_approval=require_edit_approval
+    )
+
+    if provider_config:
+        from bangonpro.ai_engine.providers import AiProviderRegistry
+
+        registry = AiProviderRegistry()
+        provider_id = str(provider_config.get("provider_id", "local_deterministic"))
+        consent_granted = bool(provider_config.get("consent_granted", False))
+        payload_summary = str(
+            provider_config.get(
+                "payload_summary",
+                f"AI production analysis for {len(inputs)} input(s)",
+            )
+        )
+        registry.require_external_consent(
+            provider_id,
+            consent_granted=consent_granted,
+            payload_summary=payload_summary,
+        )
 
     state = ProjectAnalysisState(
         project_id=project_id or f"bop_{uuid.uuid4().hex[:10]}",
@@ -124,14 +147,27 @@ def run_production_pipeline(
         dry_run=dry_run,
         rnnoise_model_path=rnnoise_model_path,
     )
+    if provider_config:
+        state.metadata["provider_config"] = {
+            "provider_id": str(provider_config.get("provider_id", "local_deterministic")),
+            "consent_granted": bool(provider_config.get("consent_granted", False)),
+        }
     state.input_camera_files = map_inputs_to_profile_cameras(inputs, profile)
 
-    orch = orchestrator or build_default_orchestrator(
-        require_edit_approval=require_edit_approval
-    )
     orch.execute(
         state,
         progress_callback=progress_callback,
         approval_callback=approval_callback,
     )
+
+    # Guarantee editable transcript.json artifact is emitted and linked to timeline frames
+    if "transcript_json" not in state.artifacts:
+        from bangonpro.ai_engine.transcript import build_transcript_document, save_transcript
+
+        doc = state.transcript_document or build_transcript_document(state)
+        state.transcript_document = doc
+        transcript_path = Path(state.output_dir) / "transcript.json"
+        save_transcript(doc, transcript_path)
+        state.artifacts["transcript_json"] = str(transcript_path)
+
     return state, orch

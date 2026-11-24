@@ -92,6 +92,13 @@ list(APPEND kdenlive_SRCS
     bangonpro/effects_browser/PremierePresetBrowser.cpp
     bangonpro/ui/AiAssistantDock.cpp
     bangonpro/ui/BangOnProWorkspace.cpp
+    bangonpro/ui/BangOnProTheme.cpp
+    bangonpro/ui/BangOnProShortcutPresets.cpp
+    bangonpro/ui/TranscriptEditorWidget.cpp
+    bangonpro/ui/ShowProfileEditorDialog.cpp
+    bangonpro/ui/ExternalProviderConsentDialog.cpp
+    bangonpro/roto_ui/RotoMaskCanvasWidget.cpp
+    bangonpro/roto_ui/RotoStudioDock.cpp
 )
 
 if(CRASH_AUTO_TEST)
@@ -139,6 +146,13 @@ set_source_files_properties(
     bangonpro/effects_browser/PremierePresetBrowser.cpp
     bangonpro/ui/AiAssistantDock.cpp
     bangonpro/ui/BangOnProWorkspace.cpp
+    bangonpro/ui/BangOnProTheme.cpp
+    bangonpro/ui/BangOnProShortcutPresets.cpp
+    bangonpro/ui/TranscriptEditorWidget.cpp
+    bangonpro/ui/ShowProfileEditorDialog.cpp
+    bangonpro/ui/ExternalProviderConsentDialog.cpp
+    bangonpro/roto_ui/RotoMaskCanvasWidget.cpp
+    bangonpro/roto_ui/RotoStudioDock.cpp
     "${CMAKE_CURRENT_BINARY_DIR}/kdenliveLib_autogen/mocs_compilation.cpp"
     PROPERTIES
         COMPILE_OPTIONS "-std=gnu++17"

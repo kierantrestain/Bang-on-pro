@@ -6,19 +6,28 @@
 #include "BangOnProIntegration.h"
 
 #include "effects_browser/PremierePresetBrowser.h"
+#include "roto_ui/RotoStudioDock.h"
 #include "timeline_api/KdenliveTimelineBridge.h"
 #include "timeline_api/TimelineCommandEngine.h"
 #include "timeline_api/TimelineCommandServer.h"
 #include "ui/AiAssistantDock.h"
+#include "ui/BangOnProShortcutPresets.h"
 #include "ui/BangOnProWorkspace.h"
+#include "ui/ExternalProviderConsentDialog.h"
+#include "ui/ShowProfileEditorDialog.h"
+#include "ui/TranscriptEditorWidget.h"
 
+#include "bin/projectclip.h"
+#include "bin/projectitemmodel.h"
 #include "core.h"
 #include "effects/effectlist/view/effectlistwidget.hpp"
 #include "mainwindow.h"
+#include "monitor/monitormanager.h"
 #include "project/projectmanager.h"
 #include "timeline2/view/timelinecontroller.h"
 #include "timeline2/view/timelinewidget.h"
 
+#include <KActionCollection>
 #include <QAction>
 #include <QCoreApplication>
 #include <QDateTime>
@@ -36,6 +45,7 @@
 #include <QProcessEnvironment>
 #include <QRegularExpression>
 #include <QStandardPaths>
+#include <QToolBar>
 #include <QUrl>
 #include <QUuid>
 #include <QXmlStreamWriter>
@@ -122,8 +132,13 @@ BangOnProIntegration::BangOnProIntegration(QMainWindow *mainWindow, EffectListWi
 {
     setupEngine();
     setupAiDock();
+    setupTranscriptDock();
     setupPresetBrowser();
+    setupRotoStudioDock();
+    setupWorkspaceBar();
+    setupShortcuts();
     setupMenu();
+    loadBuiltinStarterPresetsIfNeeded();
 }
 
 BangOnProIntegration::~BangOnProIntegration()
@@ -142,7 +157,7 @@ QString BangOnProIntegration::locatePythonPackageRoot()
         candidates << envPath;
     }
     const QString appDir = QCoreApplication::applicationDirPath();
-    candidates << appDir + QStringLiteral("/../Resources")                  // macOS .app bundle (packaging/macos/build_macos_arm64.sh)
+    candidates << appDir + QStringLiteral("/../Resources")                  // macOS .app bundle
                << appDir + QStringLiteral("/../Resources/bangonpro-python") // alternate macOS layout
                << appDir + QStringLiteral("/../share/bangonpro/python")     // installed prefix
                << QString::fromUtf8(BANGONPRO_SOURCE_DIR);                  // developer build
@@ -157,8 +172,12 @@ QString BangOnProIntegration::locatePythonPackageRoot()
 QString BangOnProIntegration::pythonExecutable()
 {
     const QString envPy = qEnvironmentVariable("BANGONPRO_PYTHON");
-    if (!envPy.isEmpty()) {
+    if (!envPy.isEmpty() && QFileInfo::exists(envPy)) {
         return envPy;
+    }
+    const QString bundledPy = QCoreApplication::applicationDirPath() + QStringLiteral("/../Resources/python-env/bin/python3");
+    if (QFileInfo::exists(bundledPy)) {
+        return QFileInfo(bundledPy).canonicalFilePath();
     }
     const QString found = QStandardPaths::findExecutable(QStringLiteral("python3"));
     return found.isEmpty() ? QStringLiteral("python3") : found;
@@ -174,6 +193,34 @@ QString BangOnProIntegration::dataDir()
 QString BangOnProIntegration::ipcSocketPath() const
 {
     return m_server ? m_server->socketPath() : QString();
+}
+
+WorkspaceDocks BangOnProIntegration::collectWorkspaceDocks() const
+{
+    WorkspaceDocks docks;
+    docks.aiAssistant = m_aiDock;
+    docks.premiereBrowser = m_presetDock;
+    docks.transcriptDock = m_transcriptDock;
+    docks.rotoStudio = m_rotoDock;
+    return docks;
+}
+
+QStringList BangOnProIntegration::collectProjectBinMediaPaths() const
+{
+    QStringList paths;
+    if (!Core::self() || !Core::self()->projectItemModel()) {
+        return paths;
+    }
+    const auto binModel = Core::self()->projectItemModel();
+    for (const QString &binId : binModel->getAllClipIds()) {
+        if (auto clip = binModel->getClipByBinID(binId)) {
+            const QString url = clip->clipUrl();
+            if (!url.isEmpty() && QFileInfo::exists(url) && !paths.contains(url)) {
+                paths.append(url);
+            }
+        }
+    }
+    return paths;
 }
 
 void BangOnProIntegration::setupEngine()
@@ -210,20 +257,91 @@ void BangOnProIntegration::setupAiDock()
     connect(m_aiWidget, &AiAssistantDock::undoRequested, this, &BangOnProIntegration::undoLast);
     connect(m_aiWidget, &AiAssistantDock::taskCancelRequested, this, &BangOnProIntegration::cancelTask);
     connect(m_aiWidget, &AiAssistantDock::compareModeToggled, this, &BangOnProIntegration::toggleCompareMode);
+    connect(m_aiWidget, &AiAssistantDock::editProfileRequested, this, &BangOnProIntegration::openShowProfileEditor);
+    connect(m_aiWidget, &AiAssistantDock::providerSettingsRequested, this, &BangOnProIntegration::openExternalProviderSettings);
+    connect(m_aiWidget, &AiAssistantDock::clearCacheRequested, this, &BangOnProIntegration::clearTemporaryCaches);
     connect(m_engine.get(), &TimelineCommandEngine::revisionChanged, m_aiWidget, &AiAssistantDock::setTimelineRevision);
+}
+
+void BangOnProIntegration::setupTranscriptDock()
+{
+    m_transcriptWidget = new TranscriptEditorWidget(m_mainWindow);
+    m_transcriptDock = new QDockWidget(QStringLiteral("Transcript & Captions"), m_mainWindow);
+    m_transcriptDock->setObjectName(QString::fromLatin1(kTranscriptDockName));
+    m_transcriptDock->setWidget(m_transcriptWidget);
+    m_mainWindow->addDockWidget(Qt::RightDockWidgetArea, m_transcriptDock);
+    if (m_aiDock) {
+        m_mainWindow->tabifyDockWidget(m_aiDock, m_transcriptDock);
+        m_aiDock->raise();
+    }
+    connect(m_transcriptWidget, &TranscriptEditorWidget::seekToFrameRequested, this, &BangOnProIntegration::seekTimelineToFrame);
+    connect(m_transcriptWidget, &TranscriptEditorWidget::applyTranscriptEditsRequested, this, &BangOnProIntegration::applyTranscriptEdits);
 }
 
 void BangOnProIntegration::setupPresetBrowser()
 {
     m_presetWidget = new PremierePresetBrowser(m_mainWindow);
     m_presetDock = new QDockWidget(QStringLiteral("Premiere Presets"), m_mainWindow);
-    m_presetDock->setObjectName(QStringLiteral("bangonpro_premiere_presets"));
+    m_presetDock->setObjectName(QString::fromLatin1(kPremiereBrowserDockName));
     m_presetDock->setWidget(m_presetWidget);
     m_mainWindow->addDockWidget(Qt::LeftDockWidgetArea, m_presetDock);
     connect(m_presetWidget, &PremierePresetBrowser::importArchiveRequested, this, &BangOnProIntegration::importPresetArchive);
     connect(m_presetWidget, &PremierePresetBrowser::applyPresetRequested, this, &BangOnProIntegration::applyPreset);
     connect(m_presetWidget, &PremierePresetBrowser::customStackApplied, this, &BangOnProIntegration::applyCustomStack);
     loadPresetReportIfPresent();
+}
+
+void BangOnProIntegration::setupRotoStudioDock()
+{
+    m_rotoWidget = new RotoStudioDock(m_mainWindow);
+    m_rotoDock = new QDockWidget(QStringLiteral("Roto, Masking & 2D Studio"), m_mainWindow);
+    m_rotoDock->setObjectName(QString::fromLatin1(kRotoStudioDockName));
+    m_rotoDock->setWidget(m_rotoWidget);
+    m_mainWindow->addDockWidget(Qt::RightDockWidgetArea, m_rotoDock);
+    if (m_aiDock) {
+        m_mainWindow->tabifyDockWidget(m_aiDock, m_rotoDock);
+        m_aiDock->raise();
+    }
+    connect(m_rotoWidget, &RotoStudioDock::commitMaskToTimelineRequested, this, &BangOnProIntegration::commitRotoMaskToTimeline);
+    connect(m_rotoWidget, &RotoStudioDock::send2DCompositeToMediaBinRequested, this, &BangOnProIntegration::renderAndImport2DComposite);
+    connect(m_rotoWidget, &RotoStudioDock::sendStoryboardToTimelineRequested, this, &BangOnProIntegration::exportStoryboardToTimeline);
+}
+
+void BangOnProIntegration::setupWorkspaceBar()
+{
+    if (!m_mainWindow) {
+        return;
+    }
+    m_workspaceBar = new WorkspaceSwitcherBar(m_mainWindow);
+    auto *barToolBar = new QToolBar(QStringLiteral("Bang On Pro Workspaces"), m_mainWindow);
+    barToolBar->setObjectName(QStringLiteral("bangonpro_workspace_toolbar"));
+    barToolBar->setMovable(false);
+    barToolBar->setFloatable(false);
+    barToolBar->addWidget(m_workspaceBar);
+    m_mainWindow->addToolBar(Qt::TopToolBarArea, barToolBar);
+
+    connect(m_workspaceBar, &WorkspaceSwitcherBar::workspaceSelected, this, &BangOnProIntegration::applyStudioWorkspace);
+    connect(m_workspaceBar, &WorkspaceSwitcherBar::aiPanelToggled, this, [this](bool visible) {
+        if (m_aiDock) {
+            m_aiDock->setVisible(visible);
+            if (visible) {
+                m_aiDock->raise();
+            }
+        }
+    });
+    if (m_aiDock) {
+        connect(m_aiDock, &QDockWidget::visibilityChanged, m_workspaceBar,
+                [this](bool visible) { m_workspaceBar->setAiPanelVisible(visible, false); });
+    }
+    m_workspaceBar->attachToMainWindow(m_mainWindow, collectWorkspaceDocks());
+}
+
+void BangOnProIntegration::setupShortcuts()
+{
+    m_shortcutManager = std::make_unique<ShortcutPresetManager>();
+    if (auto *mw = qobject_cast<MainWindow *>(m_mainWindow)) {
+        m_shortcutManager->applyPreset(mw->actionCollection(), m_shortcutManager->activePresetId());
+    }
 }
 
 void BangOnProIntegration::setupMenu()
@@ -233,10 +351,37 @@ void BangOnProIntegration::setupMenu()
     }
     QMenu *menu = m_mainWindow->menuBar()->addMenu(QStringLiteral("&Bang On Pro"));
 
+    // Studio Workspaces submenu (all 9 workspaces)
+    QMenu *wsMenu = menu->addMenu(QStringLiteral("Workspaces"));
+    for (const WorkspaceMode mode : allWorkspaceModes()) {
+        QAction *wsAct = wsMenu->addAction(workspaceModeDisplayName(mode));
+        connect(wsAct, &QAction::triggered, this, [this, mode]() {
+            applyStudioWorkspace(mode);
+            if (m_workspaceBar) {
+                m_workspaceBar->setActiveWorkspace(mode, false);
+            }
+        });
+    }
+    wsMenu->addSeparator();
+    QAction *premiereLayout = wsMenu->addAction(QStringLiteral("Apply Premiere-Style Edit Layout"));
+    connect(premiereLayout, &QAction::triggered, this, [this]() { applyStudioWorkspace(WorkspaceMode::Edit); });
+
+    menu->addSeparator();
+
     if (m_aiDock) {
         QAction *toggleAi = m_aiDock->toggleViewAction();
         toggleAi->setText(QStringLiteral("AI Assistant Panel"));
         menu->addAction(toggleAi);
+    }
+    if (m_transcriptDock) {
+        QAction *toggleTranscript = m_transcriptDock->toggleViewAction();
+        toggleTranscript->setText(QStringLiteral("Transcript & Captions Editor"));
+        menu->addAction(toggleTranscript);
+    }
+    if (m_rotoDock) {
+        QAction *toggleRoto = m_rotoDock->toggleViewAction();
+        toggleRoto->setText(QStringLiteral("Roto, Masking & 2D Studio"));
+        menu->addAction(toggleRoto);
     }
     if (m_presetDock) {
         QAction *togglePresets = m_presetDock->toggleViewAction();
@@ -246,16 +391,19 @@ void BangOnProIntegration::setupMenu()
 
     menu->addSeparator();
 
-    QAction *premiereLayout = menu->addAction(QStringLiteral("Apply Premiere-Style Workspace Layout"));
-    connect(premiereLayout, &QAction::triggered, this, [this]() {
-        WorkspaceDocks docks;
-        docks.aiAssistant = m_aiDock;
-        docks.premiereBrowser = m_presetDock;
-        applyPremiereWorkspaceLayout(m_mainWindow, docks);
-        if (m_aiWidget) {
-            m_aiWidget->appendActivityLog(QStringLiteral("workspace"), QStringLiteral("Applied Premiere-style workspace layout"));
-        }
-    });
+    QAction *shortcutsAct = menu->addAction(QStringLiteral("Keyboard Shortcut Presets (Premiere / Resolve / Kdenlive)…"));
+    connect(shortcutsAct, &QAction::triggered, this, &BangOnProIntegration::openShortcutPresetsDialog);
+
+    QAction *profileEditorAct = menu->addAction(QStringLiteral("Custom Show Profile Editor…"));
+    connect(profileEditorAct, &QAction::triggered, this, &BangOnProIntegration::openShowProfileEditor);
+
+    QAction *providerConsentAct = menu->addAction(QStringLiteral("AI Providers & Privacy Consent…"));
+    connect(providerConsentAct, &QAction::triggered, this, &BangOnProIntegration::openExternalProviderSettings);
+
+    QAction *clearCacheAct = menu->addAction(QStringLiteral("Clear Proxy & Render Caches"));
+    connect(clearCacheAct, &QAction::triggered, this, &BangOnProIntegration::clearTemporaryCaches);
+
+    menu->addSeparator();
 
     QAction *importPresets = menu->addAction(QStringLiteral("Import Premiere Preset Pack (.zip / .prfpset)..."));
     connect(importPresets, &QAction::triggered, this, [this]() {
@@ -271,6 +419,67 @@ void BangOnProIntegration::setupMenu()
     connect(m_openGeneratedProjectAction, &QAction::triggered, this, &BangOnProIntegration::openLastGeneratedProject);
 }
 
+void BangOnProIntegration::applyStudioWorkspace(WorkspaceMode mode)
+{
+    applyWorkspace(m_mainWindow, mode, collectWorkspaceDocks());
+    if (m_aiWidget) {
+        m_aiWidget->appendActivityLog(QStringLiteral("workspace"), QStringLiteral("Switched to %1 workspace").arg(workspaceModeDisplayName(mode)));
+    }
+}
+
+void BangOnProIntegration::openShortcutPresetsDialog()
+{
+    auto *mw = qobject_cast<MainWindow *>(m_mainWindow);
+    QObject *target = mw ? static_cast<QObject *>(mw->actionCollection()) : static_cast<QObject *>(m_mainWindow);
+    ShortcutPresetDialog dlg(target, m_mainWindow);
+    connect(&dlg, &ShortcutPresetDialog::presetApplied, this, [this](const QString &presetId, const QMap<QString, QKeySequence> &shortcuts) {
+        if (m_aiWidget) {
+            m_aiWidget->appendActivityLog(QStringLiteral("shortcuts"),
+                                          QStringLiteral("Applied '%1' keyboard shortcut preset (%2 actions)").arg(presetId).arg(shortcuts.size()));
+        }
+    });
+    dlg.exec();
+}
+
+void BangOnProIntegration::openShowProfileEditor()
+{
+    ShowProfileEditorDialog dlg(m_mainWindow);
+    connect(&dlg, &ShowProfileEditorDialog::profileSaved, this, [this](const QString &filePath, const QJsonObject &profileJson) {
+        if (m_aiWidget) {
+            m_aiWidget->applyCustomProfileJson(profileJson, filePath);
+        }
+    });
+    dlg.exec();
+}
+
+void BangOnProIntegration::openExternalProviderSettings()
+{
+    ExternalProviderConsentDialog dlg(m_mainWindow);
+    connect(&dlg, &ExternalProviderConsentDialog::settingsSaved, this, [this](const ExternalProviderSettings &settings) {
+        if (m_aiWidget) {
+            const QString modeText = settings.isExternalTransmissionAllowed()
+                                         ? QStringLiteral("External AI (%1, consent granted)").arg(settings.providerName)
+                                         : QStringLiteral("Local Only (Free & Offline)");
+            m_aiWidget->appendActivityLog(QStringLiteral("privacy"), QStringLiteral("AI provider configuration updated: %1").arg(modeText));
+        }
+    });
+    dlg.exec();
+}
+
+void BangOnProIntegration::clearTemporaryCaches()
+{
+    const QString cacheDir = dataDir() + QStringLiteral("/cache");
+    QDir dir(cacheDir);
+    if (dir.exists()) {
+        dir.removeRecursively();
+        QDir().mkpath(cacheDir);
+    }
+    if (m_aiWidget) {
+        m_aiWidget->setStorageSummaryText(QStringLiteral("Local AI • Cache cleared"));
+        m_aiWidget->appendActivityLog(QStringLiteral("storage"), QStringLiteral("Cleared Bang On Pro proxy & temporary caches (source media untouched)"));
+    }
+}
+
 void BangOnProIntegration::loadPresetReportIfPresent()
 {
     const QString report = dataDir() + QStringLiteral("/presets/compatibility_report.json");
@@ -280,6 +489,27 @@ void BangOnProIntegration::loadPresetReportIfPresent()
             qWarning("Bang On Pro: failed to load preset report: %s", qPrintable(err));
         }
     }
+}
+
+void BangOnProIntegration::loadBuiltinStarterPresetsIfNeeded()
+{
+    const QString report = dataDir() + QStringLiteral("/presets/compatibility_report.json");
+    if (QFileInfo::exists(report)) {
+        return;
+    }
+    const QString outDir = dataDir() + QStringLiteral("/presets");
+    QDir().mkpath(outDir);
+    QProcess *proc = startPython({QStringLiteral("-m"), QStringLiteral("bangonpro.premiere_compat.cli"), QStringLiteral("builtin"),
+                                  QStringLiteral("--output-dir"), outDir});
+    if (!proc) {
+        return;
+    }
+    connect(proc, &QProcess::finished, this, [this, proc](int code, QProcess::ExitStatus) {
+        proc->deleteLater();
+        if (code == 0) {
+            loadPresetReportIfPresent();
+        }
+    });
 }
 
 QProcess *BangOnProIntegration::startPython(const QStringList &args)
@@ -305,12 +535,20 @@ void BangOnProIntegration::startProposal(const QString &instruction, const QStri
         m_aiWidget->appendActivityLog(QStringLiteral("integration"), QStringLiteral("An AI task is already running"), QStringLiteral("WARN"));
         return;
     }
-    QStringList inputs = QFileDialog::getOpenFileNames(m_mainWindow, QStringLiteral("Select camera / source media for the AI first cut"), QString(),
-                                                       QStringLiteral("Media (*.mp4 *.mov *.mxf *.mkv *.m4v *.wav *.mp3);;All files (*)"));
+
+    QStringList inputs;
+    if (m_aiWidget && m_aiWidget->useProjectBinMedia()) {
+        inputs = collectProjectBinMediaPaths();
+    }
+    if (inputs.isEmpty()) {
+        inputs = QFileDialog::getOpenFileNames(m_mainWindow, QStringLiteral("Select camera / source media for the AI first cut"), QString(),
+                                               QStringLiteral("Media (*.mp4 *.mov *.mxf *.mkv *.m4v *.wav *.mp3);;All files (*)"));
+    }
     if (inputs.isEmpty()) {
         m_aiWidget->appendActivityLog(QStringLiteral("integration"), QStringLiteral("Proposal cancelled: no media selected"));
         return;
     }
+
     m_lastInputs = inputs;
     m_lastProfile = customProfilePath.isEmpty() ? profileId : customProfilePath;
     m_aiOutputDir = dataDir() + QStringLiteral("/runs/") + QDateTime::currentDateTimeUtc().toString(QStringLiteral("yyyyMMdd-HHmmss"));
@@ -361,8 +599,17 @@ void BangOnProIntegration::handleProposalFinished(int exitCode)
     const QJsonObject artifacts = summary.value(QStringLiteral("artifacts")).toObject();
     const QString cmdsPath = artifacts.value(QStringLiteral("timeline_commands_json")).toString();
     m_lastKdenliveProjectPath = artifacts.value(QStringLiteral("kdenlive_project")).toString();
+    m_lastTranscriptPath = artifacts.value(QStringLiteral("transcript_json")).toString();
+
     if (m_openGeneratedProjectAction) {
         m_openGeneratedProjectAction->setEnabled(!m_lastKdenliveProjectPath.isEmpty() && QFileInfo::exists(m_lastKdenliveProjectPath));
+    }
+    if (m_transcriptWidget && !m_lastTranscriptPath.isEmpty() && QFileInfo::exists(m_lastTranscriptPath)) {
+        QString terr;
+        if (m_transcriptWidget->loadFromFile(m_lastTranscriptPath, &terr)) {
+            m_aiWidget->appendActivityLog(QStringLiteral("transcript"),
+                                          QStringLiteral("Loaded editable transcript (%1 segments)").arg(m_transcriptWidget->segmentCount()));
+        }
     }
 
     QString err;
@@ -404,13 +651,213 @@ void BangOnProIntegration::handleProposalFinished(int exitCode)
     m_aiWidget->displayProposal(merged);
 }
 
+void BangOnProIntegration::seekTimelineToFrame(int frame)
+{
+    if (Core::self() && Core::self()->monitorManager()) {
+        Core::self()->monitorManager()->activateMonitor(Kdenlive::ProjectMonitor);
+        Core::self()->seekMonitor(Kdenlive::ProjectMonitor, qMax(0, frame));
+    }
+}
+
+void BangOnProIntegration::applyTranscriptEdits(const QJsonObject &editedTranscriptJson)
+{
+    const QString editedPath = dataDir() + QStringLiteral("/edited_transcript.json");
+    QFile outF(editedPath);
+    if (!outF.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        return;
+    }
+    outF.write(QJsonDocument(editedTranscriptJson).toJson(QJsonDocument::Indented));
+    outF.close();
+
+    QStringList args{QStringLiteral("-m"), QStringLiteral("bangonpro.ai_engine.cli"), QStringLiteral("--apply-transcript-edits"), editedPath};
+    if (!m_lastTranscriptPath.isEmpty() && QFileInfo::exists(m_lastTranscriptPath)) {
+        args << QStringLiteral("--original-transcript") << m_lastTranscriptPath;
+    }
+    QProcess *proc = startPython(args);
+    if (!proc) {
+        return;
+    }
+    connect(proc, &QProcess::finished, this, [this, proc](int code, QProcess::ExitStatus) {
+        proc->deleteLater();
+        if (code != 0) {
+            return;
+        }
+        const QJsonObject batchObj = QJsonDocument::fromJson(proc->readAllStandardOutput()).object();
+        TimelineCommandBatch batch;
+        QString berr;
+        if (TimelineCommandEngine::batchFromJson(batchObj, &batch, &berr) && !batch.operations.isEmpty()) {
+            batch.expectedRevision = m_engine->currentRevision();
+            batch.requiresApproval = true;
+            m_aiWidget->displayProposal(batch);
+            if (m_aiDock) {
+                m_aiDock->show();
+                m_aiDock->raise();
+            }
+        }
+    });
+}
+
+void BangOnProIntegration::commitRotoMaskToTimeline(const QJsonObject &rotoSessionJson)
+{
+    const QJsonArray masks = rotoSessionJson.value(QStringLiteral("masks")).toArray();
+    if (masks.isEmpty()) {
+        return;
+    }
+    const QJsonObject primary = masks.first().toObject();
+    TimelineCommandBatch batch;
+    batch.requestId = QStringLiteral("roto-") + QUuid::createUuid().toString(QUuid::WithoutBraces);
+    batch.projectId = QStringLiteral("active_project");
+    batch.sequenceId = QStringLiteral("seq_main");
+    batch.agentId = QStringLiteral("roto_studio");
+    batch.agentRole = QStringLiteral("rotoscoping");
+    batch.transactionLabel = QStringLiteral("Apply Rotoscope Mask (%1)").arg(primary.value(QStringLiteral("name")).toString(QStringLiteral("Mask")));
+    batch.expectedRevision = m_engine->currentRevision();
+    batch.requiresApproval = false;
+
+    TimelineOperation op;
+    op.opId = QStringLiteral("op_roto_mask_1");
+    op.type = QStringLiteral("apply_mask");
+    op.trackId = QStringLiteral("V1");
+    op.params.insert(QStringLiteral("mask_id"), primary.value(QStringLiteral("id")).toString(QStringLiteral("mask_1")));
+    op.params.insert(QStringLiteral("mask_type"), primary.value(QStringLiteral("tool")).toString(QStringLiteral("polygon")));
+    op.params.insert(QStringLiteral("feather"), primary.value(QStringLiteral("feather_px")).toDouble(0.0));
+    op.params.insert(QStringLiteral("expand"), primary.value(QStringLiteral("expand_px")).toDouble(0.0));
+    op.params.insert(QStringLiteral("invert"), primary.value(QStringLiteral("inverted")).toBool(false));
+    op.params.insert(QStringLiteral("operation"), primary.value(QStringLiteral("combine_mode")).toString(QStringLiteral("add")));
+    op.params.insert(QStringLiteral("splines_json"), QString::fromUtf8(QJsonDocument(primary.value(QStringLiteral("vertices")).toArray()).toJson(QJsonDocument::Compact)));
+    op.confidence = 0.96;
+    op.rationale = QStringLiteral("Commit native rotoscope mask from Bang On Pro Roto Studio");
+    batch.operations.append(op);
+
+    const TimelineCommandResponse resp = m_engine->executeBatch(batch);
+    if (m_aiWidget) {
+        m_aiWidget->setCanUndo(m_engine->canUndo());
+        m_aiWidget->appendActivityLog(QStringLiteral("roto-studio"),
+                                      QStringLiteral("Commit mask -> %1 (rev %2) %3")
+                                          .arg(commandStatusToString(resp.status))
+                                          .arg(resp.currentRevision)
+                                          .arg(resp.errorMessage));
+    }
+}
+
+void BangOnProIntegration::renderAndImport2DComposite(const QJsonObject &canvasJson, bool placeOnTimeline)
+{
+    const QString outDir = dataDir() + QStringLiteral("/artcraft_plates");
+    QDir().mkpath(outDir);
+    const QString stamp = QDateTime::currentDateTimeUtc().toString(QStringLiteral("yyyyMMdd-HHmmss"));
+    const QString canvasPath = outDir + QStringLiteral("/canvas_") + stamp + QStringLiteral(".json");
+    const QString pngPath = outDir + QStringLiteral("/plate_") + stamp + QStringLiteral(".png");
+
+    QFile f(canvasPath);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        return;
+    }
+    f.write(QJsonDocument(canvasJson).toJson(QJsonDocument::Indented));
+    f.close();
+
+    QProcess *proc = startPython({QStringLiteral("-m"), QStringLiteral("bangonpro.roto_studio.cli"), QStringLiteral("compose-2d"),
+                                  QStringLiteral("--canvas-json"), canvasPath, QStringLiteral("--output-png"), pngPath});
+    if (!proc) {
+        return;
+    }
+    connect(proc, &QProcess::finished, this, [this, proc, pngPath, placeOnTimeline](int code, QProcess::ExitStatus) {
+        proc->deleteLater();
+        if (code != 0 || !QFileInfo::exists(pngPath)) {
+            return;
+        }
+        TimelineCommandBatch batch;
+        batch.requestId = QStringLiteral("plate-") + QUuid::createUuid().toString(QUuid::WithoutBraces);
+        batch.projectId = QStringLiteral("active_project");
+        batch.sequenceId = QStringLiteral("seq_main");
+        batch.agentId = QStringLiteral("artcraft_2d");
+        batch.agentRole = QStringLiteral("2d_composition");
+        batch.transactionLabel = QStringLiteral("Import 2D Composite Plate");
+        batch.expectedRevision = m_engine->currentRevision();
+        batch.requiresApproval = false;
+
+        TimelineOperation imp;
+        imp.opId = QStringLiteral("op_import_plate");
+        imp.type = QStringLiteral("import_media");
+        imp.mediaRef = QStringLiteral("plate_media");
+        imp.params.insert(QStringLiteral("path"), pngPath);
+        imp.confidence = 1.0;
+        imp.rationale = QStringLiteral("Import ArtCraft-adapted 2D composite plate into Media Bin");
+        batch.operations.append(imp);
+
+        if (placeOnTimeline) {
+            TimelineOperation place;
+            place.opId = QStringLiteral("op_place_plate");
+            place.type = QStringLiteral("place_clip");
+            place.mediaRef = QStringLiteral("plate_media");
+            place.trackId = QStringLiteral("V2");
+            place.frameRange.inFrame = 0;
+            place.frameRange.outFrame = 125;
+            place.frameRange.timelineStart = 0;
+            place.confidence = 1.0;
+            place.rationale = QStringLiteral("Place 2D composite plate on overlay track V2");
+            batch.operations.append(place);
+        }
+
+        const TimelineCommandResponse resp = m_engine->executeBatch(batch);
+        if (m_aiWidget) {
+            m_aiWidget->setCanUndo(m_engine->canUndo());
+            m_aiWidget->appendActivityLog(QStringLiteral("artcraft-2d"),
+                                          QStringLiteral("Rendered plate %1 -> %2").arg(pngPath, commandStatusToString(resp.status)));
+        }
+    });
+}
+
+void BangOnProIntegration::exportStoryboardToTimeline(const QJsonObject &storyboardJson)
+{
+    const QString outDir = dataDir() + QStringLiteral("/storyboards/") + QDateTime::currentDateTimeUtc().toString(QStringLiteral("yyyyMMdd-HHmmss"));
+    QDir().mkpath(outDir);
+    const QString sbPath = outDir + QStringLiteral("/storyboard.json");
+    QFile f(sbPath);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        return;
+    }
+    f.write(QJsonDocument(storyboardJson).toJson(QJsonDocument::Indented));
+    f.close();
+
+    QProcess *proc = startPython({QStringLiteral("-m"), QStringLiteral("bangonpro.roto_studio.cli"), QStringLiteral("storyboard-export"),
+                                  QStringLiteral("--storyboard-json"), sbPath, QStringLiteral("--output-dir"), outDir});
+    if (!proc) {
+        return;
+    }
+    connect(proc, &QProcess::finished, this, [this, proc](int code, QProcess::ExitStatus) {
+        proc->deleteLater();
+        if (code != 0) {
+            return;
+        }
+        const QJsonObject result = QJsonDocument::fromJson(proc->readAllStandardOutput()).object();
+        const QJsonObject batchObj = result.value(QStringLiteral("command_batch")).toObject();
+        TimelineCommandBatch batch;
+        QString err;
+        if (TimelineCommandEngine::batchFromJson(batchObj, &batch, &err) && !batch.operations.isEmpty()) {
+            batch.expectedRevision = m_engine->currentRevision();
+            batch.requiresApproval = true;
+            if (m_aiWidget) {
+                m_aiWidget->displayProposal(batch);
+                m_aiWidget->appendActivityLog(QStringLiteral("storyboard"),
+                                              QStringLiteral("Storyboard animatic ready (%1 shots, %2 operations)")
+                                                  .arg(result.value(QStringLiteral("shot_count")).toInt())
+                                                  .arg(batch.operations.size()));
+            }
+            if (m_aiDock) {
+                m_aiDock->show();
+                m_aiDock->raise();
+            }
+        }
+    });
+}
+
 void BangOnProIntegration::approveBatch(const TimelineCommandBatch &batch)
 {
     m_compareUndidBatch = false;
     m_aiWidget->setCompareModeActive(false);
 
     TimelineCommandBatch b = batch;
-    b.requiresApproval = false; // the user just approved it in the dock
+    b.requiresApproval = false; // the user just approved the selected ops in the dock
     b.expectedRevision = m_engine->currentRevision();
     const TimelineCommandResponse resp = m_engine->executeBatch(b);
     m_aiWidget->applyExecutionResponse(resp);

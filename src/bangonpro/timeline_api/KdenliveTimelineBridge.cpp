@@ -11,6 +11,7 @@
 #include "bin/clipcreator.hpp"
 #include "bin/model/markerlistmodel.hpp"
 #include "bin/model/subtitlemodel.hpp"
+#include "bin/projectclip.h"
 #include "bin/projectfolder.h"
 #include "bin/projectitemmodel.h"
 #include "core.h"
@@ -22,9 +23,13 @@
 #include "timeline2/model/timelineitemmodel.hpp"
 #include "utils/gentime.h"
 
-#include <QJsonDocument>
-#include <QUuid>
+#include <mlt++/MltProperties.h>
 
+#include <QFileInfo>
+#include <QJsonDocument>
+#include <QRegularExpression>
+#include <QUuid>
+#include <algorithm>
 #include <cmath>
 
 namespace BangOnPro {
@@ -122,6 +127,26 @@ bool KdenliveTimelineBridge::resolveTrackId(const std::shared_ptr<TimelineItemMo
     if (ok && timeline->isTrack(numeric)) {
         *trackIdOut = numeric;
         return true;
+    }
+    // Auto-resolve standard logical track labels (V1, V2, A1, A2, ...) against existing Kdenlive tracks
+    static const QRegularExpression kLogicalTrackRe(QStringLiteral("^([VA])(\\d+)$"), QRegularExpression::CaseInsensitiveOption);
+    const QRegularExpressionMatch match = kLogicalTrackRe.match(key);
+    if (match.hasMatch()) {
+        const bool wantAudio = (match.captured(1).toUpper() == QStringLiteral("A"));
+        const int logicalIndex = qMax(1, match.captured(2).toInt()) - 1;
+        QVector<QPair<int, int>> matchingTracks;
+        for (int tid : timeline->getAllTracksIds()) {
+            if (timeline->isAudioTrack(tid) == wantAudio) {
+                matchingTracks.append({timeline->getTrackPosition(tid), tid});
+            }
+        }
+        std::sort(matchingTracks.begin(), matchingTracks.end(),
+                  [](const QPair<int, int> &a, const QPair<int, int> &b) { return a.first < b.first; });
+        if (!matchingTracks.isEmpty()) {
+            const int clampedIdx = qMin(logicalIndex, matchingTracks.size() - 1);
+            *trackIdOut = matchingTracks.at(clampedIdx).second;
+            return true;
+        }
     }
     return false;
 }
@@ -376,6 +401,24 @@ TimelineOperationResult KdenliveTimelineBridge::executeOperation(const TimelineO
     if (op.type == QStringLiteral("add_caption")) {
         return handleAddCaption(timeline, op);
     }
+    if (op.type == QStringLiteral("update_caption")) {
+        return handleUpdateCaption(timeline, op);
+    }
+    if (op.type == QStringLiteral("delete_caption")) {
+        return handleDeleteCaption(timeline, op);
+    }
+    if (op.type == QStringLiteral("add_lower_third")) {
+        return handleAddLowerThird(timeline, op);
+    }
+    if (op.type == QStringLiteral("apply_mask")) {
+        return handleApplyMask(timeline, op);
+    }
+    if (op.type == QStringLiteral("add_transition")) {
+        return handleAddTransition(timeline, op);
+    }
+    if (op.type == QStringLiteral("set_clip_speed")) {
+        return handleSetClipSpeed(timeline, op);
+    }
     if (op.type == QStringLiteral("add_marker")) {
         return handleAddMarker(timeline, op);
     }
@@ -395,10 +438,33 @@ TimelineOperationResult KdenliveTimelineBridge::handleImportMedia(const Timeline
         return res;
     }
 
+    const QFileInfo fi(sourcePath);
+    if (!fi.exists()) {
+        res.message = QStringLiteral("Source media file does not exist: '%1'").arg(sourcePath);
+        return res;
+    }
+    const QString canonicalPath = fi.canonicalFilePath();
+
     const std::shared_ptr<ProjectItemModel> binModel = Core::self()->projectItemModel();
     if (!binModel || !binModel->getRootFolder()) {
         res.message = QStringLiteral("Kdenlive ProjectItemModel is not initialized");
         return res;
+    }
+
+    // Deduplicate against existing bin clips by canonical path to prevent duplicate media storage
+    for (const QString &existingId : binModel->getAllClipIds()) {
+        if (auto existingClip = binModel->getClipByBinID(existingId)) {
+            const QString existingCanonical = QFileInfo(existingClip->clipUrl()).canonicalFilePath();
+            if (!existingCanonical.isEmpty() && existingCanonical == canonicalPath) {
+                if (!op.mediaRef.trimmed().isEmpty()) {
+                    m_mediaAliases.insert(op.mediaRef.trimmed(), existingId);
+                }
+                res.applied = true;
+                res.createdId = existingId;
+                res.message = QStringLiteral("Reused existing Kdenlive Bin clip id '%1'").arg(existingId);
+                return res;
+            }
+        }
     }
 
     const QString parentFolder = op.params.value(QStringLiteral("folder_id")).toString(binModel->getRootFolder()->clipId());
@@ -477,6 +543,10 @@ TimelineOperationResult KdenliveTimelineBridge::handlePlaceClip(const std::share
     TimelineOperationResult res;
     res.opId = op.opId;
 
+    if (op.params.value(QStringLiteral("clip_kind")).toString() == QStringLiteral("kdenlivetitle")) {
+        return handleAddLowerThird(timeline, op);
+    }
+
     int trackId = -1;
     if (!resolveTrackId(timeline, op.trackId, &trackId)) {
         res.message = QStringLiteral("Unknown Kdenlive track_id '%1'").arg(op.trackId);
@@ -495,7 +565,15 @@ TimelineOperationResult KdenliveTimelineBridge::handlePlaceClip(const std::share
         return res;
     }
 
-    // Apply requested in/out trim window when explicitly supplied.
+    // Apply source inFrame trim (left edge) followed by outFrame duration (right edge)
+    const int initialPlaytime = timeline->getClipPlaytime(createdClipId);
+    if (op.frameRange.inFrame > 0 && initialPlaytime > op.frameRange.inFrame) {
+        int leftTrimmedSize = initialPlaytime - op.frameRange.inFrame;
+        if (timeline->requestItemResize(createdClipId, leftTrimmedSize, false, false, m_txUndo, m_txRedo)) {
+            timeline->requestClipMove(createdClipId, trackId, op.frameRange.timelineStart, true, true, false, true, m_txUndo, m_txRedo);
+        }
+    }
+
     if (op.frameRange.outFrame > op.frameRange.inFrame) {
         int requestedDuration = op.frameRange.outFrame - op.frameRange.inFrame;
         if (requestedDuration > 0 && requestedDuration != timeline->getClipPlaytime(createdClipId)) {
@@ -978,6 +1056,323 @@ TimelineOperationResult KdenliveTimelineBridge::handleAddCaption(const std::shar
     res.applied = true;
     res.createdId = QString::number(subModel->getIdForStartPos(startTime));
     res.message = QStringLiteral("Added subtitle caption at frame %1").arg(startFrame);
+    return res;
+}
+
+TimelineOperationResult KdenliveTimelineBridge::handleUpdateCaption(const std::shared_ptr<TimelineItemModel> &timeline, const TimelineOperation &op)
+{
+    TimelineOperationResult res;
+    res.opId = op.opId;
+
+    std::shared_ptr<SubtitleModel> subModel = timeline->getSubtitleModel();
+    if (!subModel) {
+        res.message = QStringLiteral("Timeline has no active SubtitleModel");
+        return res;
+    }
+
+    const QString newText = op.params.value(QStringLiteral("text")).toString().trimmed();
+    if (newText.isEmpty()) {
+        res.message = QStringLiteral("update_caption requires non-empty params.text");
+        return res;
+    }
+
+    int subId = op.params.value(QStringLiteral("caption_id")).toString().toInt();
+    if (subId <= 0) {
+        const double fps = Core::self()->getCurrentFps() > 0.0 ? Core::self()->getCurrentFps() : 25.0;
+        subId = subModel->getIdForStartPos(GenTime(op.frameRange.timelineStart, fps));
+    }
+    if (subId <= 0) {
+        res.message = QStringLiteral("Could not locate target subtitle caption for update_caption");
+        return res;
+    }
+
+    const QString prevText = subModel->getText(subId);
+    if (!subModel->editSubtitle(subId, newText)) {
+        res.message = QStringLiteral("SubtitleModel::editSubtitle failed for subtitle %1").arg(subId);
+        return res;
+    }
+
+    std::weak_ptr<SubtitleModel> weakSub = subModel;
+    composeUndoRedo(
+        [weakSub, subId, prevText]() {
+            if (auto locked = weakSub.lock()) {
+                return locked->editSubtitle(subId, prevText);
+            }
+            return false;
+        },
+        [weakSub, subId, newText]() {
+            if (auto locked = weakSub.lock()) {
+                return locked->editSubtitle(subId, newText);
+            }
+            return false;
+        });
+
+    res.applied = true;
+    res.createdId = QString::number(subId);
+    res.message = QStringLiteral("Updated subtitle caption %1").arg(subId);
+    return res;
+}
+
+TimelineOperationResult KdenliveTimelineBridge::handleDeleteCaption(const std::shared_ptr<TimelineItemModel> &timeline, const TimelineOperation &op)
+{
+    TimelineOperationResult res;
+    res.opId = op.opId;
+
+    std::shared_ptr<SubtitleModel> subModel = timeline->getSubtitleModel();
+    if (!subModel) {
+        res.message = QStringLiteral("Timeline has no active SubtitleModel");
+        return res;
+    }
+
+    const double fps = Core::self()->getCurrentFps() > 0.0 ? Core::self()->getCurrentFps() : 25.0;
+    int subId = op.params.value(QStringLiteral("caption_id")).toString().toInt();
+    if (subId <= 0) {
+        subId = subModel->getIdForStartPos(GenTime(op.frameRange.timelineStart, fps));
+    }
+    if (subId <= 0) {
+        res.message = QStringLiteral("Could not locate target subtitle caption for delete_caption");
+        return res;
+    }
+
+    const QString prevText = subModel->getText(subId);
+    const GenTime startTime(op.frameRange.timelineStart, fps);
+    const int duration = qMax(1, op.frameRange.outFrame - op.frameRange.inFrame);
+    const GenTime endTime(op.frameRange.timelineStart + duration, fps);
+
+    if (!subModel->removeSubtitle(subId)) {
+        res.message = QStringLiteral("SubtitleModel::removeSubtitle failed for subtitle %1").arg(subId);
+        return res;
+    }
+
+    std::weak_ptr<SubtitleModel> weakSub = subModel;
+    composeUndoRedo(
+        [weakSub, subId, startTime, endTime, prevText]() {
+            if (auto locked = weakSub.lock()) {
+                return locked->addSubtitle(subId, startTime, endTime, prevText);
+            }
+            return false;
+        },
+        [weakSub, startTime]() {
+            if (auto locked = weakSub.lock()) {
+                const int id = locked->getIdForStartPos(startTime);
+                return id > 0 ? locked->removeSubtitle(id) : true;
+            }
+            return false;
+        });
+
+    res.applied = true;
+    res.createdId = QString::number(subId);
+    res.message = QStringLiteral("Deleted subtitle caption %1").arg(subId);
+    return res;
+}
+
+TimelineOperationResult KdenliveTimelineBridge::handleAddLowerThird(const std::shared_ptr<TimelineItemModel> &timeline, const TimelineOperation &op)
+{
+    TimelineOperationResult res;
+    res.opId = op.opId;
+
+    const std::shared_ptr<ProjectItemModel> binModel = Core::self()->projectItemModel();
+    if (!binModel || !binModel->getRootFolder()) {
+        res.message = QStringLiteral("Kdenlive ProjectItemModel is not initialized");
+        return res;
+    }
+
+    int trackId = -1;
+    const QString requestedTrack = op.trackId.trimmed().isEmpty() ? QStringLiteral("V2") : op.trackId;
+    if (!resolveTrackId(timeline, requestedTrack, &trackId)) {
+        res.message = QStringLiteral("Unknown target track '%1' for lower third").arg(requestedTrack);
+        return res;
+    }
+
+    const QString speakerName = firstNonEmptyString(op.params, {QStringLiteral("speaker_name"), QStringLiteral("title"), QStringLiteral("name")});
+    const QString subtitle = op.params.value(QStringLiteral("subtitle")).toString();
+    const QString accentHex = op.params.value(QStringLiteral("accent_hex")).toString(QStringLiteral("#FF5A1F"));
+    QString titleXml = op.params.value(QStringLiteral("kdenlive_title_xml")).toString();
+    if (titleXml.isEmpty()) {
+        const QString escSpeaker = speakerName.toHtmlEscaped();
+        const QString escSub = subtitle.toHtmlEscaped();
+        titleXml = QStringLiteral(
+                       "<kdenlivetitle duration=\"125\" LC_NUMERIC=\"C\" width=\"1920\" height=\"1080\" out=\"124\">"
+                       "<item type=\"QGraphicsRectItem\" z-index=\"0\">"
+                       "<position x=\"100\" y=\"840\"><transform>1,0,0,0,1,0,0,0,1</transform></position>"
+                       "<content brushcolor=\"20,23,29,220\" pencolor=\"0,0,0,0\" penwidth=\"0\" rect=\"0,0,620,120\"/>"
+                       "</item>"
+                       "<item type=\"QGraphicsRectItem\" z-index=\"1\">"
+                       "<position x=\"100\" y=\"840\"><transform>1,0,0,0,1,0,0,0,1</transform></position>"
+                       "<content brushcolor=\"%3\" pencolor=\"0,0,0,0\" penwidth=\"0\" rect=\"0,0,10,120\"/>"
+                       "</item>"
+                       "<item type=\"QGraphicsTextItem\" z-index=\"2\">"
+                       "<position x=\"132\" y=\"856\"><transform>1,0,0,0,1,0,0,0,1</transform></position>"
+                       "<content font=\"Sans\" font-size=\"40\" font-weight=\"700\" font-color=\"255,255,255,255\">%1</content>"
+                       "</item>"
+                       "<item type=\"QGraphicsTextItem\" z-index=\"3\">"
+                       "<position x=\"132\" y=\"910\"><transform>1,0,0,0,1,0,0,0,1</transform></position>"
+                       "<content font=\"Sans\" font-size=\"24\" font-weight=\"500\" font-color=\"200,208,220,255\">%2</content>"
+                       "</item>"
+                       "</kdenlivetitle>")
+                       .arg(escSpeaker, escSub, accentHex);
+    }
+
+    const int duration = op.frameRange.outFrame > op.frameRange.inFrame
+                             ? (op.frameRange.outFrame - op.frameRange.inFrame)
+                             : op.params.value(QStringLiteral("duration_frames")).toInt(125);
+    std::unordered_map<QString, QString> props;
+    props[QStringLiteral("xmldata")] = titleXml;
+    const QString displayName = speakerName.isEmpty() ? QStringLiteral("Lower Third") : QStringLiteral("LT: %1").arg(speakerName);
+    const QString binId = ClipCreator::createTitleClip(props, qMax(1, duration), displayName, binModel->getRootFolder()->clipId(), binModel);
+    if (binId.isEmpty() || binId == QStringLiteral("-1")) {
+        res.message = QStringLiteral("ClipCreator::createTitleClip failed for lower third '%1'").arg(displayName);
+        return res;
+    }
+
+    int createdClipId = -1;
+    if (!timeline->requestClipInsertion(binId, trackId, op.frameRange.timelineStart, createdClipId, false, true, false, m_txUndo, m_txRedo)) {
+        res.message = QStringLiteral("Failed to place lower-third clip '%1' onto track %2").arg(binId).arg(trackId);
+        return res;
+    }
+
+    if (!op.clipId.trimmed().isEmpty()) {
+        m_clipAliases.insert(op.clipId.trimmed(), createdClipId);
+    }
+
+    res.applied = true;
+    res.createdId = QString::number(createdClipId);
+    res.message = QStringLiteral("Placed lower-third '%1' on track %2 at frame %3").arg(displayName).arg(trackId).arg(op.frameRange.timelineStart);
+    return res;
+}
+
+TimelineOperationResult KdenliveTimelineBridge::handleApplyMask(const std::shared_ptr<TimelineItemModel> &timeline, const TimelineOperation &op)
+{
+    TimelineOperationResult res;
+    res.opId = op.opId;
+
+    std::shared_ptr<EffectStackModel> stack;
+    if (!op.clipId.trimmed().isEmpty()) {
+        int clipId = -1;
+        if (!resolveClipId(timeline, op.clipId, &clipId)) {
+            res.message = QStringLiteral("Unknown clip_id '%1' for apply_mask").arg(op.clipId);
+            return res;
+        }
+        stack = timeline->getClipEffectStack(clipId);
+    } else if (!op.trackId.trimmed().isEmpty()) {
+        int trackId = -1;
+        if (!resolveTrackId(timeline, op.trackId, &trackId)) {
+            res.message = QStringLiteral("Unknown track_id '%1' for apply_mask").arg(op.trackId);
+            return res;
+        }
+        stack = timeline->getTrackEffectStackModel(trackId);
+    } else {
+        stack = timeline->getMasterEffectStackModel();
+    }
+
+    if (!stack) {
+        res.message = QStringLiteral("Target EffectStackModel unavailable for apply_mask");
+        return res;
+    }
+
+    const QString mattePath = op.params.value(QStringLiteral("matte_path")).toString().trimmed();
+    const QString serviceId = !mattePath.isEmpty() ? QStringLiteral("shape") : QStringLiteral("rotoscoping");
+    if (!stack->appendEffectWithUndo(serviceId, m_txUndo, m_txRedo)) {
+        res.message = QStringLiteral("EffectStackModel::appendEffectWithUndo failed for mask filter '%1'").arg(serviceId);
+        return res;
+    }
+
+    if (auto assetModel = stack->getAssetModelById(serviceId)) {
+        if (serviceId == QStringLiteral("shape")) {
+            assetModel->setParameter(QStringLiteral("resource"), mattePath, true);
+            assetModel->setParameter(QStringLiteral("use_luminance"), QStringLiteral("1"), true);
+            assetModel->setParameter(QStringLiteral("softness"), QString::number(qBound(0.0, op.params.value(QStringLiteral("feather")).toDouble(0.0) / 100.0, 1.0), 'f', 3), true);
+            assetModel->setParameter(QStringLiteral("invert"), op.params.value(QStringLiteral("invert")).toBool(false) ? QStringLiteral("1") : QStringLiteral("0"), true);
+        } else {
+            const QString splinesJson = op.params.value(QStringLiteral("splines_json")).toString();
+            if (!splinesJson.isEmpty()) {
+                assetModel->setParameter(QStringLiteral("spline"), splinesJson, true);
+            }
+            assetModel->setParameter(QStringLiteral("feather"), QString::number(qMax(0, op.params.value(QStringLiteral("feather")).toInt(0))), true);
+            assetModel->setParameter(QStringLiteral("invert"), op.params.value(QStringLiteral("invert")).toBool(false) ? QStringLiteral("1") : QStringLiteral("0"), true);
+            const QString opMode = op.params.value(QStringLiteral("operation")).toString(QStringLiteral("write_on_clear"));
+            assetModel->setParameter(QStringLiteral("alpha_operation"), opMode, true);
+        }
+    }
+
+    res.applied = true;
+    res.createdId = op.params.value(QStringLiteral("mask_id")).toString(serviceId);
+    res.message = QStringLiteral("Applied %1 mask '%2' to native EffectStackModel").arg(serviceId, res.createdId);
+    return res;
+}
+
+TimelineOperationResult KdenliveTimelineBridge::handleAddTransition(const std::shared_ptr<TimelineItemModel> &timeline, const TimelineOperation &op)
+{
+    TimelineOperationResult res;
+    res.opId = op.opId;
+
+    const QString transitionId = firstNonEmptyString(op.params, {QStringLiteral("transition_id"), QStringLiteral("mlt_service"), QStringLiteral("type")});
+    if (transitionId.isEmpty()) {
+        res.message = QStringLiteral("add_transition requires params.transition_id");
+        return res;
+    }
+
+    int trackId = -1;
+    const QString trackRef = firstNonEmptyString(op.params, {QStringLiteral("b_track"), QStringLiteral("track_id")});
+    if (!resolveTrackId(timeline, trackRef.isEmpty() ? op.trackId : trackRef, &trackId)) {
+        res.message = QStringLiteral("Unknown target track for add_transition");
+        return res;
+    }
+
+    int aTrack = -1;
+    const QString aTrackRef = op.params.value(QStringLiteral("a_track")).toString();
+    if (!aTrackRef.isEmpty()) {
+        resolveTrackId(timeline, aTrackRef, &aTrack);
+    }
+
+    const int inFrame = op.params.contains(QStringLiteral("in_frame")) ? op.params.value(QStringLiteral("in_frame")).toInt(0) : op.frameRange.timelineStart;
+    const int outFrame = op.params.contains(QStringLiteral("out_frame")) ? op.params.value(QStringLiteral("out_frame")).toInt(inFrame + 25) : op.frameRange.outFrame;
+    const int duration = qMax(1, outFrame - inFrame);
+
+    auto transProps = std::make_unique<Mlt::Properties>();
+    const QJsonObject propsObj = op.params.value(QStringLiteral("properties")).toObject();
+    for (auto it = propsObj.constBegin(); it != propsObj.constEnd(); ++it) {
+        transProps->set(it.key().toUtf8().constData(), jsonValueToParamString(it.value()).toUtf8().constData());
+    }
+
+    int compId = -1;
+    if (!timeline->requestCompositionInsertion(transitionId, trackId, aTrack, inFrame, duration, std::move(transProps), compId, m_txUndo, m_txRedo)) {
+        res.message = QStringLiteral("TimelineItemModel::requestCompositionInsertion failed for transition '%1'").arg(transitionId);
+        return res;
+    }
+
+    res.applied = true;
+    res.createdId = QString::number(compId);
+    res.message = QStringLiteral("Inserted transition '%1' (id %2) on track %3 at frame %4").arg(transitionId).arg(compId).arg(trackId).arg(inFrame);
+    return res;
+}
+
+TimelineOperationResult KdenliveTimelineBridge::handleSetClipSpeed(const std::shared_ptr<TimelineItemModel> &timeline, const TimelineOperation &op)
+{
+    TimelineOperationResult res;
+    res.opId = op.opId;
+
+    int clipId = -1;
+    if (!resolveClipId(timeline, op.clipId, &clipId)) {
+        res.message = QStringLiteral("Unknown Kdenlive clip_id '%1' for set_clip_speed").arg(op.clipId);
+        return res;
+    }
+
+    const double speedPercent = op.params.value(QStringLiteral("speed_percent")).toDouble(100.0);
+    if (speedPercent <= 0.0 || speedPercent > 10000.0) {
+        res.message = QStringLiteral("speed_percent must be in (0, 10000]");
+        return res;
+    }
+    const bool pitchComp = op.params.value(QStringLiteral("pitch_compensate")).toBool(true);
+
+    if (!timeline->requestClipTimeWarp(clipId, speedPercent / 100.0, pitchComp, true, m_txUndo, m_txRedo)) {
+        res.message = QStringLiteral("TimelineItemModel::requestClipTimeWarp failed for clip %1").arg(clipId);
+        return res;
+    }
+
+    res.applied = true;
+    res.createdId = QString::number(clipId);
+    res.message = QStringLiteral("Set clip %1 speed to %2%").arg(clipId).arg(speedPercent, 0, 'f', 1);
     return res;
 }
 

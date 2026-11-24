@@ -160,8 +160,18 @@ void AiAssistantDock::buildUi()
     m_loadProfileButton->setObjectName(QStringLiteral("loadProfileButton"));
     m_loadProfileButton->setToolTip(tr("Load a custom Show Profile v1 JSON file"));
 
+    m_editProfileButton = new QPushButton(tr("Edit Profile…"), this);
+    m_editProfileButton->setObjectName(QStringLiteral("editProfileButton"));
+    m_editProfileButton->setToolTip(tr("Create or customize a Show Profile (pacing, cameras, audio, graphics)"));
+
+    m_providerSettingsButton = new QPushButton(tr("AI Providers…"), this);
+    m_providerSettingsButton->setObjectName(QStringLiteral("providerSettingsButton"));
+    m_providerSettingsButton->setToolTip(tr("Configure local AI models or consent-gated external AI providers"));
+
     profileControlRow->addWidget(m_profileCombo, 1);
     profileControlRow->addWidget(m_loadProfileButton);
+    profileControlRow->addWidget(m_editProfileButton);
+    profileControlRow->addWidget(m_providerSettingsButton);
 
     profileSectionLayout->addLayout(profileHeaderRow);
     profileSectionLayout->addLayout(profileControlRow);
@@ -169,11 +179,22 @@ void AiAssistantDock::buildUi()
 
     connect(m_profileCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &AiAssistantDock::handleProfileSelectionChanged);
     connect(m_loadProfileButton, &QPushButton::clicked, this, &AiAssistantDock::handleLoadCustomProfileClicked);
+    connect(m_editProfileButton, &QPushButton::clicked, this, &AiAssistantDock::editProfileRequested);
+    connect(m_providerSettingsButton, &QPushButton::clicked, this, &AiAssistantDock::providerSettingsRequested);
 
     // 3. Instruction box & quick-action chips
+    auto *promptHeaderRow = new QHBoxLayout();
     auto *promptLabel = new QLabel(tr("Director Instruction"), this);
     promptLabel->setObjectName(QStringLiteral("bangOnProSectionLabel"));
-    rootLayout->addWidget(promptLabel);
+    m_useBinMediaButton = new QPushButton(tr("Use Bin Media"), this);
+    m_useBinMediaButton->setObjectName(QStringLiteral("useBinMediaButton"));
+    m_useBinMediaButton->setCheckable(true);
+    m_useBinMediaButton->setChecked(true);
+    m_useBinMediaButton->setToolTip(tr("Automatically source camera clips from the current Project Bin when available"));
+    promptHeaderRow->addWidget(promptLabel);
+    promptHeaderRow->addStretch(1);
+    promptHeaderRow->addWidget(m_useBinMediaButton);
+    rootLayout->addLayout(promptHeaderRow);
 
     m_instructionInput = new QPlainTextEdit(this);
     m_instructionInput->setObjectName(QStringLiteral("instructionInput"));
@@ -218,7 +239,7 @@ void AiAssistantDock::buildUi()
     }
     rootLayout->addLayout(chipsGrid);
 
-    // 4. Proposed Changes Diff Tree
+    // 4. Proposed Changes Diff Tree (with per-change accept/reject checkboxes)
     auto *diffHeaderRow = new QHBoxLayout();
     auto *diffLabel = new QLabel(tr("Proposed Timeline Changes (Diff)"), this);
     diffLabel->setObjectName(QStringLiteral("bangOnProSectionLabel"));
@@ -229,6 +250,22 @@ void AiAssistantDock::buildUi()
     diffHeaderRow->addWidget(m_proposalSummaryLabel);
     rootLayout->addLayout(diffHeaderRow);
 
+    auto *diffSelectRow = new QHBoxLayout();
+    diffSelectRow->setSpacing(4);
+    m_selectAllOpsButton = new QPushButton(tr("Select All"), this);
+    m_selectAllOpsButton->setObjectName(QStringLiteral("selectAllOpsButton"));
+    m_selectAllOpsButton->setEnabled(false);
+    m_uncheckLowConfButton = new QPushButton(tr("Uncheck Low-Confidence"), this);
+    m_uncheckLowConfButton->setObjectName(QStringLiteral("uncheckLowConfButton"));
+    m_uncheckLowConfButton->setEnabled(false);
+    diffSelectRow->addWidget(m_selectAllOpsButton);
+    diffSelectRow->addWidget(m_uncheckLowConfButton);
+    diffSelectRow->addStretch(1);
+    rootLayout->addLayout(diffSelectRow);
+
+    connect(m_selectAllOpsButton, &QPushButton::clicked, this, [this]() { setAllOperationsChecked(true); });
+    connect(m_uncheckLowConfButton, &QPushButton::clicked, this, [this]() { uncheckLowConfidenceOperations(); });
+
     m_diffTree = new QTreeWidget(this);
     m_diffTree->setObjectName(QStringLiteral("proposedDiffTree"));
     m_diffTree->setColumnCount(6);
@@ -237,7 +274,7 @@ void AiAssistantDock::buildUi()
     m_diffTree->setRootIsDecorated(true);
     m_diffTree->setUniformRowHeights(false);
     m_diffTree->setSelectionMode(QAbstractItemView::SingleSelection);
-    m_diffTree->setMinimumHeight(150);
+    m_diffTree->setMinimumHeight(140);
 
     QHeaderView *header = m_diffTree->header();
     header->setStretchLastSection(true);
@@ -247,6 +284,7 @@ void AiAssistantDock::buildUi()
     header->setSectionResizeMode(kColConfidence, QHeaderView::ResizeToContents);
     header->setSectionResizeMode(kColStatus, QHeaderView::ResizeToContents);
 
+    connect(m_diffTree, &QTreeWidget::itemChanged, this, &AiAssistantDock::handleDiffItemChanged);
     rootLayout->addWidget(m_diffTree, 1);
 
     // 5. Action Bar (Generate, Accept & Apply, Reject, Compare A/B, Refine, Undo)
@@ -293,7 +331,7 @@ void AiAssistantDock::buildUi()
     connect(m_refineButton, &QPushButton::clicked, this, &AiAssistantDock::handleRefineClicked);
     connect(m_undoButton, &QPushButton::clicked, this, &AiAssistantDock::handleUndoClicked);
 
-    // 6. Collapsible Live Agent Activity Log + Progress Bar + Cancel
+    // 6. Collapsible Live Agent Activity Log + Progress Bar + Cancel + Storage Strip
     auto *progressRow = new QHBoxLayout();
     progressRow->setSpacing(6);
 
@@ -331,21 +369,32 @@ void AiAssistantDock::buildUi()
     m_activityContainer->setObjectName(QStringLiteral("activityLogContainer"));
     auto *logLayout = new QVBoxLayout(m_activityContainer);
     logLayout->setContentsMargins(0, 0, 0, 0);
-    logLayout->setSpacing(0);
+    logLayout->setSpacing(4);
 
     m_activityLog = new QPlainTextEdit(m_activityContainer);
     m_activityLog->setObjectName(QStringLiteral("agentActivityLog"));
     m_activityLog->setReadOnly(true);
     m_activityLog->setMaximumBlockCount(500);
-    m_activityLog->setMinimumHeight(90);
-    m_activityLog->setMaximumHeight(160);
+    m_activityLog->setMinimumHeight(80);
+    m_activityLog->setMaximumHeight(150);
     m_activityLog->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
     logLayout->addWidget(m_activityLog);
+
+    auto *storageRow = new QHBoxLayout();
+    m_storageSummaryLabel = new QLabel(tr("Local AI • Cache bounded"), m_activityContainer);
+    m_storageSummaryLabel->setObjectName(QStringLiteral("bangOnProMutedLabel"));
+    m_clearCacheButton = new QPushButton(tr("Clear Cache"), m_activityContainer);
+    m_clearCacheButton->setObjectName(QStringLiteral("clearCacheButton"));
+    m_clearCacheButton->setToolTip(tr("Clear temporary proxy & render caches without touching source media"));
+    storageRow->addWidget(m_storageSummaryLabel, 1);
+    storageRow->addWidget(m_clearCacheButton);
+    logLayout->addLayout(storageRow);
 
     rootLayout->addWidget(m_activityContainer);
 
     connect(m_activityToggleButton, &QToolButton::toggled, this, &AiAssistantDock::handleActivityToggle);
     connect(m_cancelButton, &QPushButton::clicked, this, &AiAssistantDock::handleCancelClicked);
+    connect(m_clearCacheButton, &QPushButton::clicked, this, &AiAssistantDock::clearCacheRequested);
 }
 
 void AiAssistantDock::populateDefaultProfiles()
@@ -488,6 +537,7 @@ void AiAssistantDock::displayProposal(const TimelineCommandBatch &batch)
     m_hasPendingProposal = !batch.operations.isEmpty();
     m_lowConfidenceCount = 0;
 
+    m_updatingDiffChecks = true;
     m_diffTree->clear();
 
     const QColor warningBg(95, 58, 12);
@@ -496,6 +546,9 @@ void AiAssistantDock::displayProposal(const TimelineCommandBatch &batch)
 
     for (const TimelineOperation &op : std::as_const(batch.operations)) {
         auto *item = new QTreeWidgetItem(m_diffTree);
+        item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+        item->setCheckState(kColOpType, Qt::Checked);
+
         const bool isLowConf = op.confidence < m_reviewConfidenceThreshold;
         if (isLowConf) {
             ++m_lowConfidenceCount;
@@ -533,6 +586,7 @@ void AiAssistantDock::displayProposal(const TimelineCommandBatch &batch)
             }
         }
     }
+    m_updatingDiffChecks = false;
 
     if (m_hasPendingProposal) {
         QString summary = tr("%1 ops (%2)").arg(batch.operations.size()).arg(batch.transactionLabel);
@@ -742,6 +796,75 @@ QTreeWidget *AiAssistantDock::diffTreeWidget() const
     return m_diffTree;
 }
 
+QStringList AiAssistantDock::selectedOperationIds() const
+{
+    QStringList ids;
+    for (int i = 0; i < m_diffTree->topLevelItemCount(); ++i) {
+        QTreeWidgetItem *item = m_diffTree->topLevelItem(i);
+        if (item->checkState(kColOpType) == Qt::Checked) {
+            const QString opId = item->data(kColOpType, kOpIdRole).toString();
+            if (!opId.isEmpty()) {
+                ids.append(opId);
+            }
+        }
+    }
+    return ids;
+}
+
+void AiAssistantDock::setAllOperationsChecked(bool checked)
+{
+    m_updatingDiffChecks = true;
+    const Qt::CheckState st = checked ? Qt::Checked : Qt::Unchecked;
+    for (int i = 0; i < m_diffTree->topLevelItemCount(); ++i) {
+        m_diffTree->topLevelItem(i)->setCheckState(kColOpType, st);
+    }
+    m_updatingDiffChecks = false;
+    updateActionButtonStates();
+    Q_EMIT selectedOperationIdsChanged(selectedOperationIds());
+}
+
+void AiAssistantDock::uncheckLowConfidenceOperations()
+{
+    m_updatingDiffChecks = true;
+    for (int i = 0; i < m_diffTree->topLevelItemCount(); ++i) {
+        QTreeWidgetItem *item = m_diffTree->topLevelItem(i);
+        if (item->data(kColStatus, kLowConfidenceRole).toBool()) {
+            item->setCheckState(kColOpType, Qt::Unchecked);
+        }
+    }
+    m_updatingDiffChecks = false;
+    updateActionButtonStates();
+    Q_EMIT selectedOperationIdsChanged(selectedOperationIds());
+}
+
+bool AiAssistantDock::useProjectBinMedia() const
+{
+    return m_useBinMediaButton != nullptr && m_useBinMediaButton->isChecked();
+}
+
+void AiAssistantDock::setUseProjectBinMedia(bool useBin)
+{
+    if (m_useBinMediaButton != nullptr) {
+        m_useBinMediaButton->setChecked(useBin);
+    }
+}
+
+void AiAssistantDock::setStorageSummaryText(const QString &summary)
+{
+    if (m_storageSummaryLabel != nullptr) {
+        m_storageSummaryLabel->setText(summary);
+    }
+}
+
+void AiAssistantDock::handleDiffItemChanged(QTreeWidgetItem *item, int column)
+{
+    if (m_updatingDiffChecks || item == nullptr || item->parent() != nullptr || column != kColOpType) {
+        return;
+    }
+    updateActionButtonStates();
+    Q_EMIT selectedOperationIdsChanged(selectedOperationIds());
+}
+
 void AiAssistantDock::handleProfileSelectionChanged(int index)
 {
     if (index < 0) {
@@ -785,10 +908,28 @@ void AiAssistantDock::handleAcceptClicked()
     if (!m_hasPendingProposal) {
         return;
     }
+    const QStringList checkedIds = selectedOperationIds();
+    TimelineCommandBatch filteredBatch = m_currentBatch;
+    if (!checkedIds.isEmpty() && checkedIds.size() < m_currentBatch.operations.size()) {
+        QVector<TimelineOperation> kept;
+        for (const TimelineOperation &op : std::as_const(m_currentBatch.operations)) {
+            if (checkedIds.contains(op.opId)) {
+                kept.append(op);
+            }
+        }
+        filteredBatch.operations = kept;
+    } else if (checkedIds.isEmpty()) {
+        appendActivityLog(QStringLiteral("Approval"), tr("No operations selected; check at least one change to apply."), QStringLiteral("WARN"));
+        return;
+    }
+
     appendActivityLog(QStringLiteral("Approval"),
-                      tr("User approved batch '%1' (%2 operations).").arg(m_currentBatch.requestId).arg(m_currentBatch.operations.size()),
+                      tr("User approved batch '%1' (%2/%3 selected operations).")
+                          .arg(filteredBatch.requestId)
+                          .arg(filteredBatch.operations.size())
+                          .arg(m_currentBatch.operations.size()),
                       QStringLiteral("INFO"));
-    Q_EMIT batchApproveRequested(m_currentBatch);
+    Q_EMIT batchApproveRequested(filteredBatch);
 }
 
 void AiAssistantDock::handleRejectClicked()
@@ -849,12 +990,19 @@ void AiAssistantDock::handleActivityToggle(bool expanded)
 void AiAssistantDock::updateActionButtonStates()
 {
     const bool allowActions = !m_isBusy;
+    const int checkedCount = m_hasPendingProposal ? selectedOperationIds().size() : 0;
     m_generateButton->setEnabled(allowActions);
-    m_acceptButton->setEnabled(allowActions && m_hasPendingProposal);
+    m_acceptButton->setEnabled(allowActions && m_hasPendingProposal && checkedCount > 0);
     m_rejectButton->setEnabled(allowActions && m_hasPendingProposal);
     m_refineButton->setEnabled(allowActions && m_hasPendingProposal);
     m_compareButton->setEnabled(allowActions && (m_hasPendingProposal || m_hasAppliedProposal));
     m_undoButton->setEnabled(allowActions && m_canUndo);
+    if (m_selectAllOpsButton) {
+        m_selectAllOpsButton->setEnabled(allowActions && m_hasPendingProposal);
+    }
+    if (m_uncheckLowConfButton) {
+        m_uncheckLowConfButton->setEnabled(allowActions && m_hasPendingProposal && m_lowConfidenceCount > 0);
+    }
 }
 
 void AiAssistantDock::setStatusBadge(const QString &text, const QString &stateKey)

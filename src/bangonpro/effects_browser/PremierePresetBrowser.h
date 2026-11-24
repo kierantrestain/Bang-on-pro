@@ -43,6 +43,9 @@ struct PresetDisplayEntry
     PremierePresetRecord record;
     QString originalXml;
     QString description;
+    QString previewBeforePath;
+    QString previewAfterPath;
+    QString previewSplitPath;
 };
 
 /**
@@ -50,8 +53,9 @@ struct PresetDisplayEntry
  *
  * Loads schema-validated compatibility_report.json files, surfaces every preset
  * (including unsupported and missing-dependency entries with colour badges,
- * dependency details, and raw XML inspection), supports favourites, saved
- * custom stacks, and emits drag-and-drop payloads (`application/x-bangonpro-preset`).
+ * visual before/after previews, inline parameter/keyframe editor, dependency details,
+ * and raw XML inspection), supports persistent favourites, saved custom stacks,
+ * and emits drag-and-drop payloads (`application/x-bangonpro-preset`).
  */
 class PremierePresetBrowser : public QWidget
 {
@@ -79,6 +83,12 @@ public:
     bool removeCustomStack(const QString &stackName);
     QVector<CustomEffectStack> customStacks() const;
 
+    /** @brief Persist favourites and saved custom stacks to a JSON state file. */
+    bool saveUserState(const QString &jsonPath) const;
+
+    /** @brief Restore favourites and saved custom stacks from a JSON state file. */
+    bool loadUserState(const QString &jsonPath);
+
     QByteArray buildMimePayloadForPreset(const QString &presetId) const;
 
 public Q_SLOTS:
@@ -100,6 +110,7 @@ private Q_SLOTS:
     void onSaveCustomStackClicked();
     void onApplyCustomStackClicked();
     void onRemoveCustomStackClicked();
+    void onApplyEditedParamsClicked();
 
 private:
     void buildUi();
@@ -134,7 +145,10 @@ private:
 
     PresetTreeWidget *m_presetTree = nullptr;
     QTabWidget *m_inspectorTabs = nullptr;
+    QLabel *m_previewImageLabel = nullptr;
     QTextBrowser *m_overviewBrowser = nullptr;
+    QPlainTextEdit *m_paramEditorEdit = nullptr;
+    QPushButton *m_applyEditedParamsBtn = nullptr;
     QPlainTextEdit *m_kdenliveXmlEdit = nullptr;
     QPlainTextEdit *m_rawXmlEdit = nullptr;
 

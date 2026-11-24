@@ -115,7 +115,7 @@ def _compute_kept_master_intervals(
     if end_bound <= start_bound + 0.25:
         return [TimeInterval(start_sec=0.0, end_sec=max(0.5, common_duration), label="kept_full")]
 
-    # Excise interior silence spans exceeding (2 * keep_pad + 0.15s)
+    # Excise interior silence spans AND detected recording interruptions
     excise_spans: list[tuple[float, float]] = []
     if remove_silence:
         for iv in state.silence_intervals:
@@ -126,7 +126,21 @@ def _compute_kept_master_intervals(
             if (cut_end - cut_start) >= 0.15:
                 excise_spans.append((cut_start, cut_end))
 
+    for iv in getattr(state, "interruption_intervals", []):
+        cut_start = max(start_bound, iv.start_sec + keep_pad)
+        cut_end = min(end_bound, iv.end_sec - keep_pad)
+        if (cut_end - cut_start) >= 0.25:
+            excise_spans.append((cut_start, cut_end))
+
+    # Merge overlapping excise spans
     excise_spans.sort()
+    merged_excise: list[tuple[float, float]] = []
+    for cs, ce in excise_spans:
+        if merged_excise and cs <= merged_excise[-1][1] + 0.05:
+            merged_excise[-1] = (merged_excise[-1][0], max(merged_excise[-1][1], ce))
+        else:
+            merged_excise.append((cs, ce))
+    excise_spans = merged_excise
 
     kept: list[TimeInterval] = []
     cursor = start_bound
@@ -297,9 +311,14 @@ def _plan_shots_for_kept_interval(
                         "reason": "dialogue_padding",
                     }
                 )
-            cam_id = speaker_to_cam.get(seg.speaker_id, seg.camera_id)
-            if cam_id not in state.media_assets:
+            if getattr(seg, "is_overlap", False) and wide_cam in state.media_assets:
                 cam_id = wide_cam
+                shot_reason = "overlapping_speech_wide_shot"
+            else:
+                cam_id = speaker_to_cam.get(seg.speaker_id, seg.camera_id)
+                if cam_id not in state.media_assets:
+                    cam_id = wide_cam
+                shot_reason = f"active_speaker_{seg.speaker_id.lower().replace(' ', '_')}"
             raw_spans.append(
                 {
                     "start": seg_s,
@@ -307,7 +326,7 @@ def _plan_shots_for_kept_interval(
                     "camera_id": cam_id,
                     "speaker_id": seg.speaker_id,
                     "confidence": seg.confidence,
-                    "reason": f"active_speaker_{seg.speaker_id.lower().replace(' ', '_')}",
+                    "reason": shot_reason,
                 }
             )
             cursor = seg_e

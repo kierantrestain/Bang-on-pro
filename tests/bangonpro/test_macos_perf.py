@@ -29,7 +29,7 @@ _REPO_ROOT = str(Path(__file__).resolve().parents[2])
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from bangonpro.macos.benchmark import run_full_benchmark
+from bangonpro.macos.benchmark import get_peak_rss_mb, run_comprehensive_benchmarks, run_full_benchmark
 from bangonpro.macos.hardware_profiles import (
     HardwareCapabilities,
     assess_metal_mlt_support,
@@ -37,12 +37,14 @@ from bangonpro.macos.hardware_profiles import (
     generate_export_profile,
     list_profile_names,
     probe_hardware_capabilities,
+    recommend_model_quantization,
     validate_profile_against_capabilities,
 )
 from bangonpro.macos.proxy_cache_manager import (
     CacheBudgetManager,
     MediaProbeInfo,
     ProxyPolicy,
+    StorageAndModelManager,
     StorageBudgetConfig,
     evaluate_proxy_policy,
     generate_proxy,

@@ -14,7 +14,7 @@
 namespace BangOnPro {
 
 inline constexpr const char *kAppDisplayName = "Bang On Pro";
-inline constexpr const char *kAppVersion = "0.1.0-alpha";
+inline constexpr const char *kAppVersion = "1.0.0";
 inline constexpr const char *kTimelineApiVersion = "1.0";
 inline constexpr const char *kPremiereReportSchemaVersion = "1.0";
 

@@ -402,6 +402,7 @@ relocate_macho_deps() {
                 "${app_bundle}/Contents/PlugIns/"*)
                     ensure_rpath "${target}" "@loader_path/../Frameworks"
                     ensure_rpath "${target}" "@loader_path/../../Frameworks"
+                    ensure_rpath "${target}" "@loader_path/../../../Frameworks"
                     ensure_rpath "${target}" "@executable_path/../Frameworks"
                     ;;
             esac
@@ -409,12 +410,66 @@ relocate_macho_deps() {
             local dep
             while IFS= read -r dep; do
                 [[ -n "${dep}" ]] || continue
-                # Skip macOS system libraries and already-relocated paths
+                # Skip macOS system libraries and relative loader/executable paths
                 case "${dep}" in
-                    /System/Library/*|/usr/lib/*|@executable_path/*|@loader_path/*|@rpath/*)
+                    /System/Library/*|/usr/lib/*|@executable_path/*|@loader_path/*)
                         continue
                         ;;
                 esac
+
+                # Handle @rpath references (Craft Qt6/KF6/MLT dylibs & frameworks frequently use @rpath IDs)
+                if [[ "${dep}" == @rpath/* ]]; then
+                    local rpath_rel="${dep#@rpath/}"
+                    if [[ "${rpath_rel}" == *".framework/"* ]]; then
+                        local fw_bundle_name="${rpath_rel%%/*}"
+                        if [[ -e "${frameworks_dir}/${rpath_rel}" ]]; then
+                            continue
+                        fi
+                        local fw_cand=""
+                        local fw_root
+                        for fw_root in \
+                            "${CRAFT_PREFIX}/lib" \
+                            "${CRAFT_PREFIX}/Frameworks" \
+                            "${STAGE_DIR}/lib" \
+                            "/opt/homebrew/opt/qt@6/lib" \
+                            "/opt/homebrew/lib"; do
+                            if [[ -n "${fw_root}" && -d "${fw_root}/${fw_bundle_name}" ]]; then
+                                fw_cand="${fw_root}/${fw_bundle_name}"
+                                break
+                            fi
+                        done
+                        if [[ -n "${fw_cand}" ]]; then
+                            cp -R "${fw_cand}" "${frameworks_dir}/${fw_bundle_name}"
+                            if [[ -f "${frameworks_dir}/${rpath_rel}" ]]; then
+                                chmod u+w "${frameworks_dir}/${rpath_rel}" 2>/dev/null || true
+                                install_name_tool -id "@rpath/${rpath_rel}" "${frameworks_dir}/${rpath_rel}" 2>/dev/null || true
+                                printf '%s\n' "${frameworks_dir}/${rpath_rel}" >> "${next_queue}"
+                            fi
+                        fi
+                        continue
+                    else
+                        local rpath_base
+                        rpath_base="$(basename "${rpath_rel}")"
+                        if [[ -f "${frameworks_dir}/${rpath_base}" ]]; then
+                            if [[ "${rpath_rel}" != "${rpath_base}" ]]; then
+                                install_name_tool -change "${dep}" "@rpath/${rpath_base}" "${target}" 2>/dev/null || true
+                            fi
+                            continue
+                        fi
+                        local resolved_rpath=""
+                        resolved_rpath="$(resolve_external_lib_path "${rpath_base}" || true)"
+                        if [[ -n "${resolved_rpath}" && -f "${resolved_rpath}" ]]; then
+                            cp -L -f "${resolved_rpath}" "${frameworks_dir}/${rpath_base}"
+                            chmod 755 "${frameworks_dir}/${rpath_base}"
+                            install_name_tool -id "@rpath/${rpath_base}" "${frameworks_dir}/${rpath_base}" 2>/dev/null || true
+                            printf '%s\n' "${frameworks_dir}/${rpath_base}" >> "${next_queue}"
+                            if [[ "${rpath_rel}" != "${rpath_base}" ]]; then
+                                install_name_tool -change "${dep}" "@rpath/${rpath_base}" "${target}" 2>/dev/null || true
+                            fi
+                        fi
+                        continue
+                    fi
+                fi
 
                 # Handle non-system Qt/KF6 frameworks referenced by absolute path
                 if [[ "${dep}" == *".framework/"* ]]; then
@@ -530,6 +585,11 @@ assemble_app_bundle() {
     # 5.3 Bundle staged Kdenlive/Bang On Pro share/ data, Breeze icons, MLT 7, and frei0r plugins
     if [[ -d "${STAGE_DIR}/share" ]]; then
         cp -RL "${STAGE_DIR}/share" "${resources_dir}/share"
+        for sub in kdenlive kxmlgui6 kxmlgui5 knotifications6; do
+            if [[ -d "${STAGE_DIR}/share/${sub}" ]]; then
+                copy_plugin_dir_if_exists "${STAGE_DIR}/share/${sub}" "${resources_dir}/${sub}"
+            fi
+        done
     fi
 
     # Bundle Breeze icons (directory and/or compiled .rcc icon theme)

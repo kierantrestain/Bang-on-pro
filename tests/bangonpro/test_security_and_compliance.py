@@ -383,6 +383,8 @@ def test_open_source_components_matrix_and_requirements_audit() -> None:
         "opentimelineio",
         "scenedetect",
         "pytest",
+        "pillow",
+        "pyyaml",
     }
     found_packages: set[str] = set()
     for raw_line in req_path.read_text(encoding="utf-8").splitlines():

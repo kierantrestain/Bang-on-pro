@@ -10,6 +10,7 @@
 #include <QComboBox>
 #include <QFile>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QFontDatabase>
 #include <QHBoxLayout>
 #include <QHeaderView>
@@ -20,6 +21,7 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMimeData>
+#include <QPixmap>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QSplitter>
@@ -176,11 +178,36 @@ void PremierePresetBrowser::buildUi()
     // Inspector tabs
     m_inspectorTabs = new QTabWidget(bottomPane);
 
-    m_overviewBrowser = new QTextBrowser(m_inspectorTabs);
+    auto *overviewTab = new QWidget(m_inspectorTabs);
+    auto *overviewLayout = new QVBoxLayout(overviewTab);
+    overviewLayout->setContentsMargins(2, 2, 2, 2);
+    overviewLayout->setSpacing(4);
+    m_previewImageLabel = new QLabel(QStringLiteral("Before / After Preview — Select a preset"), overviewTab);
+    m_previewImageLabel->setObjectName(QStringLiteral("presetPreviewLabel"));
+    m_previewImageLabel->setAlignment(Qt::AlignCenter);
+    m_previewImageLabel->setMinimumHeight(88);
+    m_previewImageLabel->setMaximumHeight(140);
+    m_overviewBrowser = new QTextBrowser(overviewTab);
     m_overviewBrowser->setOpenExternalLinks(false);
-    m_inspectorTabs->addTab(m_overviewBrowser, QStringLiteral("Overview & Dependencies"));
+    overviewLayout->addWidget(m_previewImageLabel);
+    overviewLayout->addWidget(m_overviewBrowser, 1);
+    m_inspectorTabs->addTab(overviewTab, QStringLiteral("Overview & Preview"));
 
     const QFont monoFont = QFontDatabase::systemFont(QFontDatabase::FixedFont);
+
+    auto *paramsTab = new QWidget(m_inspectorTabs);
+    auto *paramsLayout = new QVBoxLayout(paramsTab);
+    paramsLayout->setContentsMargins(2, 2, 2, 2);
+    paramsLayout->setSpacing(4);
+    m_paramEditorEdit = new QPlainTextEdit(paramsTab);
+    m_paramEditorEdit->setObjectName(QStringLiteral("presetParamEditor"));
+    m_paramEditorEdit->setFont(monoFont);
+    m_paramEditorEdit->setPlaceholderText(QStringLiteral("Edit MLT filter parameters & keyframe animation JSON before applying..."));
+    m_applyEditedParamsBtn = new QPushButton(QStringLiteral("Apply Edited Parameters / Keyframes"), paramsTab);
+    m_applyEditedParamsBtn->setEnabled(false);
+    paramsLayout->addWidget(m_paramEditorEdit, 1);
+    paramsLayout->addWidget(m_applyEditedParamsBtn);
+    m_inspectorTabs->addTab(paramsTab, QStringLiteral("Parameters & Keyframes"));
 
     m_kdenliveXmlEdit = new QPlainTextEdit(m_inspectorTabs);
     m_kdenliveXmlEdit->setReadOnly(true);
@@ -227,6 +254,7 @@ void PremierePresetBrowser::buildUi()
     connect(m_saveStackBtn, &QPushButton::clicked, this, &PremierePresetBrowser::onSaveCustomStackClicked);
     connect(m_applyStackBtn, &QPushButton::clicked, this, &PremierePresetBrowser::onApplyCustomStackClicked);
     connect(m_removeStackBtn, &QPushButton::clicked, this, &PremierePresetBrowser::onRemoveCustomStackClicked);
+    connect(m_applyEditedParamsBtn, &QPushButton::clicked, this, &PremierePresetBrowser::onApplyEditedParamsClicked);
 }
 
 bool PremierePresetBrowser::loadReportFile(const QString &jsonPath, QString *errorOut)
@@ -298,6 +326,9 @@ bool PremierePresetBrowser::loadReportJson(const QJsonObject &reportObj, QString
         entry.record.originalXmlPreserved = obj.value(QStringLiteral("original_xml_preserved")).toBool(true);
         entry.originalXml = obj.value(QStringLiteral("original_xml")).toString();
         entry.description = obj.value(QStringLiteral("description")).toString();
+        entry.previewBeforePath = obj.value(QStringLiteral("preview_before_path")).toString();
+        entry.previewAfterPath = obj.value(QStringLiteral("preview_after_path")).toString();
+        entry.previewSplitPath = obj.value(QStringLiteral("preview_split_path")).toString();
 
         const QJsonArray folderArr = obj.value(QStringLiteral("folder_path")).toArray();
         for (const QJsonValue &fv : folderArr) {
@@ -691,6 +722,35 @@ void PremierePresetBrowser::updateInspectorForPreset(const PresetDisplayEntry *e
 
     m_overviewBrowser->setHtml(html);
 
+    // Visual Before / After preview thumbnail
+    if (m_previewImageLabel) {
+        const QString previewPath = !entry->previewSplitPath.isEmpty()
+                                        ? entry->previewSplitPath
+                                        : (!entry->previewAfterPath.isEmpty() ? entry->previewAfterPath : entry->previewBeforePath);
+        if (!previewPath.isEmpty() && QFileInfo::exists(previewPath)) {
+            const QPixmap pix(previewPath);
+            if (!pix.isNull()) {
+                m_previewImageLabel->setPixmap(pix.scaled(360, 120, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+            } else {
+                m_previewImageLabel->setPixmap(QPixmap());
+                m_previewImageLabel->setText(QStringLiteral("Preview available at: %1").arg(previewPath));
+            }
+        } else {
+            m_previewImageLabel->setPixmap(QPixmap());
+            m_previewImageLabel->setText(QStringLiteral("%1 • %2 (%3 MLT filter(s))")
+                                             .arg(entry->record.name, statusDisplayLabel(entry->record.status))
+                                             .arg(entry->record.mltFilters.size()));
+        }
+    }
+
+    if (m_paramEditorEdit) {
+        m_paramEditorEdit->setPlainText(
+            QString::fromUtf8(QJsonDocument(entry->record.mltFilters).toJson(QJsonDocument::Indented)));
+    }
+    if (m_applyEditedParamsBtn) {
+        m_applyEditedParamsBtn->setEnabled(!entry->record.mltFilters.isEmpty());
+    }
+
     if (entry->record.kdenliveEffectXml.isEmpty()) {
         m_kdenliveXmlEdit->setPlainText(
             QStringLiteral("<!-- No Kdenlive effect XML generated (status: %1). -->").arg(compatibilityStatusToString(entry->record.status)));
@@ -719,6 +779,91 @@ void PremierePresetBrowser::refreshCustomStacksList()
             QStringLiteral("%1 (%2 presets, %3 MLT filters)").arg(stack.name).arg(stack.presetIds.size()).arg(stack.combinedMltFilters.size());
         auto *item = new QListWidgetItem(label, m_customStacksList);
         item->setData(Qt::UserRole, stack.name);
+    }
+}
+
+bool PremierePresetBrowser::saveUserState(const QString &jsonPath) const
+{
+    QJsonObject root;
+    QJsonArray favs;
+    for (const QString &fid : favoritePresetIds()) {
+        favs.append(fid);
+    }
+    root.insert(QStringLiteral("favorites"), favs);
+
+    QJsonArray stacks;
+    for (const CustomEffectStack &st : m_customStacks) {
+        QJsonObject sObj;
+        sObj.insert(QStringLiteral("name"), st.name);
+        QJsonArray pids;
+        for (const QString &pid : st.presetIds) {
+            pids.append(pid);
+        }
+        sObj.insert(QStringLiteral("preset_ids"), pids);
+        sObj.insert(QStringLiteral("combined_mlt_filters"), st.combinedMltFilters);
+        stacks.append(sObj);
+    }
+    root.insert(QStringLiteral("custom_stacks"), stacks);
+
+    QFile f(jsonPath);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        return false;
+    }
+    f.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+    return true;
+}
+
+bool PremierePresetBrowser::loadUserState(const QString &jsonPath)
+{
+    QFile f(jsonPath);
+    if (!f.open(QIODevice::ReadOnly)) {
+        return false;
+    }
+    QJsonParseError err{};
+    const QJsonDocument doc = QJsonDocument::fromJson(f.readAll(), &err);
+    if (err.error != QJsonParseError::NoError || !doc.isObject()) {
+        return false;
+    }
+    const QJsonObject root = doc.object();
+    m_favorites.clear();
+    for (const QJsonValue &fv : root.value(QStringLiteral("favorites")).toArray()) {
+        const QString fid = fv.toString().trimmed();
+        if (!fid.isEmpty()) {
+            m_favorites.insert(fid);
+        }
+    }
+    m_customStacks.clear();
+    for (const QJsonValue &sv : root.value(QStringLiteral("custom_stacks")).toArray()) {
+        const QJsonObject so = sv.toObject();
+        CustomEffectStack st;
+        st.name = so.value(QStringLiteral("name")).toString().trimmed();
+        for (const QJsonValue &pv : so.value(QStringLiteral("preset_ids")).toArray()) {
+            st.presetIds.append(pv.toString());
+        }
+        st.combinedMltFilters = so.value(QStringLiteral("combined_mlt_filters")).toArray();
+        if (!st.name.isEmpty()) {
+            m_customStacks.append(st);
+        }
+    }
+    refreshCustomStacksList();
+    refreshView();
+    return true;
+}
+
+void PremierePresetBrowser::onApplyEditedParamsClicked()
+{
+    const QString pid = selectedPresetId();
+    if (pid.isEmpty() || !m_paramEditorEdit) {
+        return;
+    }
+    QJsonParseError pe{};
+    const QJsonDocument doc = QJsonDocument::fromJson(m_paramEditorEdit->toPlainText().toUtf8(), &pe);
+    if (pe.error != QJsonParseError::NoError || !doc.isArray()) {
+        return;
+    }
+    const QJsonArray editedFilters = doc.array();
+    if (!editedFilters.isEmpty()) {
+        Q_EMIT applyPresetRequested(pid, editedFilters);
     }
 }
 

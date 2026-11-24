@@ -251,7 +251,7 @@ def render_mlt_xml(
     mlt_xml: str,
     output_path: Union[str, Path],
     work_dir: Path,
-    timeout_sec: int = 45,
+    timeout_sec: int = 90,
 ) -> Path:
     """Execute `melt` headless to render an MLT XML graph into a lossless Matroska file."""
     out = Path(output_path)

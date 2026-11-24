@@ -542,6 +542,73 @@ def run_technical_qc(state: ProjectAnalysisState) -> QCReport:
                 )
             )
 
+    # Per-camera microphone level consistency analysis & automatic gain staging
+    cam_rms_db: dict[str, float] = {}
+    for cam_id, pcm in (state.audio_pcm_cache or {}).items():
+        arr = np.asarray(pcm, dtype=np.float32)
+        if arr.size > 0:
+            active = arr[np.abs(arr) > 1e-4]
+            if active.size > 0:
+                rms_val = float(np.sqrt(np.mean(active * active) + 1e-18))
+                cam_rms_db[cam_id] = round(20.0 * float(np.log10(rms_val + 1e-12)), 2)
+
+    per_cam_trim_db: dict[str, float] = {}
+    if len(cam_rms_db) >= 2:
+        median_db = float(np.median(list(cam_rms_db.values())))
+        spread_db = max(cam_rms_db.values()) - min(cam_rms_db.values())
+        metrics["mic_level_spread_db"] = round(spread_db, 2)
+        metrics["per_camera_rms_db"] = dict(cam_rms_db)
+        if spread_db >= 4.0:
+            issues.append(
+                QCIssue(
+                    code="MIC_LEVEL_INCONSISTENCY_CORRECTED",
+                    severity="warning",
+                    message=(
+                        f"Source microphones varied by {spread_db:.1f} dB; applied automatic "
+                        f"per-camera gain staging toward {median_db:.1f} dBFS median before mastering."
+                    ),
+                )
+            )
+        for cam_id, rms_db in cam_rms_db.items():
+            delta = max(-24.0, min(24.0, round(median_db - rms_db, 2)))
+            if abs(delta) >= 2.5:
+                per_cam_trim_db[cam_id] = delta
+    state.metadata["per_camera_gain_trim_db"] = per_cam_trim_db
+
+    # Mixed frame-rate & missing-media QC metrics
+    source_fps_map = {cam_id: round(asset.fps, 4) for cam_id, asset in state.media_assets.items()}
+    unique_fps = {round(f, 2) for f in source_fps_map.values()}
+    metrics["sequence_fps"] = round(state.fps, 4)
+    metrics["source_frame_rates"] = source_fps_map
+    metrics["mixed_frame_rates_normalized"] = len(unique_fps) > 1 or any(
+        abs(f - state.fps) > 0.05 for f in source_fps_map.values()
+    )
+    if metrics["mixed_frame_rates_normalized"]:
+        issues.append(
+            QCIssue(
+                code="MIXED_FRAME_RATES_NORMALIZED",
+                severity="warning",
+                message=(
+                    f"Normalized mixed source frame rates {source_fps_map} into "
+                    f"{state.fps:.3f} fps sequence timebase."
+                ),
+            )
+        )
+
+    missing_media = list(getattr(state, "missing_media", []) or [])
+    metrics["missing_media_count"] = len(missing_media)
+    for mm in missing_media:
+        issues.append(
+            QCIssue(
+                code="MISSING_MEDIA_SKIPPED",
+                severity="warning",
+                message=(
+                    f"Offline/missing media skipped for camera '{mm.get('camera_id', 'unknown')}': "
+                    f"{mm.get('file_path', '')} ({mm.get('reason', 'missing')})"
+                ),
+            )
+        )
+
     has_error = any(i.severity == "error" for i in issues)
     return QCReport(passed=not has_error, issues=issues, metrics=metrics)
 
@@ -641,6 +708,31 @@ def run_audio_graphics_qc_agent(
             confidence=0.98,
             rationale=flt.rationale,
         )
+
+    # Emit per-clip gain trims when microphones had inconsistent input levels
+    per_cam_trim_db = state.metadata.get("per_camera_gain_trim_db", {})
+    if per_cam_trim_db:
+        for shot in state.rough_cut_shots:
+            src_cam = shot.camera_id
+            # Match audio source camera if available
+            for cid, asset in state.media_assets.items():
+                if asset.media_ref == shot.audio_media_ref:
+                    src_cam = cid
+                    break
+            trim_db = per_cam_trim_db.get(src_cam)
+            if trim_db is not None and abs(trim_db) >= 2.5:
+                builder.add_operation(
+                    "set_audio_level",
+                    clip_id=f"{shot.shot_id}_a",
+                    track_id="A1",
+                    params={
+                        "gain_db": float(trim_db),
+                        "camera_id": src_cam,
+                        "level_matching": True,
+                    },
+                    confidence=0.92,
+                    rationale=f"Level-match microphone '{src_cam}' by {trim_db:+.1f} dB prior to master loudnorm",
+                )
 
     builder.add_operation(
         "set_audio_level",

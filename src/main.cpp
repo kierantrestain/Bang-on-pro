@@ -23,6 +23,7 @@ SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
 
 #include <kiconthemes_version.h>
 
+#include "bangonpro/ui/BangOnProTheme.h"
 #include <KAboutData>
 #include <KConfigGroup>
 #ifdef USE_DRMINGW
@@ -268,6 +269,49 @@ int main(int argc, char *argv[])
 
     QApplication app(argc, argv);
 
+#ifdef Q_OS_MACOS
+    // Self-contained macOS .app bundle runtime bootstrap (zero manual terminal setup required)
+    {
+        const QString appDir = QCoreApplication::applicationDirPath();
+        const QString contentsDir = QDir(appDir + QStringLiteral("/..")).canonicalPath();
+        const QString pluginsDir = contentsDir + QStringLiteral("/PlugIns");
+        const QString resourcesDir = contentsDir + QStringLiteral("/Resources");
+        if (QDir(pluginsDir + QStringLiteral("/mlt-7")).exists() && qEnvironmentVariableIsEmpty("MLT_REPOSITORY")) {
+            qputenv("MLT_REPOSITORY", (pluginsDir + QStringLiteral("/mlt-7")).toUtf8());
+        }
+        if (QDir(resourcesDir + QStringLiteral("/mlt-7")).exists()) {
+            if (qEnvironmentVariableIsEmpty("MLT_DATA")) {
+                qputenv("MLT_DATA", (resourcesDir + QStringLiteral("/mlt-7")).toUtf8());
+            }
+            if (qEnvironmentVariableIsEmpty("MLT_PROFILES_PATH")) {
+                qputenv("MLT_PROFILES_PATH", (resourcesDir + QStringLiteral("/mlt-7/profiles")).toUtf8());
+            }
+            if (qEnvironmentVariableIsEmpty("MLT_PRESETS_PATH")) {
+                qputenv("MLT_PRESETS_PATH", (resourcesDir + QStringLiteral("/mlt-7/presets")).toUtf8());
+            }
+        }
+        if (QDir(pluginsDir + QStringLiteral("/frei0r-1")).exists() && qEnvironmentVariableIsEmpty("FREI0R_PATH")) {
+            qputenv("FREI0R_PATH", (pluginsDir + QStringLiteral("/frei0r-1")).toUtf8());
+        }
+        if (QFileInfo::exists(resourcesDir + QStringLiteral("/bangonpro/__init__.py")) && qEnvironmentVariableIsEmpty("BANGONPRO_PYTHONPATH")) {
+            qputenv("BANGONPRO_PYTHONPATH", resourcesDir.toUtf8());
+        }
+        const QString bundledPy = resourcesDir + QStringLiteral("/python-env/bin/python3");
+        if (QFileInfo::exists(bundledPy) && qEnvironmentVariableIsEmpty("BANGONPRO_PYTHON")) {
+            qputenv("BANGONPRO_PYTHON", bundledPy.toUtf8());
+        }
+        if (QDir(resourcesDir + QStringLiteral("/share")).exists()) {
+            const QString existingXdg = qEnvironmentVariable("XDG_DATA_DIRS");
+            const QString shareDir = resourcesDir + QStringLiteral("/share");
+            qputenv("XDG_DATA_DIRS", (existingXdg.isEmpty() ? shareDir : shareDir + QLatin1Char(':') + existingXdg).toUtf8());
+        }
+        const QString curPath = qEnvironmentVariable("PATH");
+        if (!curPath.startsWith(appDir)) {
+            qputenv("PATH", (appDir + QLatin1Char(':') + curPath).toUtf8());
+        }
+    }
+#endif
+
     // Default to org.kde.desktop style unless the user forces another style
     if (qEnvironmentVariableIsEmpty("QT_QUICK_CONTROLS_STYLE")) {
         QQuickStyle::setStyle(QStringLiteral("org.kde.desktop"));
@@ -277,6 +321,9 @@ int main(int argc, char *argv[])
     // trigger initialisation of proper application style
     KStyleManager::initStyle();
 #endif
+
+    // Apply Bang On Pro Studio Dark Theme globally across all native widgets & docks
+    BangOnPro::applyBangOnProTheme(&app);
 
     // Try to detect package type
     LinuxPackageType packageType = getPackageType();
@@ -305,8 +352,8 @@ int main(int argc, char *argv[])
     qApp->processEvents(QEventLoop::AllEvents);
 
     // Create KAboutData
-    QString otherText = i18n("Please report bugs to <a href=\"%1\">%2</a>", QStringLiteral("https://bugs.kde.org/enter_bug.cgi?product=kdenlive"),
-                             QStringLiteral("https://bugs.kde.org/"));
+    QString otherText = i18n("Please report bugs to <a href=\"%1\">%2</a>", QStringLiteral("https://github.com/kierantrestain/Bang-on-pro/issues"),
+                             QStringLiteral("https://github.com/kierantrestain/Bang-on-pro"));
 
     switch (packageType) {
     case LinuxPackageType::AppImage:
@@ -322,10 +369,11 @@ int main(int argc, char *argv[])
         break;
     }
 
-    KAboutData aboutData(QByteArray("kdenlive"), i18n("Bang On Pro"), KDENLIVE_VERSION, i18n("AI-Native Professional Video Editor built on Kdenlive & MLT."),
-                         KAboutLicense::GPL_V3, i18n("Copyright © 2026 Bang On Pro Contributors; Built on Kdenlive (Copyright © 2007–2024 Kdenlive authors)"),
-                         otherText, QStringLiteral("https://github.com/kierantrestain/Bang-on-pro"));
-    aboutData.addAuthor(i18n("Bang On Pro Contributors"), i18n("AI Timeline API, Premiere Compatibility Engine, Autonomous Workflows & macOS Optimization"),
+    KAboutData aboutData(QByteArray("kdenlive"), i18n("Bang On Pro"), QStringLiteral("1.0.0 (Kdenlive %1)").arg(QStringLiteral(KDENLIVE_VERSION)),
+                         i18n("AI-Native Professional Video Editor built on Kdenlive & MLT."), KAboutLicense::GPL_V3,
+                         i18n("Copyright © 2026 Bang On Pro Contributors; Built on Kdenlive (Copyright © 2007–2024 Kdenlive authors)"), otherText,
+                         QStringLiteral("https://github.com/kierantrestain/Bang-on-pro"));
+    aboutData.addAuthor(i18n("Bang On Pro Contributors"), i18n("AI Timeline API, Premiere Compatibility Engine, Rotoscoping, Studio UI & Apple Silicon Optimization"),
                         QString(), QStringLiteral("https://github.com/kierantrestain/Bang-on-pro"));
     // main developers (alphabetical)
     aboutData.addAuthor(i18n("Jean-Baptiste Mardelle"), i18n("MLT and KDE SC 4 / KF5 port, main developer and maintainer"), QStringLiteral("jb@kdenlive.org"));
@@ -345,6 +393,8 @@ int main(int argc, char *argv[])
     aboutData.addCredit(i18n("Nara Oliveira"), i18n("Logo"));
     aboutData.addCredit(i18n("Bruno Santos"), i18n("Testing"));
     aboutData.addCredit(i18n("Massimo Stella"), i18n("Expert advice, testing"));
+    aboutData.addCredit(i18n("ArtCraft Team (storytold/artcraft)"), i18n("Selectively adapted 2D canvas, mask normalization & storyboard concepts (MIT / Apache-2.0)"),
+                        QString(), QStringLiteral("https://github.com/storytold/artcraft"));
 
     aboutData.setTranslator(i18n("NAME OF TRANSLATORS"), i18n("EMAIL OF TRANSLATORS"));
     aboutData.setOrganizationDomain(QByteArray("kde.org"));
