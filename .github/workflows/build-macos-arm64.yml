@@ -192,10 +192,21 @@ jobs:
             echo "notarization_configured=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Restore macOS arm64 ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-macos15-arm64-qt6-${{ github.ref_name }}-${{ hashFiles('CMakeLists.txt', 'src/CMakeLists.txt') }}
+          restore-keys: |
+            ccache-macos15-arm64-qt6-${{ github.ref_name }}-
+            ccache-macos15-arm64-qt6-
+
       - name: Build, Relocate, Sign, Package BangOnPro-arm64.dmg & Smoke-Test
         env:
           INPUT_BUILD_MODE: ${{ inputs.build_mode || 'craft' }}
           APP_VERSION: ${{ steps.version.outputs.app_version }}
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+          CCACHE_MAXSIZE: 2G
         run: |
           chmod +x packaging/macos/build_macos_arm64.sh packaging/macos/bootstrap_ai_runtime.sh
           ./packaging/macos/build_macos_arm64.sh \
@@ -203,22 +214,26 @@ jobs:
             --craft-root "${CRAFT_PREFIX}" \
             --version "${APP_VERSION}" \
             --output-dir dist/macos-arm64
+          ccache --show-stats || true
 
       - name: Run Python QA, security & Apple Silicon performance checks on macOS arm64
         run: |
-          BUNDLED_PY="dist/macos-arm64/Bang On Pro.app/Contents/Resources/python-env/bin/python3"
+          APP_ABS="${PWD}/dist/macos-arm64/Bang On Pro.app"
+          BUNDLED_PY="${APP_ABS}/Contents/Resources/python-env/bin/python3"
           if [[ -x "${BUNDLED_PY}" ]]; then
-            PATH="dist/macos-arm64/Bang On Pro.app/Contents/MacOS:${CRAFT_PREFIX}/bin:${PATH}" \
-            MLT_REPOSITORY="dist/macos-arm64/Bang On Pro.app/Contents/PlugIns/mlt-7" \
-            MLT_DATA="dist/macos-arm64/Bang On Pro.app/Contents/Resources/mlt-7" \
+            PATH="${APP_ABS}/Contents/MacOS:${CRAFT_PREFIX}/bin:${PATH}" \
+            MLT_REPOSITORY="${APP_ABS}/Contents/PlugIns/mlt" \
+            MLT_DATA="${APP_ABS}/Contents/Resources/mlt" \
+            FREI0R_PATH="${APP_ABS}/Contents/PlugIns/frei0r-1" \
               "${BUNDLED_PY}" -m pytest -v \
               tests/bangonpro/test_security_and_compliance.py \
               tests/bangonpro/test_project_integrity.py \
               tests/bangonpro/test_macos_perf.py
             mkdir -p dist/macos-arm64/benchmarks
-            PATH="dist/macos-arm64/Bang On Pro.app/Contents/MacOS:${CRAFT_PREFIX}/bin:${PATH}" \
-            MLT_REPOSITORY="dist/macos-arm64/Bang On Pro.app/Contents/PlugIns/mlt-7" \
-            MLT_DATA="dist/macos-arm64/Bang On Pro.app/Contents/Resources/mlt-7" \
+            PATH="${APP_ABS}/Contents/MacOS:${CRAFT_PREFIX}/bin:${PATH}" \
+            MLT_REPOSITORY="${APP_ABS}/Contents/PlugIns/mlt" \
+            MLT_DATA="${APP_ABS}/Contents/Resources/mlt" \
+            FREI0R_PATH="${APP_ABS}/Contents/PlugIns/frei0r-1" \
               "${BUNDLED_PY}" -m bangonpro.macos.benchmark \
               --comprehensive \
               --duration 1.5 \

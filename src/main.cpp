@@ -276,18 +276,24 @@ int main(int argc, char *argv[])
         const QString contentsDir = QDir(appDir + QStringLiteral("/..")).canonicalPath();
         const QString pluginsDir = contentsDir + QStringLiteral("/PlugIns");
         const QString resourcesDir = contentsDir + QStringLiteral("/Resources");
-        if (QDir(pluginsDir + QStringLiteral("/mlt-7")).exists() && qEnvironmentVariableIsEmpty("MLT_REPOSITORY")) {
-            qputenv("MLT_REPOSITORY", (pluginsDir + QStringLiteral("/mlt-7")).toUtf8());
+        const QString mltPlugDir = QDir(pluginsDir + QStringLiteral("/mlt")).exists()
+                                       ? (pluginsDir + QStringLiteral("/mlt"))
+                                       : (pluginsDir + QStringLiteral("/mlt-7"));
+        if (QDir(mltPlugDir).exists() && qEnvironmentVariableIsEmpty("MLT_REPOSITORY")) {
+            qputenv("MLT_REPOSITORY", mltPlugDir.toUtf8());
         }
-        if (QDir(resourcesDir + QStringLiteral("/mlt-7")).exists()) {
+        const QString mltResDir = QDir(resourcesDir + QStringLiteral("/mlt")).exists()
+                                      ? (resourcesDir + QStringLiteral("/mlt"))
+                                      : (resourcesDir + QStringLiteral("/mlt-7"));
+        if (QDir(mltResDir).exists()) {
             if (qEnvironmentVariableIsEmpty("MLT_DATA")) {
-                qputenv("MLT_DATA", (resourcesDir + QStringLiteral("/mlt-7")).toUtf8());
+                qputenv("MLT_DATA", mltResDir.toUtf8());
             }
             if (qEnvironmentVariableIsEmpty("MLT_PROFILES_PATH")) {
-                qputenv("MLT_PROFILES_PATH", (resourcesDir + QStringLiteral("/mlt-7/profiles")).toUtf8());
+                qputenv("MLT_PROFILES_PATH", (mltResDir + QStringLiteral("/profiles")).toUtf8());
             }
             if (qEnvironmentVariableIsEmpty("MLT_PRESETS_PATH")) {
-                qputenv("MLT_PRESETS_PATH", (resourcesDir + QStringLiteral("/mlt-7/presets")).toUtf8());
+                qputenv("MLT_PRESETS_PATH", (mltResDir + QStringLiteral("/presets")).toUtf8());
             }
         }
         if (QDir(pluginsDir + QStringLiteral("/frei0r-1")).exists() && qEnvironmentVariableIsEmpty("FREI0R_PATH")) {

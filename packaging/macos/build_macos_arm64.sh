@@ -634,40 +634,71 @@ assemble_app_bundle() {
         fi
     done
 
-    # Bundle MLT 7 modules -> Contents/PlugIns/mlt-7/ and data/profiles/presets -> Contents/Resources/mlt-7/
+    # Bundle MLT 7 modules -> Contents/PlugIns/mlt/ (Craft relocatable macOS default) and data -> Contents/Resources/mlt/
     local mlt_mod_dir mlt_data_dir
     mlt_mod_dir="$(pkg-config --variable=moduledir mlt-framework-7 2>/dev/null || true)"
     mlt_data_dir="$(pkg-config --variable=mltdatadir mlt-framework-7 2>/dev/null || true)"
     if [[ -z "${mlt_mod_dir}" || ! -d "${mlt_mod_dir}" ]]; then
-        for cand in "${CRAFT_PREFIX}/lib/mlt-7" "/opt/homebrew/lib/mlt-7"; do
-            [[ -d "${cand}" ]] && mlt_mod_dir="${cand}" && break
+        for cand in \
+            "${CRAFT_PREFIX}/lib/mlt" \
+            "${CRAFT_PREFIX}/lib/mlt-7" \
+            "${CRAFT_PREFIX}/plugins/mlt" \
+            "${CRAFT_PREFIX}/PlugIns/mlt" \
+            "/opt/homebrew/lib/mlt-7" \
+            "/opt/homebrew/lib/mlt"; do
+            if [[ -d "${cand}" ]] && ls "${cand}"/libmlt* >/dev/null 2>&1; then
+                mlt_mod_dir="${cand}"
+                break
+            fi
         done
     fi
+    if [[ -z "${mlt_mod_dir}" || ! -d "${mlt_mod_dir}" ]] && [[ -n "${CRAFT_PREFIX}" && -d "${CRAFT_PREFIX}" ]]; then
+        local found_avfmt
+        found_avfmt="$(find "${CRAFT_PREFIX}" -maxdepth 5 -type f -name 'libmltavformat*' 2>/dev/null | head -n 1 || true)"
+        if [[ -n "${found_avfmt}" ]]; then
+            mlt_mod_dir="$(dirname "${found_avfmt}")"
+        fi
+    fi
     if [[ -z "${mlt_data_dir}" || ! -d "${mlt_data_dir}" ]]; then
-        for cand in "${CRAFT_PREFIX}/share/mlt-7" "/opt/homebrew/share/mlt-7"; do
+        for cand in \
+            "${CRAFT_PREFIX}/share/mlt" \
+            "${CRAFT_PREFIX}/share/mlt-7" \
+            "${CRAFT_PREFIX}/Resources/mlt" \
+            "/opt/homebrew/share/mlt-7" \
+            "/opt/homebrew/share/mlt"; do
             [[ -d "${cand}" ]] && mlt_data_dir="${cand}" && break
         done
     fi
     if [[ -n "${mlt_mod_dir}" && -d "${mlt_mod_dir}" ]]; then
-        log "Bundling MLT 7 modules from ${mlt_mod_dir}..."
-        copy_plugin_dir_if_exists "${mlt_mod_dir}" "${plugins_dir}/mlt-7"
+        log "Bundling MLT 7 modules from ${mlt_mod_dir} -> Contents/PlugIns/mlt/..."
+        copy_plugin_dir_if_exists "${mlt_mod_dir}" "${plugins_dir}/mlt"
     else
-        warn "MLT 7 modules directory not found; bundled melt may have limited plugins."
+        die "MLT 7 modules directory not found in ${CRAFT_PREFIX} or /opt/homebrew (libmltavformat missing)."
     fi
     if [[ -n "${mlt_data_dir}" && -d "${mlt_data_dir}" ]]; then
-        log "Bundling MLT 7 profiles & presets from ${mlt_data_dir}..."
-        copy_plugin_dir_if_exists "${mlt_data_dir}" "${resources_dir}/mlt-7"
+        log "Bundling MLT 7 profiles & presets from ${mlt_data_dir} -> Contents/Resources/mlt/..."
+        copy_plugin_dir_if_exists "${mlt_data_dir}" "${resources_dir}/mlt"
+    else
+        warn "MLT 7 data directory not found; profiles may be incomplete."
     fi
 
     # Bundle frei0r plugins -> Contents/PlugIns/frei0r-1/
     local frei0r_dir=""
     local cand
-    for cand in "${CRAFT_PREFIX}/lib/frei0r-1" "/opt/homebrew/lib/frei0r-1" "/usr/local/lib/frei0r-1"; do
+    for cand in \
+        "${CRAFT_PREFIX}/lib/frei0r-1" \
+        "${CRAFT_PREFIX}/plugins/frei0r-1" \
+        "${CRAFT_PREFIX}/PlugIns/frei0r-1" \
+        "/opt/homebrew/lib/frei0r-1" \
+        "/usr/local/lib/frei0r-1"; do
         if [[ -d "${cand}" ]]; then
             frei0r_dir="${cand}"
             break
         fi
     done
+    if [[ -z "${frei0r_dir}" && -n "${CRAFT_PREFIX}" && -d "${CRAFT_PREFIX}" ]]; then
+        frei0r_dir="$(find "${CRAFT_PREFIX}" -maxdepth 5 -type d -name 'frei0r-1' 2>/dev/null | head -n 1 || true)"
+    fi
     if [[ -n "${frei0r_dir}" ]]; then
         log "Bundling frei0r plugins from ${frei0r_dir}..."
         copy_plugin_dir_if_exists "${frei0r_dir}" "${plugins_dir}/frei0r-1"
@@ -1007,22 +1038,30 @@ run_smoke_verification() {
         fi
         echo ""
         echo "--- Headless Launch Smoke Test (--version) ---"
-        MLT_REPOSITORY="${app_bundle}/Contents/PlugIns/mlt-7" \
-        MLT_DATA="${app_bundle}/Contents/Resources/mlt-7" \
-        FREI0R_PATH="${app_bundle}/Contents/PlugIns/frei0r-1" \
+        local abs_bundle
+        abs_bundle="$(cd "$(dirname "${app_bundle}")" && pwd)/$(basename "${app_bundle}")"
+        MLT_REPOSITORY="${abs_bundle}/Contents/PlugIns/mlt" \
+        MLT_DATA="${abs_bundle}/Contents/Resources/mlt" \
+        FREI0R_PATH="${abs_bundle}/Contents/PlugIns/frei0r-1" \
         QT_QPA_PLATFORM=offscreen \
-            "${app_bundle}/Contents/MacOS/${APP_NAME}" --version 2>&1
+            "${abs_bundle}/Contents/MacOS/${APP_NAME}" --version 2>&1
         echo ""
         echo "--- Bundled Media Stack (MLT 7 + FFmpeg VideoToolbox) ---"
-        if [[ -x "${app_bundle}/Contents/MacOS/melt" ]]; then
-            MLT_REPOSITORY="${app_bundle}/Contents/PlugIns/mlt-7" \
-            MLT_DATA="${app_bundle}/Contents/Resources/mlt-7" \
-            FREI0R_PATH="${app_bundle}/Contents/PlugIns/frei0r-1" \
-                "${app_bundle}/Contents/MacOS/melt" --version 2>&1 | head -n 3
+        if [[ -x "${abs_bundle}/Contents/MacOS/melt" ]]; then
+            MLT_REPOSITORY="${abs_bundle}/Contents/PlugIns/mlt" \
+            MLT_DATA="${abs_bundle}/Contents/Resources/mlt" \
+            FREI0R_PATH="${abs_bundle}/Contents/PlugIns/frei0r-1" \
+                "${abs_bundle}/Contents/MacOS/melt" --version 2>&1 | head -n 3
+            MLT_REPOSITORY="${abs_bundle}/Contents/PlugIns/mlt" \
+            MLT_DATA="${abs_bundle}/Contents/Resources/mlt" \
+            FREI0R_PATH="${abs_bundle}/Contents/PlugIns/frei0r-1" \
+                "${abs_bundle}/Contents/MacOS/melt" -query producers 2>&1 | grep -q "avformat" \
+                && echo "PASS: Bundled melt loaded avformat producer from Contents/PlugIns/mlt" \
+                || die "Bundled melt failed to load avformat producer from Contents/PlugIns/mlt"
         fi
-        if [[ -x "${app_bundle}/Contents/MacOS/ffmpeg" ]]; then
-            "${app_bundle}/Contents/MacOS/ffmpeg" -version 2>&1 | head -n 2
-            "${app_bundle}/Contents/MacOS/ffmpeg" -hide_banner -hwaccels 2>&1
+        if [[ -x "${abs_bundle}/Contents/MacOS/ffmpeg" ]]; then
+            "${abs_bundle}/Contents/MacOS/ffmpeg" -version 2>&1 | head -n 2
+            "${abs_bundle}/Contents/MacOS/ffmpeg" -hide_banner -hwaccels 2>&1
         fi
         echo ""
         echo "--- Bundled Self-Contained Python AI Engine CLI Smoke Test ---"
