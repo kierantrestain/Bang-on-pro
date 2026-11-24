@@ -1,0 +1,305 @@
+{
+  "schema_version": "1.0",
+  "base_commit": "1f7e2df8e3e797638e966ece5559a30e084c2041",
+  "cppcheck": {
+    "files_checked": 332,
+    "total_findings": 328,
+    "by_severity": {
+      "warning": 144,
+      "performance": 152,
+      "style": 24,
+      "error": 7,
+      "portability": 1
+    },
+    "by_origin": {
+      "upstream_kdenlive": 327,
+      "bangonpro": 1
+    },
+    "top_ids": {
+      "passedByValue": 115,
+      "uninitMemberVar": 76,
+      "ignoredReturnValue": 28,
+      "virtualCallInConstructor": 23,
+      "postfixOperator": 19,
+      "duplInheritedMember": 16,
+      "iterateByValue": 9,
+      "uninitMemberVarPrivate": 9,
+      "nullPointerRedundantCheck": 8,
+      "useInitializationList": 5,
+      "passedByValueCallback": 3,
+      "uninitStructMember": 2,
+      "preprocessorErrorDirective": 2,
+      "nullPointer": 2,
+      "publicAllocationError": 2,
+      "internalAstError": 2,
+      "stlFindInsert": 1,
+      "invalidPointerCast": 1,
+      "derefInvalidIterator": 1,
+      "duplicateExpression": 1
+    },
+    "bangonpro_findings": [
+      {
+        "id": "passedByValue",
+        "severity": "performance",
+        "file": "src/bangonpro/effects_browser/PremierePresetBrowser.cpp",
+        "line": 73,
+        "msg": "Function parameter 'items' should be passed by const reference.",
+        "origin": "bangonpro"
+      }
+    ],
+    "upstream_high_signal_findings": [
+      {
+        "id": "nullPointerRedundantCheck",
+        "severity": "warning",
+        "file": "src/abstractmodel/abstracttreemodel.cpp",
+        "line": 204,
+        "msg": "Either the condition '!rootItem' is redundant or there is possible null pointer dereference: rootItem.",
+        "origin": "upstream_kdenlive"
+      },
+      {
+        "id": "nullPointerRedundantCheck",
+        "severity": "warning",
+        "file": "src/audiomixer/mixerwidget.cpp",
+        "line": 317,
+        "msg": "Either the condition 'showEffects' is redundant or there is possible null pointer dereference: showEffects.",
+        "origin": "upstream_kdenlive"
+      },
+      {
+        "id": "nullPointerRedundantCheck",
+        "severity": "warning",
+        "file": "src/audiomixer/mixerwidget.cpp",
+        "line": 318,
+        "msg": "Either the condition 'showEffects' is redundant or there is possible null pointer dereference: showEffects.",
+        "origin": "upstream_kdenlive"
+      },
+      {
+        "id": "uninitStructMember",
+        "severity": "error",
+        "file": "src/bin/projectclip.cpp",
+        "line": 1313,
+        "msg": "Uninitialized struct member: remapInfo.pitchShift",
+        "origin": "upstream_kdenlive"
+      },
+      {
+        "id": "uninitStructMember",
+        "severity": "error",
+        "file": "src/bin/projectclip.cpp",
+        "line": 1332,
+        "msg": "Uninitialized struct member: remapInfo.pitchShift",
+        "origin": "upstream_kdenlive"
+      },
+      {
+        "id": "preprocessorErrorDirective",
+        "severity": "error",
+        "file": "src/monitor/glwidget.cpp",
+        "line": 44,
+        "msg": "#error GL_UNPACK_ROW_LENGTH undefined",
+        "origin": "upstream_kdenlive"
+      },
+      {
+        "id": "nullPointer",
+        "severity": "warning",
+        "file": "src/monitor/monitor.cpp",
+        "line": 1912,
+        "msg": "Possible null pointer dereference: m_controller",
+        "origin": "upstream_kdenlive"
+      },
+      {
+        "id": "nullPointer",
+        "severity": "warning",
+        "file": "src/monitor/monitor.cpp",
+        "line": 1913,
+        "msg": "Possible null pointer dereference: m_controller",
+        "origin": "upstream_kdenlive"
+      },
+      {
+        "id": "nullPointerRedundantCheck",
+        "severity": "warning",
+        "file": "src/monitor/monitorproxy.cpp",
+        "line": 346,
+        "msg": "Either the condition 'tmpProd' is redundant or there is possible null pointer dereference: tmpProd.",
+        "origin": "upstream_kdenlive"
+      },
+      {
+        "id": "preprocessorErrorDirective",
+        "severity": "error",
+        "file": "src/monitor/videowidget.cpp",
+        "line": 48,
+        "msg": "#error GL_UNPACK_ROW_LENGTH undefined",
+        "origin": "upstream_kdenlive"
+      },
+      {
+        "id": "internalAstError",
+        "severity": "error",
+        "file": "src/renderpresets/renderpresetrepository.cpp",
+        "line": 270,
+        "msg": "Syntax Error: AST broken, 'm_profiles' doesn't have a parent.",
+        "origin": "upstream_kdenlive"
+      },
+      {
+        "id": "internalAstError",
+        "severity": "error",
+        "file": "src/timeline2/model/groupsmodel.cpp",
+        "line": 728,
+        "msg": "Syntax Error: AST broken, 'mapping' doesn't have a parent.",
+        "origin": "upstream_kdenlive"
+      },
+      {
+        "id": "nullPointerRedundantCheck",
+        "severity": "warning",
+        "file": "src/timeline2/model/clipmodel.cpp",
+        "line": 44,
+        "msg": "Either the condition 'binClip' is redundant or there is possible null pointer dereference: binClip.",
+        "origin": "upstream_kdenlive"
+      },
+      {
+        "id": "nullPointerRedundantCheck",
+        "severity": "warning",
+        "file": "src/timeline2/model/clipmodel.cpp",
+        "line": 45,
+        "msg": "Either the condition 'binClip' is redundant or there is possible null pointer dereference: binClip.",
+        "origin": "upstream_kdenlive"
+      },
+      {
+        "id": "nullPointerRedundantCheck",
+        "severity": "warning",
+        "file": "src/timeline2/model/clipmodel.cpp",
+        "line": 46,
+        "msg": "Either the condition 'binClip' is redundant or there is possible null pointer dereference: binClip.",
+        "origin": "upstream_kdenlive"
+      },
+      {
+        "id": "nullPointerRedundantCheck",
+        "severity": "warning",
+        "file": "src/titler/graphicsscenerectmove.cpp",
+        "line": 769,
+        "msg": "Either the condition 'g!=nullptr' is redundant or there is possible null pointer dereference: g.",
+        "origin": "upstream_kdenlive"
+      },
+      {
+        "id": "mismatchingContainers",
+        "severity": "error",
+        "file": "src/timeline2/model/timelinemodel.cpp",
+        "line": 469,
+        "msg": "Iterators of different containers 'm_allTracks' and 'm_iteratorTable' are used together.",
+        "origin": "upstream_kdenlive"
+      }
+    ]
+  },
+  "ruff": {
+    "total_findings": 723,
+    "by_code": {
+      "UP006": 328,
+      "RUF046": 117,
+      "UP045": 86,
+      "UP035": 56,
+      "I001": 19,
+      "UP007": 18,
+      "UP017": 13,
+      "ISC004": 13,
+      "F401": 11,
+      "PLW1510": 9,
+      "TRY004": 7,
+      "S110": 6,
+      "BLE001": 6,
+      "SIM102": 5,
+      "UP037": 4,
+      "RUF007": 3,
+      "RUF100": 3,
+      "F541": 3,
+      "F841": 2,
+      "SIM103": 2,
+      "PIE810": 2,
+      "B017": 2,
+      "PLR0402": 1,
+      "SIM114": 1,
+      "RUF034": 1,
+      "RUF022": 1,
+      "B008": 1,
+      "SIM118": 1,
+      "RUF059": 1,
+      "FLY002": 1
+    }
+  },
+  "mypy": {
+    "total_lines": 68,
+    "by_file": {
+      "bangonpro/premiere_compat/catalog.py": 51,
+      "bangonpro/premiere_compat/parser.py": 7,
+      "bangonpro/ai_engine/agents/rough_cut_multicam.py": 1,
+      "bangonpro/ai_engine/agents/transcribe_diarise.py": 6,
+      "bangonpro/ai_engine/cli.py": 2,
+      "bangonpro/premiere_compat/cli.py": 1
+    },
+    "lines": [
+      "bangonpro/premiere_compat/catalog.py:655: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:659: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:663: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:667: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:701: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:702: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:995: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:996: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:1411: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:1412: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:1413: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:1414: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:1442: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:1443: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:1463: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:1464: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:1604: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:1605: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:1606: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:1607: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:1608: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:1660: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:1661: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:1662: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:1704: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:1705: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:1737: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:1769: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:1808: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:1809: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:1843: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:1844: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:1864: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:1972: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:1973: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:2058: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:2059: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:2060: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:2061: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:2100: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:2101: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:2102: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:2103: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:2104: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:2239: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:2240: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:2258: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:2259: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:2531: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:2572: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/catalog.py:2573: error: Item \"None\" of \"Parameter | None\" has no attribute \"current_value\"  [union-attr]",
+      "bangonpro/premiere_compat/parser.py:651: error: No overload variant of \"GzipFile\" matches argument types \"_BytesView\", \"str\"  [call-overload]",
+      "bangonpro/premiere_compat/parser.py:651: note: Possible overload variants:",
+      "bangonpro/premiere_compat/parser.py:651: note:     def GzipFile(filename: str | bytes | PathLike[str] | PathLike[bytes] | None, mode: Literal['r', 'rb'], compresslevel: int = ..., fileobj: _ReadableFileobj | None = ..., mtime: float | None = ...) -> GzipFile",
+      "bangonpro/premiere_compat/parser.py:651: note:     def GzipFile(*, mode: Literal['r', 'rb'], compresslevel: int = ..., fileobj: _ReadableFileobj | None = ..., mtime: float | None = ...) -> GzipFile",
+      "bangonpro/premiere_compat/parser.py:651: note:     def GzipFile(filename: str | bytes | PathLike[str] | PathLike[bytes] | None, mode: Literal['a', 'ab', 'w', 'wb', 'x', 'xb'], compresslevel: int = ..., fileobj: _WritableFileobj | None = ..., mtime: float | None = ...) -> GzipFile",
+      "bangonpro/premiere_compat/parser.py:651: note:     def GzipFile(*, mode: Literal['a', 'ab', 'w', 'wb', 'x', 'xb'], compresslevel: int = ..., fileobj: _WritableFileobj | None = ..., mtime: float | None = ...) -> GzipFile",
+      "bangonpro/premiere_compat/parser.py:651: note:     def GzipFile(filename: str | bytes | PathLike[str] | PathLike[bytes] | None = ..., mode: str | None = ..., compresslevel: int = ..., fileobj: _ReadableFileobj | _WritableFileobj | None = ..., mtime: float | None = ...) -> GzipFile",
+      "bangonpro/ai_engine/agents/rough_cut_multicam.py:59: error: Name \"cuts\" already defined on line 41  [no-redef]",
+      "bangonpro/ai_engine/agents/transcribe_diarise.py:771: error: Incompatible types in assignment (expression has type \"list[TranscriptSegment]\", variable has type \"list[int]\")  [assignment]",
+      "bangonpro/ai_engine/agents/transcribe_diarise.py:774: error: Incompatible types in assignment (expression has type \"int\", variable has type \"TranscriptSegment\")  [assignment]",
+      "bangonpro/ai_engine/agents/transcribe_diarise.py:779: error: Argument \"key\" to \"max\" has incompatible type overloaded function; expected \"Callable[[str], SupportsDunderLT[Any] | SupportsDunderGT[Any]]\"  [arg-type]",
+      "bangonpro/ai_engine/agents/transcribe_diarise.py:780: error: \"int\" has no attribute \"confidence\"  [attr-defined]",
+      "bangonpro/ai_engine/agents/transcribe_diarise.py:785: error: \"int\" has no attribute \"start_sec\"  [attr-defined]",
+      "bangonpro/ai_engine/agents/transcribe_diarise.py:786: error: \"int\" has no attribute \"end_sec\"  [attr-defined]",
+      "bangonpro/ai_engine/cli.py:154: error: \"AiProviderConfig\" has no attribute \"is_local\"  [attr-defined]",
+      "bangonpro/ai_engine/cli.py:155: error: \"AiProviderConfig\" has no attribute \"requires_consent\"  [attr-defined]",
+      "bangonpro/premiere_compat/cli.py:335: error: Incompatible types in assignment (expression has type \"Path | None\", variable has type \"Path\")  [assignment]"
+    ]
+  }
+}

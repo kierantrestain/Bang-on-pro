@@ -6,10 +6,12 @@ SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import xml.etree.ElementTree as StdET
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Union
+from typing import Any
 
 import jsonschema
 
@@ -25,6 +27,7 @@ from .models import (
     MltFilterSpec,
     ParsedPreset,
     SourceArchiveInfo,
+    default_visual_equivalence_evidence,
 )
 from .parser import ParsedSourceBundle
 
@@ -36,9 +39,9 @@ DEFAULT_SCHEMA_PATH = (
 def _infer_category_and_tags(
     parsed: ParsedPreset,
     mlt_filters: Sequence[MltFilterSpec],
-) -> tuple[str, List[str]]:
+) -> tuple[str, list[str]]:
     """Infer a high-level browser category and tags from effects and folder path."""
-    tags: List[str] = []
+    tags: list[str] = []
     for folder in parsed.folder_path:
         cleaned = folder.strip().lower()
         if cleaned and cleaned not in tags:
@@ -112,7 +115,7 @@ def generate_kdenlive_effect_xml(
     description: str = "",
     preset_id: str = "",
     compatibility_status: CompatibilityStatus = CompatibilityStatus.APPROXIMATED,
-) -> Optional[str]:
+) -> str | None:
     """Emit a Kdenlive-compatible `<effectgroup>` custom effect XML string.
 
     Returns None when there are no executable MLT filters (e.g. fully unsupported preset).
@@ -220,14 +223,14 @@ def generate_mlt_filter_xml(
     return '<?xml version="1.0" encoding="utf-8"?>\n' + StdET.tostring(root, encoding="unicode") + "\n"
 
 
-def map_preset(parsed: ParsedPreset, ctx: Optional[MappingContext] = None) -> MappedPreset:
+def map_preset(parsed: ParsedPreset, ctx: MappingContext | None = None) -> MappedPreset:
     """Translate a ParsedPreset into a MappedPreset with MLT filters and Kdenlive XML."""
     context = ctx or MappingContext(fps=parsed.fps)
-    effect_results: List[MappedEffectResult] = []
-    effect_chain: List[Dict[str, Any]] = []
-    all_mlt_filters: List[MltFilterSpec] = []
-    all_missing_deps: List[MissingDependency] = []
-    notes: List[str] = []
+    effect_results: list[MappedEffectResult] = []
+    effect_chain: list[dict[str, Any]] = []
+    all_mlt_filters: list[MltFilterSpec] = []
+    all_missing_deps: list[MissingDependency] = []
+    notes: list[str] = []
 
     if not parsed.effects:
         notes.append(
@@ -255,6 +258,7 @@ def map_preset(parsed: ParsedPreset, ctx: Optional[MappingContext] = None) -> Ma
                 notes.append(n)
 
     preset_status = _aggregate_status(effect_results, all_missing_deps)
+    evidence = default_visual_equivalence_evidence(preset_status)
     category, tags = _infer_category_and_tags(parsed, all_mlt_filters)
 
     kdenlive_xml = generate_kdenlive_effect_xml(
@@ -284,13 +288,14 @@ def map_preset(parsed: ParsedPreset, ctx: Optional[MappingContext] = None) -> Ma
         description=parsed.description,
         category=category,
         tags=tags,
+        visual_equivalence_evidence=evidence,
     )
 
 
 def _reconcile_audit(
     mapped_presets: Sequence[MappedPreset],
-    audit_data: Dict[str, Any],
-) -> Dict[str, Any]:
+    audit_data: dict[str, Any],
+) -> dict[str, Any]:
     """Compare parsed/mapped counts against optional Bang_on_pro_premiere_preset_audit.json."""
     expected_total = audit_data.get("expected_total_presets")
     if expected_total is None and isinstance(audit_data.get("summary"), dict):
@@ -311,9 +316,9 @@ def build_compatibility_report(
     fps: float = 25.0,
     width: int = 1920,
     height: int = 1080,
-    asset_search_dirs: Optional[List[Path]] = None,
+    asset_search_dirs: list[Path] | None = None,
     platform_name: str = "linux",
-    missing_source_inputs: Optional[Sequence[MissingSourceInput]] = None,
+    missing_source_inputs: Sequence[MissingSourceInput] | None = None,
 ) -> CompatibilityReport:
     """Map all presets in a ParsedSourceBundle and produce a CompatibilityReport."""
     ctx = MappingContext(
@@ -330,7 +335,7 @@ def build_compatibility_report(
         _reconcile_audit(mapped, bundle.audit_data) if bundle.audit_data is not None else None
     )
 
-    generated_at = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
+    generated_at = dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat()
     return CompatibilityReport(
         schema_version=SCHEMA_VERSION,
         generated_at=generated_at,
@@ -349,7 +354,7 @@ def build_missing_inputs_report(
 
     Never fabricates synthetic or fake preset entries.
     """
-    generated_at = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
+    generated_at = dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat()
     return CompatibilityReport(
         schema_version=SCHEMA_VERSION,
         generated_at=generated_at,
@@ -365,8 +370,8 @@ def build_missing_inputs_report(
 
 
 def validate_report_schema(
-    report_dict: Dict[str, Any],
-    schema_path: Optional[Path] = None,
+    report_dict: dict[str, Any],
+    schema_path: Path | None = None,
 ) -> None:
     """Validate report JSON dict against premiere_preset_report_v1.schema.json."""
     path = schema_path or DEFAULT_SCHEMA_PATH
@@ -382,7 +387,7 @@ def render_markdown_report(report: CompatibilityReport) -> str:
     """Render a comprehensive human-readable Markdown compatibility report."""
     summary = report.summary()
     total = max(summary["total_presets"], 1)
-    lines: List[str] = [
+    lines: list[str] = [
         "# Bang On Pro — Premiere Pro Preset Compatibility Report",
         "",
         f"- **Generated (UTC):** `{report.generated_at}`",
@@ -435,7 +440,7 @@ def render_markdown_report(report: CompatibilityReport) -> str:
         )
 
     # Missing dependencies table
-    dep_rows: List[str] = []
+    dep_rows: list[str] = []
     for preset in report.presets:
         for dep in preset.missing_dependencies:
             dep_rows.append(
@@ -459,8 +464,8 @@ def render_markdown_report(report: CompatibilityReport) -> str:
         [
             "## Preset Compatibility Matrix",
             "",
-            "| Preset | Pack | Folder | Status | MLT Filters | Notes |",
-            "| --- | --- | --- | --- | --- | --- |",
+            "| Preset | Pack | Folder | Status | Visual Equivalence Evidence | MLT Filters | Notes |",
+            "| --- | --- | --- | --- | --- | --- | --- |",
         ]
     )
 
@@ -468,8 +473,9 @@ def render_markdown_report(report: CompatibilityReport) -> str:
         folder = " / ".join(p.folder_path) if p.folder_path else "(root)"
         mlt_list = ", ".join(f"`{f.service}`" for f in p.mlt_filters) if p.mlt_filters else "_none_"
         note_text = "; ".join(p.notes).replace("|", "\\|").replace("\n", " ") if p.notes else "-"
+        evidence = p.visual_equivalence_evidence or default_visual_equivalence_evidence(p.compatibility_status)
         lines.append(
-            f"| {p.name} | {p.pack} | {folder} | `{p.compatibility_status.value}` | {mlt_list} | {note_text} |"
+            f"| {p.name} | {p.pack} | {folder} | `{p.compatibility_status.value}` | `{evidence}` | {mlt_list} | {note_text} |"
         )
 
     lines.append("")
@@ -478,9 +484,9 @@ def render_markdown_report(report: CompatibilityReport) -> str:
 
 def export_report_bundle(
     report: CompatibilityReport,
-    output_dir: Union[str, Path],
-    schema_path: Optional[Path] = None,
-) -> Dict[str, Path]:
+    output_dir: str | Path,
+    schema_path: Path | None = None,
+) -> dict[str, Path]:
     """Write validated JSON report, Markdown report, Kdenlive custom XMLs, and preserved XML snippets."""
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -514,3 +520,119 @@ def export_report_bundle(
         "kdenlive_effects_dir": effects_dir,
         "preserved_xml_dir": preserved_dir,
     }
+
+
+def export_custom_library_json(
+    presets: Sequence[MappedPreset],
+    output_path: str | Path,
+    *,
+    library_name: str = "Bang On Pro Custom Effect Library",
+    schema_path: Path | None = None,
+) -> Path:
+    """Export a user-curated custom effect library as a schema-valid CompatibilityReport JSON."""
+    preset_list = list(presets)
+    fingerprint = hashlib.sha256("|".join(p.preset_id for p in preset_list).encode("utf-8")).hexdigest()
+    generated_at = dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat()
+    report = CompatibilityReport(
+        schema_version=SCHEMA_VERSION,
+        generated_at=generated_at,
+        source_archive=SourceArchiveInfo(
+            name=library_name,
+            sha256=fingerprint,
+            file_count=len(preset_list),
+            redistribution_restricted=False,
+        ),
+        presets=preset_list,
+    )
+    report_dict = report.to_dict()
+    validate_report_schema(report_dict, schema_path=schema_path)
+    out = Path(output_path).resolve()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(report_dict, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return out
+
+
+def load_custom_library_json(
+    input_path: str | Path,
+    *,
+    schema_path: Path | None = None,
+) -> CompatibilityReport:
+    """Load and validate a saved custom effect library JSON back into a CompatibilityReport."""
+    raw = json.loads(Path(input_path).read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise TypeError("Custom effect library JSON root must be an object")
+    validate_report_schema(raw, schema_path=schema_path)
+
+    src_raw = raw.get("source_archive") or {}
+    source_info = SourceArchiveInfo(
+        name=str(src_raw.get("name", "Custom Library")),
+        sha256=str(src_raw.get("sha256", "")),
+        file_count=int(src_raw.get("file_count", 0)),
+        redistribution_restricted=bool(src_raw.get("redistribution_restricted", False)),
+    )
+
+    loaded_presets: list[MappedPreset] = []
+    for p_raw in raw.get("presets", []):
+        if not isinstance(p_raw, dict):
+            continue
+        status = CompatibilityStatus(str(p_raw.get("compatibility_status", CompatibilityStatus.UNSUPPORTED.value)))
+        mlt_filters = [
+            MltFilterSpec(
+                service=str(f.get("service", "")),
+                media_type=str(f.get("media_type", "video")),
+                properties={str(k): str(v) for k, v in (f.get("properties") or {}).items()},
+                source_effect=str(f.get("source_effect", "")),
+                notes=[str(n) for n in (f.get("notes") or [])],
+            )
+            for f in (p_raw.get("mlt_filters") or [])
+            if isinstance(f, dict)
+        ]
+        missing_deps = [
+            MissingDependency(
+                kind=str(d.get("kind", "plugin")),
+                name=str(d.get("name", "")),
+                effect_match_name=str(d.get("effect_match_name", "")),
+                platform=str(d.get("platform", "cross_platform")),
+                path=str(d.get("path", "")),
+                resolved=bool(d.get("resolved", False)),
+                remediation=str(d.get("remediation", "")),
+            )
+            for d in (p_raw.get("missing_dependencies") or [])
+            if isinstance(d, dict)
+        ]
+        loaded_presets.append(
+            MappedPreset(
+                preset_id=str(p_raw.get("preset_id", "")),
+                name=str(p_raw.get("name", "")),
+                pack=str(p_raw.get("pack", source_info.name)),
+                attribution=str(p_raw.get("attribution", "")),
+                folder_path=[str(fp) for fp in (p_raw.get("folder_path") or [])],
+                source_file=str(p_raw.get("source_file", "")),
+                preset_type=str(p_raw.get("preset_type", "scale")),
+                compatibility_status=status,
+                notes=[str(n) for n in (p_raw.get("notes") or [])],
+                effect_chain=list(p_raw.get("effect_chain") or []),
+                missing_dependencies=missing_deps,
+                mlt_filters=mlt_filters,
+                kdenlive_effect_xml=p_raw.get("kdenlive_effect_xml"),
+                original_xml_preserved=bool(p_raw.get("original_xml_preserved", False)),
+                original_xml=str(p_raw.get("original_xml", "")),
+                description=str(p_raw.get("description", "")),
+                category=str(p_raw.get("category", "")),
+                tags=[str(t) for t in (p_raw.get("tags") or [])],
+                preview_before_path=p_raw.get("preview_before_path"),
+                preview_after_path=p_raw.get("preview_after_path"),
+                preview_split_path=p_raw.get("preview_split_path"),
+                visual_equivalence_evidence=str(
+                    p_raw.get("visual_equivalence_evidence") or default_visual_equivalence_evidence(status)
+                ),
+            )
+        )
+
+    return CompatibilityReport(
+        schema_version=str(raw.get("schema_version", SCHEMA_VERSION)),
+        generated_at=str(raw.get("generated_at", "")),
+        source_archive=source_info,
+        presets=loaded_presets,
+        audit_reconciliation=raw.get("audit_reconciliation"),
+    )

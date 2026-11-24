@@ -13,11 +13,20 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 VENV_DIR=""
 PYTHON_BIN=""
-REQUIREMENTS_FILE="${REPO_ROOT}/requirements-bangonpro.txt"
-EXTRA_PACKAGES=("PyYAML>=6.0,<7.0" "Pillow>=10.0.0,<14.0.0")
+REQUIREMENTS_FILE=""
+DEFAULT_LOCKFILE="${REPO_ROOT}/requirements-bangonpro.lock"
+DEFAULT_REQUIREMENTS="${REPO_ROOT}/requirements-bangonpro.txt"
 INSTALL_OPTIONAL_TIER=""
 MODEL_DIR="${BANGONPRO_MODEL_DIR:-${HOME}/.cache/bangonpro/models}"
 SKIP_UPGRADE_PIP=0
+SCRATCH_TMPDIR=""
+
+cleanup_tmp() {
+    if [[ -n "${SCRATCH_TMPDIR}" && -d "${SCRATCH_TMPDIR}" ]]; then
+        rm -rf "${SCRATCH_TMPDIR}"
+    fi
+}
+trap cleanup_tmp EXIT
 
 usage() {
     cat <<'EOF'
@@ -26,10 +35,16 @@ Usage: packaging/macos/bootstrap_ai_runtime.sh [options]
 Create a self-contained Python 3.12 virtual environment for Bang On Pro's
 core AI/editing runtime (Tier 0) and optional local ML tiers.
 
+Note: End users on macOS do NOT need to run this script manually; Bang On Pro
+bundles the Tier 0 Python runtime inside Bang On Pro.app and provides an in-app
+GUI Model Manager for optional local AI models.
+
 Options:
   --venv-dir <path>         Target virtual environment directory (required)
   --python <path>           Python 3.12+ interpreter path (auto-detected if omitted)
-  --requirements <path>     Core requirements file (default: requirements-bangonpro.txt)
+  --requirements <path>     Requirements/lock file (default: requirements-bangonpro.lock if present,
+                            else requirements-bangonpro.txt)
+  --lockfile <path>         Alias for --requirements pointing to an exact == lockfile
   --tier <tier1|tier2|tier3> Optional local AI tier to install (opt-in only):
                               tier1: faster-whisper (MIT, CPU/INT8 fast transcription)
                               tier2: faster-whisper + open-source speech tooling
@@ -53,18 +68,24 @@ die() {
     exit 1
 }
 
+require_arg() {
+    local opt="$1"
+    local remaining="$2"
+    [[ "${remaining}" -ge 2 ]] || die "Option ${opt} requires a value."
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --venv-dir)
-            VENV_DIR="$2"; shift 2 ;;
+            require_arg "$1" "$#"; VENV_DIR="$2"; shift 2 ;;
         --python)
-            PYTHON_BIN="$2"; shift 2 ;;
-        --requirements)
-            REQUIREMENTS_FILE="$2"; shift 2 ;;
+            require_arg "$1" "$#"; PYTHON_BIN="$2"; shift 2 ;;
+        --requirements|--lockfile)
+            require_arg "$1" "$#"; REQUIREMENTS_FILE="$2"; shift 2 ;;
         --tier)
-            INSTALL_OPTIONAL_TIER="$2"; shift 2 ;;
+            require_arg "$1" "$#"; INSTALL_OPTIONAL_TIER="$2"; shift 2 ;;
         --model-dir)
-            MODEL_DIR="$2"; shift 2 ;;
+            require_arg "$1" "$#"; MODEL_DIR="$2"; shift 2 ;;
         --skip-upgrade-pip)
             SKIP_UPGRADE_PIP=1; shift ;;
         -h|--help)
@@ -74,8 +95,29 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+if [[ -z "${REQUIREMENTS_FILE}" ]]; then
+    if [[ -f "${DEFAULT_LOCKFILE}" ]]; then
+        REQUIREMENTS_FILE="${DEFAULT_LOCKFILE}"
+    else
+        REQUIREMENTS_FILE="${DEFAULT_REQUIREMENTS}"
+    fi
+fi
+
 [[ -n "${VENV_DIR}" ]] || die "--venv-dir <path> is required."
 [[ -f "${REQUIREMENTS_FILE}" ]] || die "Requirements file not found: ${REQUIREMENTS_FILE}"
+
+sanitize_runtime_env() {
+    # Prevent host virtualenv/Python overrides, custom pip registries, or API/signing
+    # secrets from leaking into the bundled Python environment or pip subprocesses.
+    unset PYTHONPATH PYTHONHOME PYTHONSTARTUP PYTHONUSERBASE VIRTUAL_ENV
+    unset PIP_CONFIG_FILE PIP_EXTRA_INDEX_URL PIP_FIND_LINKS PIP_INDEX_URL PIP_TRUSTED_HOST
+    unset OPENAI_API_KEY ANTHROPIC_API_KEY DEEPGRAM_API_KEY BANGONPRO_AI_API_KEY
+    unset HF_TOKEN HUGGING_FACE_HUB_TOKEN GITHUB_TOKEN GH_TOKEN
+    unset MACOS_CERTIFICATE_P12 MACOS_CERTIFICATE_PASSWORD MACOS_NOTARY_KEY
+    export PYTHONNOUSERSITE=1
+    export PIP_DISABLE_PIP_VERSION_CHECK=1
+    export PIP_NO_CACHE_DIR=1
+}
 
 resolve_python() {
     if [[ -n "${PYTHON_BIN}" ]]; then
@@ -100,6 +142,11 @@ resolve_python() {
 }
 
 main() {
+    sanitize_runtime_env
+    SCRATCH_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/bangonpro-pyvenv.XXXXXX")"
+    chmod 700 "${SCRATCH_TMPDIR}"
+    export TMPDIR="${SCRATCH_TMPDIR}"
+
     resolve_python
     log "Using Python interpreter: ${PYTHON_BIN} ($("${PYTHON_BIN}" --version 2>&1))"
     log "Creating self-contained virtual environment at: ${VENV_DIR}"
@@ -113,24 +160,24 @@ main() {
     [[ -x "${venv_py}" ]] || die "Failed to initialize Python virtual environment at ${VENV_DIR}"
 
     if [[ "${SKIP_UPGRADE_PIP}" -eq 0 ]]; then
-        "${venv_py}" -m pip install --no-cache-dir --upgrade pip wheel setuptools
+        "${venv_py}" -m pip install --no-cache-dir --disable-pip-version-check --upgrade pip wheel setuptools
     fi
 
     log "Installing Tier 0 core runtime requirements from ${REQUIREMENTS_FILE}..."
-    "${venv_py}" -m pip install --no-cache-dir -r "${REQUIREMENTS_FILE}" "${EXTRA_PACKAGES[@]}"
+    "${venv_py}" -m pip install --no-cache-dir --disable-pip-version-check -r "${REQUIREMENTS_FILE}"
 
     if [[ -n "${INSTALL_OPTIONAL_TIER}" ]]; then
         mkdir -p "${MODEL_DIR}"
         log "Installing optional local AI tier '${INSTALL_OPTIONAL_TIER}' (model dir: ${MODEL_DIR})..."
         case "${INSTALL_OPTIONAL_TIER}" in
             tier1)
-                "${venv_py}" -m pip install --no-cache-dir "faster-whisper>=1.0.3,<2.0.0"
+                "${venv_py}" -m pip install --no-cache-dir --disable-pip-version-check "faster-whisper>=1.0.3,<2.0.0"
                 ;;
             tier2)
-                "${venv_py}" -m pip install --no-cache-dir "faster-whisper>=1.0.3,<2.0.0"
+                "${venv_py}" -m pip install --no-cache-dir --disable-pip-version-check "faster-whisper>=1.0.3,<2.0.0"
                 ;;
             tier3)
-                "${venv_py}" -m pip install --no-cache-dir "opencv-python-headless>=4.9.0,<6.0.0" "torch>=2.3.0"
+                "${venv_py}" -m pip install --no-cache-dir --disable-pip-version-check "opencv-python-headless>=4.9.0,<6.0.0" "torch>=2.3.0"
                 ;;
             *)
                 die "Unknown --tier '${INSTALL_OPTIONAL_TIER}'. Expected tier1, tier2, or tier3."
@@ -138,13 +185,14 @@ main() {
         esac
     fi
 
-    # Strip cached bytecode & pip caches to minimize .app/.dmg footprint
+    # Strip cached bytecode & transient caches to minimize .app/.dmg footprint
     find "${VENV_DIR}" -type d -name "__pycache__" -prune -exec rm -rf {} + 2>/dev/null || true
-    find "${VENV_DIR}" -type f -name "*.pyc" -delete 2>/dev/null || true
+    find "${VENV_DIR}" -type f \( -name "*.pyc" -o -name ".env" -o -name "*.p12" -o -name "*.p8" \) -delete 2>/dev/null || true
 
-    # Verify core imports inside the self-contained environment
-    "${venv_py}" -c "import numpy, scipy, defusedxml, jsonschema, yaml, PIL; print('Core Python runtime OK')"
+    # Verify core imports inside the self-contained environment (isolated from host site-packages)
+    "${venv_py}" -s -c "import numpy, scipy, defusedxml, jsonschema, yaml, PIL, opentimelineio, scenedetect; print('Core Python runtime OK')"
     log "Self-contained Python runtime ready at ${VENV_DIR}"
 }
 
 main
+

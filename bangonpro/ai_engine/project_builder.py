@@ -17,13 +17,15 @@ import os
 import subprocess
 import uuid
 import xml.etree.ElementTree as ET
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import opentimelineio as otio
 
+from bangonpro.ai_engine.agents.audio_graphics_qc import generate_kdenlive_lower_third_xml
 from bangonpro.ai_engine.agents.ingest_sync import probe_media_file
 from bangonpro.ai_engine.commands import (
     TimelineCommandBuilder,
@@ -167,6 +169,52 @@ def compile_command_batches(command_batches: list[dict[str, Any]]) -> CompiledTi
                 elif track_id == "A2":
                     compiled.a2_clips.append(clip)
 
+            elif op_type == "add_lower_third":
+                dur_f = max(
+                    1,
+                    int(
+                        params.get(
+                            "duration_frames",
+                            max(1, int(fr.get("out_frame", 99)) - int(fr.get("in_frame", 0)) + 1),
+                        )
+                    ),
+                )
+                title = str(params.get("speaker_name", params.get("title", "Speaker")))
+                subtitle = str(params.get("subtitle", compiled.display_name))
+                accent = str(params.get("accent_hex", "#FF5A1F"))
+                position = str(params.get("position", "bottom_left"))
+                xml_str = str(
+                    params.get("kdenlive_title_xml")
+                    or generate_kdenlive_lower_third_xml(
+                        title=title,
+                        subtitle=subtitle,
+                        width=compiled.width,
+                        height=compiled.height,
+                        accent_hex=accent,
+                        duration_frames=dur_f,
+                        position=position,
+                    )
+                )
+                compiled.v2_clips.append(
+                    CompiledClip(
+                        clip_id=op.get("clip_id") or op["op_id"],
+                        track_id=op.get("track_id") or "V2",
+                        media_ref=None,
+                        in_frame=0,
+                        out_frame=max(0, dur_f - 1),
+                        timeline_start=int(fr.get("timeline_start", fr.get("in_frame", 0))),
+                        params={
+                            "clip_kind": "kdenlivetitle",
+                            "title": title,
+                            "subtitle": subtitle,
+                            "accent_hex": accent,
+                            "kdenlive_title_xml": xml_str,
+                        },
+                        confidence=float(op.get("confidence", 0.95)),
+                        rationale=str(op.get("rationale", "")),
+                    )
+                )
+
             elif op_type == "add_audio_filter":
                 compiled.audio_filters.append(
                     {
@@ -194,7 +242,6 @@ def compile_command_batches(command_batches: list[dict[str, Any]]) -> CompiledTi
                     compiled.srt_subtitle_path = str(params["srt_path"])
 
             elif op_type == "add_marker":
-                # Keep timeline-positioned markers (V1 or general) for Kdenlive guides
                 if op.get("track_id") in ("V1", None):
                     compiled.markers.append(
                         {
@@ -307,17 +354,21 @@ def emit_kdenlive_xml(
     next_k_id = 2
     for idx, (media_ref, meta) in enumerate(compiled.media_registry.items()):
         file_path = str(meta["file_path"])
-        dur_frames = max(1, int(round(float(meta.get("duration_sec", 1.0)) * compiled.fps)))
+        dur_frames = max(1, round(float(meta.get("duration_sec", 1.0)) * compiled.fps))
         out_f = max(0, dur_frames - 1)
         k_id = next_k_id
         next_k_id += 1
         kdenlive_id_map[media_ref] = k_id
+        is_audio_only = bool(meta.get("is_audio_only") or meta.get("video_codec") is None)
 
-        for kind, target_map, suffix in (
+        chain_specs: list[tuple[str, dict[str, str], str]] = [
             ("bin", bin_chain_map, f"chain_bin_{idx}"),
             ("audio", audio_chain_map, f"chain_a_{idx}"),
-            ("video", video_chain_map, f"chain_v_{idx}"),
-        ):
+        ]
+        if not is_audio_only:
+            chain_specs.append(("video", video_chain_map, f"chain_v_{idx}"))
+
+        for kind, target_map, suffix in chain_specs:
             target_map[media_ref] = suffix
             chain = ET.SubElement(mlt, "chain", {"id": suffix, "out": str(out_f)})
             _add_prop(chain, "length", dur_frames)
@@ -327,7 +378,7 @@ def emit_kdenlive_xml(
             _add_prop(chain, "kdenlive:id", k_id)
             _add_prop(chain, "kdenlive:clipname", meta.get("camera_id", media_ref))
             _add_prop(chain, "kdenlive:folderid", -1)
-            _add_prop(chain, "kdenlive:clip_type", 0)
+            _add_prop(chain, "kdenlive:clip_type", 1 if is_audio_only else 0)
             if meta.get("sha256"):
                 _add_prop(chain, "kdenlive:file_hash", meta["sha256"])
             if kind == "audio":
@@ -425,7 +476,7 @@ def emit_kdenlive_xml(
     # 6. Video Track V1 (Multicam Program)
     pl_v1 = ET.SubElement(mlt, "playlist", {"id": "playlist_v1"})
     _populate_playlist_with_clips(pl_v1, compiled.v1_clips, video_chain_map, kdenlive_id_map)
-    pl_v1_b = ET.SubElement(mlt, "playlist", {"id": "playlist_v1_b"})
+    ET.SubElement(mlt, "playlist", {"id": "playlist_v1_b"})
 
     tr_v1 = ET.SubElement(mlt, "tractor", {"id": "tractor_v1", "in": "0", "out": str(last_frame)})
     _add_prop(tr_v1, "kdenlive:track_name", "Multicam Program V1")
@@ -437,7 +488,7 @@ def emit_kdenlive_xml(
     # 7. Video Track V2 (Graphics & Lower Thirds)
     pl_v2 = ET.SubElement(mlt, "playlist", {"id": "playlist_v2"})
     _populate_playlist_with_clips(pl_v2, compiled.v2_clips, title_prod_map, kdenlive_id_map)
-    pl_v2_b = ET.SubElement(mlt, "playlist", {"id": "playlist_v2_b"})
+    ET.SubElement(mlt, "playlist", {"id": "playlist_v2_b"})
 
     tr_v2 = ET.SubElement(mlt, "tractor", {"id": "tractor_v2", "in": "0", "out": str(last_frame)})
     _add_prop(tr_v2, "kdenlive:track_name", "Graphics & Lower Thirds V2")
@@ -531,7 +582,7 @@ def emit_kdenlive_xml(
     for media_ref, chain_id in bin_chain_map.items():
         dur_f = max(
             1,
-            int(round(float(compiled.media_registry[media_ref].get("duration_sec", 1.0)) * compiled.fps)),
+            round(float(compiled.media_registry[media_ref].get("duration_sec", 1.0)) * compiled.fps),
         )
         ET.SubElement(
             main_bin,
@@ -616,7 +667,7 @@ def emit_otio_timeline(
 
         meta = compiled.media_registry.get(clip.media_ref or "", {})
         media_url = str(meta.get("file_path", ""))
-        avail_dur = int(round(float(meta.get("duration_sec", clip.duration_frames / fps)) * fps))
+        avail_dur = round(float(meta.get("duration_sec", clip.duration_frames / fps)) * fps)
         ext_ref = otio.schema.ExternalReference(
             target_url=media_url,
             available_range=otio.opentime.TimeRange(
@@ -721,7 +772,7 @@ def emit_otio_timeline(
             )
             cursor = clip.timeline_start
         meta = compiled.media_registry.get(clip.media_ref or "", {})
-        avail_dur = int(round(float(meta.get("duration_sec", clip.duration_frames / fps)) * fps))
+        avail_dur = round(float(meta.get("duration_sec", clip.duration_frames / fps)) * fps)
         ext_ref = otio.schema.ExternalReference(
             target_url=str(meta.get("file_path", "")),
             available_range=otio.opentime.TimeRange(
@@ -812,9 +863,13 @@ def run_project_emit_export_stage(
     state: ProjectAnalysisState,
     token: CancellationToken,
     report_progress: Callable[[float, str], None],
-) -> dict[str, Any]:
+) -> dict[str, Any] | None:
     """Compile validated command batches to ``.kdenlive`` + ``.otio`` and optionally render via ``melt``."""
     token.check("project_emit_export start")
+    if not state.command_batches:
+        report_progress(1.0, "No command batches to compile; skipping project emission")
+        return None
+
     out_dir = Path(state.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -831,14 +886,19 @@ def run_project_emit_export_stage(
     state.artifacts["otio_timeline"] = str(otio_path)
 
     export_presets = state.profile.get("export_presets", [])
-    preset_cfg = export_presets[0] if export_presets else {
-        "name": "default_mp4",
-        "container": "mp4",
-        "video_codec": "libx264",
-        "audio_codec": "aac",
-        "video_bitrate": "8M",
-        "audio_bitrate": "192k",
-    }
+    delivery_spec = state.profile.get("delivery_spec") or {}
+    preset_cfg = (
+        export_presets[0]
+        if export_presets
+        else {
+            "name": "delivery_spec_default",
+            "container": delivery_spec.get("container", "mp4"),
+            "video_codec": delivery_spec.get("video_codec", "libx264"),
+            "audio_codec": delivery_spec.get("audio_codec", "aac"),
+            "video_bitrate": delivery_spec.get("video_bitrate", "8M"),
+            "audio_bitrate": delivery_spec.get("audio_bitrate", "192k"),
+        }
+    )
 
     export_probe: dict[str, Any] | None = None
     rendered_path: Path | None = None
@@ -887,8 +947,12 @@ def run_project_emit_export_stage(
         },
         confidence=1.0,
         rationale=(
-            f"Emitted Kdenlive XML + OTIO timeline"
-            + (f" and rendered verified MP4 via melt" if rendered_path else " (export not requested / dry run)")
+            "Emitted Kdenlive XML + OTIO timeline"
+            + (
+                " and rendered verified MP4 via melt"
+                if rendered_path
+                else " (export not requested / dry run)"
+            )
         ),
     )
 

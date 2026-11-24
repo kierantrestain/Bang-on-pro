@@ -333,6 +333,41 @@ void ShortcutPresetManager::resetPresetToDefaults(const QString &presetId)
     settings.sync();
 }
 
+QVector<ShortcutPresetManager::ShortcutConflict> ShortcutPresetManager::detectShortcutConflicts(const QString &presetId, bool ignoreKnownAliases) const
+{
+    static const QSet<QString> kKnownAliasIds = {
+        QStringLiteral("monitor_rewind"),
+        QStringLiteral("monitor_forward"),
+        QStringLiteral("timeline_zoom_in"),
+        QStringLiteral("timeline_zoom_out"),
+    };
+
+    const QMap<QString, QKeySequence> map = effectiveShortcuts(presetId);
+    QMap<QString, QStringList> byPortableKey;
+    for (auto it = map.constBegin(); it != map.constEnd(); ++it) {
+        if (ignoreKnownAliases && kKnownAliasIds.contains(it.key())) {
+            continue;
+        }
+        const QString portable = it.value().toString(QKeySequence::PortableText).trimmed();
+        if (portable.isEmpty()) {
+            continue;
+        }
+        byPortableKey[portable].append(it.key());
+    }
+
+    QVector<ShortcutConflict> conflicts;
+    for (auto it = byPortableKey.constBegin(); it != byPortableKey.constEnd(); ++it) {
+        if (it.value().size() > 1) {
+            ShortcutConflict c;
+            c.sequence = QKeySequence::fromString(it.key(), QKeySequence::PortableText);
+            c.actionIds = it.value();
+            c.actionIds.sort();
+            conflicts.append(c);
+        }
+    }
+    return conflicts;
+}
+
 int ShortcutPresetManager::applyPreset(QObject *actionCollectionOrWindow, const QString &presetId)
 {
     const QString targetPreset = presetId.isEmpty() ? activePresetId() : presetId;

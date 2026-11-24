@@ -41,12 +41,16 @@ ClipModel::ClipModel(const std::shared_ptr<TimelineModel> &parent, std::shared_p
     m_producer->set("kdenlive:id", binClipId.toUtf8().constData());
     m_producer->set("_kdenlive_cid", m_id);
     std::shared_ptr<ProjectClip> binClip = pCore->projectItemModel()->getClipByBinID(m_binClipId);
-    m_canBeVideo = binClip->hasVideo();
-    m_canBeAudio = binClip->hasAudio();
-    m_clipType = binClip->clipType();
     if (binClip) {
+        m_canBeVideo = binClip->hasVideo();
+        m_canBeAudio = binClip->hasAudio();
+        m_clipType = binClip->clipType();
         m_endlessResize = !binClip->hasLimitedDuration();
     } else {
+        qWarning() << "ClipModel constructed with missing bin clip id:" << m_binClipId;
+        m_canBeVideo = false;
+        m_canBeAudio = false;
+        m_clipType = ClipType::Unknown;
         m_endlessResize = false;
     }
     QObject::connect(m_effectStack.get(), &EffectStackModel::dataChanged, [&](const QModelIndex &, const QModelIndex &, const QVector<int> &roles) {
@@ -66,6 +70,10 @@ int ClipModel::construct(const std::shared_ptr<TimelineModel> &parent, const QSt
 {
     id = (id == -1 ? TimelineModel::getNextId() : id);
     std::shared_ptr<ProjectClip> binClip = pCore->projectItemModel()->getClipByBinID(binClipId);
+    if (!binClip) {
+        qWarning() << "ClipModel::construct: missing bin clip id:" << binClipId;
+        return -1;
+    }
 
     // We refine the state according to what the clip can actually produce
     std::pair<bool, bool> videoAudio = stateToBool(state);
@@ -100,6 +108,10 @@ int ClipModel::construct(const std::shared_ptr<TimelineModel> &parent, const QSt
     // clipModel (due to a mlt limitation, see ProjectClip doc)
     int id = TimelineModel::getNextId();
     std::shared_ptr<ProjectClip> binClip = pCore->projectItemModel()->getClipByBinID(binClipId);
+    if (!binClip) {
+        qWarning() << "ClipModel::construct(producer): missing bin clip id:" << binClipId;
+        return -1;
+    }
 
     // We refine the state according to what the clip can actually produce
     std::pair<bool, bool> videoAudio = stateToBool(state);
@@ -138,7 +150,8 @@ void ClipModel::registerClipToBin(std::shared_ptr<Mlt::Producer> service, bool r
 {
     std::shared_ptr<ProjectClip> binClip = pCore->projectItemModel()->getClipByBinID(m_binClipId);
     if (!binClip) {
-        qDebug() << "Error : Bin clip for id: " << m_binClipId << " NOT AVAILABLE!!!";
+        qWarning() << "Error : Bin clip for id: " << m_binClipId << " NOT AVAILABLE!!!";
+        return;
     }
     qDebug() << "REGISTRATION " << m_id << "ptr count" << m_parent.use_count();
     binClip->registerService(m_parent, m_id, std::move(service), registerProducer);
@@ -147,6 +160,10 @@ void ClipModel::registerClipToBin(std::shared_ptr<Mlt::Producer> service, bool r
 void ClipModel::deregisterClipToBin(const QUuid &uuid)
 {
     std::shared_ptr<ProjectClip> binClip = pCore->projectItemModel()->getClipByBinID(m_binClipId);
+    if (!binClip) {
+        qWarning() << "deregisterClipToBin: bin clip for id:" << m_binClipId << "not available";
+        return;
+    }
     binClip->deregisterTimelineClip(m_id, isAudioOnly(), uuid);
 }
 

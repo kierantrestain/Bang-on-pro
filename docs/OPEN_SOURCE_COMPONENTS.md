@@ -25,16 +25,22 @@ This document provides the audited evaluation matrix of all core and optional op
 | **WhisperX / faster-whisper** | Pinned opt-in: `faster-whisper>=1.0.3,<2.0.0`, `whisperx>=3.1.5,<4.0.0` | `BSD-4-Clause` (WhisperX) / `MIT` (faster-whisper & OpenAI Whisper) | **See Section 2, Note 4** (`faster-whisper` MIT is directly GPL-3.0 compatible; WhisperX invoked out-of-process as optional CLI/subprocess plugin) | **Optional Opt-In Plugin** | Word-level speech transcription, speaker diarization, caption timing |
 | **SAM2 / MobileSAM** | Pinned opt-in: `SAM-2 >= 1.0` (`facebookresearch/sam2`) / `MobileSAM` (`ChaoningZhang/MobileSAM`) | `Apache-2.0` | **Compatible** (Apache-2.0 is compatible with GPL-3.0) | **Optional Opt-In Plugin** | Interactive object rotoscoping, subject isolation, and dynamic mask tracking (MPS FP16 on 16 GB+ Macs or ONNX INT8 CPU fallback on 8 GB Macs) |
 
-### Core Python Runtime & Verification Dependencies (`requirements-bangonpro.txt`)
+### Core Python Runtime & Verification Dependencies (`requirements-bangonpro.txt` & `requirements-bangonpro.lock`)
 
-| Package | Pinned Range | SPDX Licence | GPL-3.0 Compatibility | Role |
-|---|---|---|---|---|
-| **NumPy** | `>= 1.26.0, < 3.0.0` | `BSD-3-Clause` | **Compatible** | Waveform envelope, RMS/LUFS loudness, cross-correlation sync math |
-| **SciPy** | `>= 1.13.0, < 2.0.0` | `BSD-3-Clause` | **Compatible** | Signal processing, FFT cross-correlation multicam sync, filtering |
-| **defusedxml** | `>= 0.7.1, < 1.0.0` | `PSF-2.0` | **Compatible** | Hardened XML parser blocking XXE, external DTDs, and entity expansion bombs |
-| **jsonschema** | `>= 4.22.0, < 5.0.0` | `MIT` | **Compatible** | Draft 2020-12 contract validation for Timeline Command API, Show Profiles, and Preset Reports |
-| **pytest** | `>= 8.2.0, < 9.0.0` | `MIT` | **Compatible** | Automated QA, security regression, compliance, and project-integrity test runner |
-| **Pillow / PyYAML** *(packaging & CI)* | `Pillow >= 10.0.0`, `PyYAML >= 6.0` | `MIT-CMU` / `MIT` | **Compatible** | Alpha mask PNG/image rendering, CI workflow validation |
+For **V1.1.0**, Bang On Pro ships both bounded direct specifiers in [`requirements-bangonpro.txt`](../requirements-bangonpro.txt) and an exact reproducible lockfile [`requirements-bangonpro.lock`](../requirements-bangonpro.lock) pinning every direct and transitive package with `==`. Both `packaging/macos/bootstrap_ai_runtime.sh` and `.github/workflows/ci-linux.yml` consume `requirements-bangonpro.lock` by default for bit-reproducible environments.
+
+| Package | Bounded Range (`requirements-bangonpro.txt`) | Locked Version (`requirements-bangonpro.lock`) | SPDX Licence | GPL-3.0 Compatibility | Role |
+|---|---|---|---|---|---|
+| **NumPy** | `>= 1.26.0, < 3.0.0` | `2.5.5` | `BSD-3-Clause` | **Compatible** | Waveform envelope, RMS/LUFS loudness, cross-correlation sync math |
+| **SciPy** | `>= 1.13.0, < 2.0.0` | `1.18.1` | `BSD-3-Clause` | **Compatible** | Signal processing, FFT cross-correlation multicam sync, filtering |
+| **defusedxml** | `>= 0.7.1, < 1.0.0` | `0.7.1` | `PSF-2.0` | **Compatible** | Hardened XML parser blocking XXE, external DTDs, and entity expansion bombs |
+| **jsonschema** | `>= 4.22.0, < 5.0.0` | `4.26.0` | `MIT` | **Compatible** | Draft 2020-12 contract validation for Timeline Command API, Show Profiles, and Preset Reports |
+| **OpenTimelineIO** | `>= 0.17.0, < 1.0.0` | `0.18.1` | `Apache-2.0` | **Compatible** | Editorial timeline interchange (`.otio`) |
+| **PySceneDetect** | `>= 0.6.4, < 1.0.0` | `0.7.3` | `BSD-3-Clause` | **Compatible** | Shot boundary & scene-change detection |
+| **Pillow** | `>= 10.0.0, < 14.0.0` | `13.0.0` | `MIT-CMU` | **Compatible** | Alpha mask PNG/image rendering and 2D plate composition |
+| **PyYAML** | `>= 6.0, < 7.0` | `6.0.4` | `MIT` | **Compatible** | Show profile & CI workflow validation |
+| **pytest** | `>= 8.2.0, < 9.0.0` | `8.4.2` | `MIT` | **Compatible** | Automated QA, security regression, compliance, and project-integrity test runner |
+| *Transitive closure* | *(pinned in `.lock`)* | `attrs==26.1.0`, `click==8.5.1`, `iniconfig==2.3.1`, `jsonschema-specifications==2025.9.1`, `opencv-python==5.1.0.95`, `packaging==26.4`, `platformdirs==4.14.8`, `pluggy==1.7.0`, `Pygments==2.21.0`, `referencing==0.37.0`, `rpds-py==2026.9.1`, `tqdm==4.70.1`, `typing_extensions==4.16.0` | `MIT` / `BSD` / `Apache-2.0` / `PSF-2.0` / `MPL-2.0 AND MIT` | **Compatible** | Audited transitive dependencies verified GPL-3.0-compatible |
 
 ---
 
@@ -53,15 +59,23 @@ This document provides the audited evaluation matrix of all core and optional op
 
 ---
 
-## 3. Optional ML Backends & Low-Storage Mac Model Management
+## 3. Optional ML Backends, GUI Model Manager & Low-Storage Mac Storage Management
 
-To keep the Bang On Pro installer compact and usable on base-model **256 GB / 8 GB Apple Silicon Macs**, multi-gigabyte ML runtimes and weights are **excluded** from the default `.dmg` and `requirements-bangonpro.txt`.
+To keep the Bang On Pro installer compact and usable on base-model **256 GB / 8 GB Apple Silicon Macs**, multi-gigabyte ML runtimes and weights are **excluded** from the default `.dmg`, `requirements-bangonpro.txt`, and `requirements-bangonpro.lock`.
+
+### Zero-Terminal Setup via the In-App GUI Model Manager (V1.1.0)
+
+End users **never need to touch a terminal** to manage local AI models or proxy storage:
+- Open **Bang On Pro → AI Model & Storage Manager** directly inside the desktop app.
+- View your Mac's detected unified-memory tier (8 GB / 16 GB / 24 GB / 32 GB+) and recommended quantized Whisper / SAM2 / MobileSAM models (`recommend_model_quantization`).
+- Install, SHA-256-verify, pin, or remove optional local models with one click, inspect live disk utilization across proxies/thumbnails/temp/models, clear temporary caches safely (source media and `.kdenlive` projects are strictly protected), and choose an external Thunderbolt/USB-C SSD folder visually.
+- `packaging/macos/bootstrap_ai_runtime.sh` remains available for CI packaging and advanced CLI automation, but is completely optional for desktop users.
 
 ### Storage Footprint Tiers & Unified-Memory Recommendations
 
 | Tier / Mac RAM | Recommended Models & Quantization | Approximate Disk Footprint |
 |---|---|---|
-| **Tier 0 — Core Editor (Default `.dmg`)** | Self-contained Bang On Pro `.app` (Kdenlive + Qt6 + KF6 + MLT 7 + FFmpeg/VideoToolbox + frei0r + Breeze + embedded Python 3.12 runtime) | ~400–650 MB |
+| **Tier 0 — Core Editor (Default `.dmg`)** | Self-contained Bang On Pro `.app` (Kdenlive + Qt6 + KF6 + MLT 7 + FFmpeg/VideoToolbox + frei0r + Breeze + embedded locked Python 3.12 runtime) | ~400–650 MB |
 | **8 GB Apple Silicon (Base M1/M2/M3)** | `faster-whisper` `tiny`/`small` (`int8`, CPU) + `MobileSAM` / `sam2.1_hiera_tiny` (`onnx_int8`, CPU fallback) | +450 MB – 1.2 GB |
 | **16 GB Apple Silicon** | `faster-whisper` `small`/`medium` (`int8`, CPU) + `sam2.1_hiera_small` (`fp16` MPS with `onnx_int8` CPU fallback) | +1.6 – 2.6 GB |
 | **24 GB Apple Silicon** | `faster-whisper` `medium` (`int8`) + `sam2.1_hiera_small` (`fp16` MPS) | +2.6 – 3.2 GB |
@@ -69,7 +83,7 @@ To keep the Bang On Pro installer compact and usable on base-model **256 GB / 8 
 
 ### Relocating Model & Proxy Caches to an External SSD
 
-Bang On Pro honours configurable cache directories so large AI weights and proxy renders never fill the internal macOS boot drive:
+You can select an external SSD directly inside the **GUI Model Manager**, or configure these environment variables for headless/CLI automation:
 
 ```bash
 # Default locations (internal SSD, gitignored in repo)
@@ -100,4 +114,5 @@ export HF_HOME="/Volumes/StudioSSD/BangOnPro/huggingface"
 - **Upstream Project:** ArtCraft — <https://github.com/storytold/artcraft>
 - **Upstream Licence:** Dual-licensed under **`MIT OR Apache-2.0`** (full licence texts preserved in [`LICENSES/MIT.txt`](../LICENSES/MIT.txt) and [`LICENSES/Apache-2.0.txt`](../LICENSES/Apache-2.0.txt), and bundled in macOS distributions under `Contents/Resources/LICENSES/ARTCRAFT_NOTICE.txt`).
 - **Selective Integration Scope:** Only clean open-source architectural concepts and GPL-3.0-compatible code patterns (such as interactive rotoscoping studio workflows, matte/mask layering, and node/timeline ergonomics) are selectively integrated or adapted under Bang On Pro's GPL-3.0 licence with attribution preserved.
-- **Strict Third-Party Asset Exclusion Policy:** Non-code third-party ArtCraft media asset folders — specifically **`sound/`**, **`memes/`**, **`skybox/`**, **`pose/`**, and **`characters_gif/`** — carry separate third-party attributions/licences and are **strictly excluded** from Bang On Pro. Automated compliance checks in `tests/bangonpro/test_security_and_compliance.py` continuously verify that zero files from those excluded ArtCraft asset directories exist anywhere in the Bang On Pro repository or packages.
+- **Strict Third-Party Asset Exclusion Policy:** Non-code third-party ArtCraft media asset folders — specifically **`sound/`**, **`memes/`**, **`skybox/`**, **`pose/`**, and **`characters_gif/`** — carry separate third-party attributions/licences and are **strictly excluded** from Bang On Pro. Automated compliance checks in `tests/bangonpro/test_security_and_compliance.py` and `packaging/macos/build_macos_arm64.sh` continuously verify that zero files from those excluded ArtCraft asset directories exist anywhere in the Bang On Pro repository or packaged `.app`/`.dmg` bundles.
+

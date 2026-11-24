@@ -13,25 +13,29 @@ import hashlib
 import json
 import subprocess
 import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 try:
     import numpy as np  # type: ignore[import-not-found]
-except Exception:  # pragma: no cover
+except ImportError:  # pragma: no cover
     np = None  # type: ignore[assignment]
 
 try:
     from PIL import Image, ImageDraw  # type: ignore[import-not-found]
-except Exception:  # pragma: no cover
+except ImportError:  # pragma: no cover
     Image = None  # type: ignore[assignment]
     ImageDraw = None  # type: ignore[assignment]
 
 from .catalog import DEFAULT_HEIGHT, DEFAULT_WIDTH
 from .mapper import generate_mlt_filter_xml
 from .models import CompatibilityReport, MappedPreset, MltFilterSpec
-from .verifier import _rescale_filters_for_canvas, generate_reference_clip, render_mlt_xml
+from .verifier import (
+    _rescale_filters_for_canvas,
+    generate_reference_clip,
+    render_mlt_xml,
+)
 
 
 @dataclass
@@ -194,16 +198,16 @@ def _render_audio_waveform_png(
 
 def generate_preset_previews(
     preset: MappedPreset,
-    cache_dir: Union[str, Path],
+    cache_dir: str | Path,
     *,
     width: int = 240,
     height: int = 135,
     fps: int = 25,
     duration_sec: float = 0.5,
     sample_frame: int = 6,
-    reference_clip: Optional[Path] = None,
-    before_video: Optional[Path] = None,
-) -> Optional[PreviewPaths]:
+    reference_clip: Path | None = None,
+    before_video: Path | None = None,
+) -> PreviewPaths | None:
     """Generate (or reuse cached) before/after/split preview PNGs for a MappedPreset.
 
     Attaches `preview_before_path`, `preview_after_path`, and `preview_split_path`
@@ -233,7 +237,7 @@ def generate_preset_previews(
         )
 
     has_video = any(f.media_type == "video" for f in preset.mlt_filters)
-    out_frame = max(sample_frame + 1, int(round(duration_sec * fps)) - 1)
+    out_frame = max(sample_frame + 1, round(duration_sec * fps) - 1)
 
     with tempfile.TemporaryDirectory(prefix="bangonpro_preview_") as tmp:
         work_dir = Path(tmp)
@@ -298,19 +302,19 @@ def generate_preset_previews(
 
 def attach_previews_to_report(
     report: CompatibilityReport,
-    cache_dir: Union[str, Path],
+    cache_dir: str | Path,
     *,
     width: int = 240,
     height: int = 135,
     fps: int = 25,
     duration_sec: float = 0.5,
     sample_frame: int = 6,
-    max_presets: Optional[int] = None,
-) -> Dict[str, PreviewPaths]:
+    max_presets: int | None = None,
+) -> dict[str, PreviewPaths]:
     """Generate/cache visual thumbnails for presets in a CompatibilityReport sharing one baseline clip."""
     cdir = Path(cache_dir)
     cdir.mkdir(parents=True, exist_ok=True)
-    results: Dict[str, PreviewPaths] = {}
+    results: dict[str, PreviewPaths] = {}
 
     eligible = [p for p in report.presets if p.mlt_filters]
     if max_presets is not None:
@@ -318,7 +322,7 @@ def attach_previews_to_report(
     if not eligible:
         return results
 
-    out_frame = max(sample_frame + 1, int(round(duration_sec * fps)) - 1)
+    out_frame = max(sample_frame + 1, round(duration_sec * fps) - 1)
     with tempfile.TemporaryDirectory(prefix="bangonpro_preview_batch_") as tmp:
         work_dir = Path(tmp)
         ref = generate_reference_clip(

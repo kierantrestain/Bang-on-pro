@@ -16,8 +16,7 @@ import shutil
 import subprocess
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
-
+from typing import Any
 
 _TRACKED_ENCODERS = (
     "h264_videotoolbox",
@@ -33,6 +32,49 @@ _TRACKED_ENCODERS = (
     "pcm_s16le",
 )
 
+_VIRTUALIZED_CPU_MARKERS = (
+    "virtual",
+    "hypervisor",
+    "qemu",
+    "vmware",
+    "parallels",
+    "kvm",
+)
+
+
+def classify_host_tier(
+    platform_system: str,
+    machine: str,
+    cpu_brand: str,
+    *,
+    hypervisor_present: bool | None = None,
+) -> tuple[str, bool]:
+    """Classify host execution tier and virtualization state transparently.
+
+    Distinguishes physical Apple Silicon (``macos_arm64_bare_metal``) from
+    virtualized CI Apple Silicon runners (``macos_arm64_virtualized_ci``,
+    e.g. ``Apple M1 (Virtual)`` or ``kern.hv_vmm_present=1``) and non-macOS
+    CPU fallback hosts (``linux_cpu_fallback``).
+    """
+    sys_l = platform_system.strip().lower()
+    mach_l = machine.strip().lower()
+    brand_l = cpu_brand.strip().lower()
+
+    brand_is_virtual = any(marker in brand_l for marker in _VIRTUALIZED_CPU_MARKERS)
+    is_virtualized = bool(brand_is_virtual or hypervisor_present is True)
+
+    if sys_l == "darwin" and mach_l in ("arm64", "aarch64"):
+        if is_virtualized:
+            return "macos_arm64_virtualized_ci", True
+        return "macos_arm64_bare_metal", False
+    if sys_l == "darwin":
+        if is_virtualized:
+            return "macos_x86_64_virtualized", True
+        return "macos_x86_64_fallback", False
+    if sys_l == "linux":
+        return "linux_cpu_fallback", is_virtualized
+    return f"{sys_l or 'unknown'}_cpu_fallback", is_virtualized
+
 
 @dataclass(frozen=True)
 class MetalMltAssessment:
@@ -43,10 +85,10 @@ class MetalMltAssessment:
     recommended_mlt_backend: str
     videotoolbox_io_supported: bool
     ai_worker_mps_candidate: bool
-    stability_constraints: List[str]
+    stability_constraints: list[str]
     architecture_roadmap: str
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
@@ -61,18 +103,32 @@ class HardwareCapabilities:
     cpu_cores_logical: int
     total_ram_gb: float
     free_disk_gb: float
-    ffmpeg_path: Optional[str] = None
+    ffmpeg_path: str | None = None
     ffmpeg_version: str = ""
-    ffprobe_path: Optional[str] = None
-    melt_path: Optional[str] = None
+    ffprobe_path: str | None = None
+    melt_path: str | None = None
     melt_version: str = ""
-    ffmpeg_hwaccels: List[str] = field(default_factory=list)
-    ffmpeg_encoders: List[str] = field(default_factory=list)
-    mlt_filters: List[str] = field(default_factory=list)
+    ffmpeg_hwaccels: list[str] = field(default_factory=list)
+    ffmpeg_encoders: list[str] = field(default_factory=list)
+    mlt_filters: list[str] = field(default_factory=list)
     videotoolbox_available: bool = False
-    metal_assessment: Optional[MetalMltAssessment] = None
+    metal_assessment: MetalMltAssessment | None = None
+    is_virtualized: bool | None = None
+    host_tier: str = ""
 
-    def to_dict(self) -> Dict[str, Any]:
+    def __post_init__(self) -> None:
+        detected_tier, detected_virt = classify_host_tier(
+            self.platform_system,
+            self.machine,
+            self.cpu_brand,
+            hypervisor_present=self.is_virtualized,
+        )
+        if self.is_virtualized is None:
+            self.is_virtualized = detected_virt
+        if not self.host_tier:
+            self.host_tier = detected_tier
+
+    def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         return data
 
@@ -90,18 +146,18 @@ class HardwareProfile:
     hardware_accelerated: bool
     accelerator: str
     fallback_used: bool
-    fallback_reason: Optional[str]
-    ffmpeg_input_args: List[str]
-    ffmpeg_output_args: List[str]
-    mlt_consumer_properties: Dict[str, str]
+    fallback_reason: str | None
+    ffmpeg_input_args: list[str]
+    ffmpeg_output_args: list[str]
+    mlt_consumer_properties: dict[str, str]
     host_platform: str
     host_arch: str
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
-def _run_probe_cmd(args: List[str], timeout_sec: float = 5.0) -> Tuple[int, str, str]:
+def _run_probe_cmd(args: list[str], timeout_sec: float = 5.0) -> tuple[int, str, str]:
     try:
         proc = subprocess.run(
             args,
@@ -135,6 +191,18 @@ def _detect_cpu_brand(system_name: str) -> str:
     return proc_str or platform.machine()
 
 
+def _detect_hypervisor_present(system_name: str) -> bool | None:
+    if system_name == "darwin":
+        rc, out, _ = _run_probe_cmd(["sysctl", "-n", "kern.hv_vmm_present"])
+        if rc == 0:
+            val = out.strip()
+            if val == "1":
+                return True
+            if val == "0":
+                return False
+    return None
+
+
 def _detect_total_ram_gb(system_name: str) -> float:
     if system_name == "darwin":
         rc, out, _ = _run_probe_cmd(["sysctl", "-n", "hw.memsize"])
@@ -161,11 +229,11 @@ def _detect_total_ram_gb(system_name: str) -> float:
     return 0.0
 
 
-def _parse_ffmpeg_hwaccels(ffmpeg_path: str) -> List[str]:
+def _parse_ffmpeg_hwaccels(ffmpeg_path: str) -> list[str]:
     rc, out, _ = _run_probe_cmd([ffmpeg_path, "-hide_banner", "-hwaccels"])
     if rc != 0:
         return []
-    accels: List[str] = []
+    accels: list[str] = []
     seen_header = False
     for line in out.splitlines():
         stripped = line.strip()
@@ -179,7 +247,7 @@ def _parse_ffmpeg_hwaccels(ffmpeg_path: str) -> List[str]:
     return accels
 
 
-def _parse_ffmpeg_encoders(ffmpeg_path: str) -> List[str]:
+def _parse_ffmpeg_encoders(ffmpeg_path: str) -> list[str]:
     rc, out, _ = _run_probe_cmd([ffmpeg_path, "-hide_banner", "-encoders"])
     if rc != 0:
         return []
@@ -194,11 +262,11 @@ def _parse_ffmpeg_encoders(ffmpeg_path: str) -> List[str]:
     return sorted(available)
 
 
-def _parse_mlt_filters(melt_path: str) -> List[str]:
+def _parse_mlt_filters(melt_path: str) -> list[str]:
     rc, out, _ = _run_probe_cmd([melt_path, "-query", "filters"])
     if rc != 0:
         return []
-    filters: List[str] = []
+    filters: list[str] = []
     for line in out.splitlines():
         stripped = line.strip()
         if stripped.startswith("- "):
@@ -209,16 +277,20 @@ def _parse_mlt_filters(melt_path: str) -> List[str]:
 def assess_metal_mlt_support(
     is_apple_silicon: bool,
     videotoolbox_available: bool,
-    mlt_filters: List[str],
+    mlt_filters: list[str],
 ) -> MetalMltAssessment:
     """Return an honest, verifiable assessment of Metal/OpenGL MLT processing."""
     movit_detected = any(f == "glsl.manager" or f.startswith("movit.") for f in mlt_filters)
     constraints = [
         "MLT 7.x does not ship a native Apple Metal render graph or Metal filter backend.",
-        "MLT's GPU effect plugin (Movit / glsl.manager) relies on OpenGL 3.2+ core profile GLSL shaders, "
-        "which Apple formally deprecated on macOS and which exhibit context-sharing instability with Qt Quick/RHI on Apple Silicon.",
-        "Enabling experimental Movit OpenGL processing on macOS risks frame corruption, thread-affinity crashes, "
-        "and stalls across multi-track timeline previews.",
+        (
+            "MLT's GPU effect plugin (Movit / glsl.manager) relies on OpenGL 3.2+ core profile GLSL shaders, "
+            "which Apple formally deprecated on macOS and which exhibit context-sharing instability with Qt Quick/RHI on Apple Silicon."
+        ),
+        (
+            "Enabling experimental Movit OpenGL processing on macOS risks frame corruption, thread-affinity crashes, "
+            "and stalls across multi-track timeline previews."
+        ),
     ]
 
     if is_apple_silicon and videotoolbox_available:
@@ -263,6 +335,13 @@ def probe_hardware_capabilities(disk_path: str | Path = ".") -> HardwareCapabili
     is_apple_silicon = system_name == "darwin" and machine in ("arm64", "aarch64")
 
     cpu_brand = _detect_cpu_brand(system_name)
+    hv_present = _detect_hypervisor_present(system_name)
+    host_tier, is_virtualized = classify_host_tier(
+        system_name,
+        machine,
+        cpu_brand,
+        hypervisor_present=hv_present,
+    )
     cpu_cores = os.cpu_count() or 1
     total_ram_gb = _detect_total_ram_gb(system_name)
 
@@ -274,8 +353,8 @@ def probe_hardware_capabilities(disk_path: str | Path = ".") -> HardwareCapabili
     melt_path = shutil.which("melt") or shutil.which("melt-7")
 
     ffmpeg_version = ""
-    hwaccels: List[str] = []
-    encoders: List[str] = []
+    hwaccels: list[str] = []
+    encoders: list[str] = []
     if ffmpeg_path:
         rc, out, _ = _run_probe_cmd([ffmpeg_path, "-version"])
         if rc == 0 and out:
@@ -284,7 +363,7 @@ def probe_hardware_capabilities(disk_path: str | Path = ".") -> HardwareCapabili
         encoders = _parse_ffmpeg_encoders(ffmpeg_path)
 
     melt_version = ""
-    mlt_filters: List[str] = []
+    mlt_filters: list[str] = []
     if melt_path:
         rc, out, _ = _run_probe_cmd([melt_path, "-version"])
         if rc == 0 and out:
@@ -321,10 +400,12 @@ def probe_hardware_capabilities(disk_path: str | Path = ".") -> HardwareCapabili
         mlt_filters=mlt_filters,
         videotoolbox_available=videotoolbox_available,
         metal_assessment=metal_assessment,
+        is_virtualized=is_virtualized,
+        host_tier=host_tier,
     )
 
 
-def list_profile_names() -> List[str]:
+def list_profile_names() -> list[str]:
     """Return supported Bang On Pro hardware/export profile keys."""
     return [
         "h264_master",
@@ -336,7 +417,7 @@ def list_profile_names() -> List[str]:
     ]
 
 
-def generate_decode_args(capabilities: HardwareCapabilities) -> List[str]:
+def generate_decode_args(capabilities: HardwareCapabilities) -> list[str]:
     """Generate validated FFmpeg hardware decode input arguments for the host."""
     if capabilities.videotoolbox_available and "videotoolbox" in capabilities.ffmpeg_hwaccels:
         return ["-hwaccel", "videotoolbox"]
@@ -345,11 +426,11 @@ def generate_decode_args(capabilities: HardwareCapabilities) -> List[str]:
 
 def generate_export_profile(
     profile_name: str,
-    capabilities: Optional[HardwareCapabilities] = None,
+    capabilities: HardwareCapabilities | None = None,
     *,
-    video_bitrate: Optional[str] = None,
+    video_bitrate: str | None = None,
     audio_bitrate: str = "192k",
-    threads: Optional[int] = None,
+    threads: int | None = None,
 ) -> HardwareProfile:
     """Generate a validated FFmpeg & MLT export/proxy profile with deterministic CPU fallback.
 
@@ -661,9 +742,9 @@ def generate_export_profile(
 def validate_profile_against_capabilities(
     profile: HardwareProfile,
     capabilities: HardwareCapabilities,
-) -> Tuple[bool, List[str]]:
+) -> tuple[bool, list[str]]:
     """Verify that a generated profile's video & audio codecs exist in detected FFmpeg."""
-    issues: List[str] = []
+    issues: list[str] = []
     if not capabilities.ffmpeg_path:
         issues.append("ffmpeg binary not found in PATH")
         return False, issues
@@ -700,10 +781,10 @@ class ModelQuantizationRecommendation:
     recommend_external_ssd: bool
     estimated_ram_budget_gb: float
     estimated_disk_footprint_gb: float
-    warnings: List[str] = field(default_factory=list)
-    notes: List[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
@@ -720,8 +801,8 @@ def recommend_model_quantization(
     """
     ram = max(0.0, float(ram_gb))
     disk = max(0.0, float(disk_free_gb))
-    warnings: List[str] = []
-    notes: List[str] = []
+    warnings: list[str] = []
+    notes: list[str] = []
     fallback_active = not bool(has_mps)
     recommend_external_ssd = disk < 20.0
 

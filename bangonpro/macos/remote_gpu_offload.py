@@ -16,10 +16,11 @@ import hashlib
 import json
 import ssl
 import urllib.request
+from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional
+from typing import Any
 from urllib.parse import urlparse
 
 
@@ -66,7 +67,7 @@ class RemoteGpuEndpointConfig:
     endpoint_url: str
     timeout_sec: float = 30.0
     verify_tls: bool = True
-    ca_bundle_path: Optional[str] = None
+    ca_bundle_path: str | None = None
 
     def validate(self) -> None:
         parsed = urlparse(self.endpoint_url)
@@ -77,6 +78,10 @@ class RemoteGpuEndpointConfig:
             )
         if not parsed.hostname:
             raise InsecureTransportError(f"Remote GPU offload endpoint missing hostname: '{self.endpoint_url}'")
+        if parsed.username or parsed.password:
+            raise InsecureTransportError(
+                "Embedded credentials in remote GPU endpoint URL are forbidden; use headers/consent tokens instead."
+            )
         if not self.verify_tls:
             raise InsecureTransportError(
                 "Disabling TLS certificate verification (verify_tls=False) is forbidden for remote GPU offload."
@@ -96,9 +101,9 @@ class RemoteOffloadConsent:
     allow_raw_media_upload: bool = False
     allow_proxy_upload: bool = False
     allow_audio_features_only: bool = True
-    granted_at_utc: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
-    expires_at_utc: Optional[str] = None
-    approved_endpoint_host: Optional[str] = None
+    granted_at_utc: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+    expires_at_utc: str | None = None
+    approved_endpoint_host: str | None = None
 
 
 @dataclass(frozen=True)
@@ -107,11 +112,11 @@ class OffloadJobRequest:
 
     job_id: str
     task_type: str
-    media_paths: List[Path]
-    technical_metadata: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    media_paths: list[Path]
+    technical_metadata: dict[str, dict[str, Any]] = field(default_factory=dict)
     include_proxy_media: bool = False
     include_raw_media: bool = False
-    extra_params: Dict[str, Any] = field(default_factory=dict)
+    extra_params: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -122,9 +127,9 @@ class OffloadJobResponse:
     accepted: bool
     status_code: int
     payload_mode: str
-    worker_response: Dict[str, Any]
+    worker_response: dict[str, Any]
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
@@ -139,23 +144,22 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def scrub_metadata_dict(raw_metadata: Dict[str, Any]) -> Dict[str, Any]:
+def scrub_metadata_dict(raw_metadata: dict[str, Any]) -> dict[str, Any]:
     """Allow-list technical stream attributes and strip all paths, usernames, GPS, and PII."""
-    scrubbed: Dict[str, Any] = {}
+    scrubbed: dict[str, Any] = {}
     for key, val in raw_metadata.items():
-        if key in _ALLOWED_TECHNICAL_META_KEYS:
-            if isinstance(val, (int, float, bool, str)):
-                scrubbed[key] = val
+        if key in _ALLOWED_TECHNICAL_META_KEYS and isinstance(val, (int, float, bool, str)):
+            scrubbed[key] = val
     return scrubbed
 
 
 def build_scrubbed_manifest(
     media_paths: Iterable[str | Path],
-    technical_metadata: Optional[Dict[str, Dict[str, Any]]] = None,
-) -> List[Dict[str, Any]]:
+    technical_metadata: dict[str, dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     """Build a privacy-preserving media-hash manifest without leaking local filesystem paths."""
     meta_lookup = technical_metadata or {}
-    manifest: List[Dict[str, Any]] = []
+    manifest: list[dict[str, Any]] = []
 
     for idx, item in enumerate(media_paths, start=1):
         path = Path(item)
@@ -179,13 +183,13 @@ def build_scrubbed_manifest(
     return manifest
 
 
-TransportFn = Callable[[str, bytes, Dict[str, str], float, ssl.SSLContext], tuple[int, bytes]]
+TransportFn = Callable[[str, bytes, dict[str, str], float, ssl.SSLContext], tuple[int, bytes]]
 
 
 def _default_https_transport(
     url: str,
     body: bytes,
-    headers: Dict[str, str],
+    headers: dict[str, str],
     timeout_sec: float,
     ssl_context: ssl.SSLContext,
 ) -> tuple[int, bytes]:
@@ -203,7 +207,7 @@ class RemoteGpuOffloadClient:
         self,
         endpoint: RemoteGpuEndpointConfig,
         *,
-        transport: Optional[TransportFn] = None,
+        transport: TransportFn | None = None,
     ) -> None:
         endpoint.validate()
         self.endpoint = endpoint
@@ -212,9 +216,9 @@ class RemoteGpuOffloadClient:
     def validate_request(
         self,
         request: OffloadJobRequest,
-        consent: Optional[RemoteOffloadConsent],
+        consent: RemoteOffloadConsent | None,
         *,
-        now_utc: Optional[datetime] = None,
+        now_utc: datetime | None = None,
     ) -> str:
         """Enforce transport, consent, expiration, host-pinning, and raw-media upload gates.
 
@@ -233,21 +237,20 @@ class RemoteGpuOffloadClient:
             )
 
         if consent.expires_at_utc:
-            current_time = now_utc if now_utc is not None else datetime.now(timezone.utc)
+            current_time = now_utc if now_utc is not None else datetime.now(UTC)
             expires = datetime.fromisoformat(consent.expires_at_utc)
             if expires.tzinfo is None:
-                expires = expires.replace(tzinfo=timezone.utc)
+                expires = expires.replace(tzinfo=UTC)
             if current_time >= expires:
                 raise ConsentExpiredError(
                     f"Remote GPU offload consent expired at {consent.expires_at_utc}."
                 )
 
-        if consent.approved_endpoint_host:
-            if consent.approved_endpoint_host.lower() != self.endpoint.hostname:
-                raise ConsentRequiredError(
-                    f"Consent is pinned to host '{consent.approved_endpoint_host}', "
-                    f"cannot submit to '{self.endpoint.hostname}'."
-                )
+        if consent.approved_endpoint_host and consent.approved_endpoint_host.lower() != self.endpoint.hostname:
+            raise ConsentRequiredError(
+                f"Consent is pinned to host '{consent.approved_endpoint_host}', "
+                f"cannot submit to '{self.endpoint.hostname}'."
+            )
 
         if request.include_raw_media:
             if not consent.allow_raw_media_upload:
@@ -272,10 +275,10 @@ class RemoteGpuOffloadClient:
     def prepare_job_payload(
         self,
         request: OffloadJobRequest,
-        consent: Optional[RemoteOffloadConsent],
+        consent: RemoteOffloadConsent | None,
         *,
-        now_utc: Optional[datetime] = None,
-    ) -> Dict[str, Any]:
+        now_utc: datetime | None = None,
+    ) -> dict[str, Any]:
         """Validate all policy gates and build the scrubbed JSON request envelope."""
         payload_mode = self.validate_request(request, consent, now_utc=now_utc)
         assert consent is not None
@@ -299,9 +302,9 @@ class RemoteGpuOffloadClient:
     def submit_job(
         self,
         request: OffloadJobRequest,
-        consent: Optional[RemoteOffloadConsent],
+        consent: RemoteOffloadConsent | None,
         *,
-        now_utc: Optional[datetime] = None,
+        now_utc: datetime | None = None,
     ) -> OffloadJobResponse:
         """Submit a validated, scrubbed job over HTTPS/TLS to the configured remote GPU worker."""
         envelope = self.prepare_job_payload(request, consent, now_utc=now_utc)
@@ -336,3 +339,4 @@ class RemoteGpuOffloadClient:
             payload_mode=envelope["payload_mode"],
             worker_response=worker_data,
         )
+

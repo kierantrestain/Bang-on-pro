@@ -27,7 +27,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 TESTS_DIR = Path(__file__).resolve().parent
 
 
-def run_static_checks() -> list[dict[str, Any]]:
+def run_static_checks(*, require_ruff: bool = False) -> list[dict[str, Any]]:
     """Run static syntax validation on macOS packaging scripts and GitHub workflows."""
     checks: list[dict[str, Any]] = []
 
@@ -172,6 +172,38 @@ def run_static_checks() -> list[dict[str, Any]]:
             }
         )
 
+    # 6. Optional/required ruff critical error check (E9, F63, F7, F82)
+    if require_ruff:
+        import shutil
+
+        t0 = time.monotonic()
+        ruff_bin = shutil.which("ruff")
+        if ruff_bin is None:
+            checks.append(
+                {
+                    "name": "ruff_static:bangonpro_python",
+                    "status": "FAIL",
+                    "duration_sec": 0.0,
+                    "detail": "ruff executable not found on PATH (--require-ruff specified)",
+                }
+            )
+        else:
+            proc = subprocess.run(
+                [ruff_bin, "check", "--select=E9,F63,F7,F82", "bangonpro/", "tests/bangonpro/"],
+                cwd=REPO_ROOT,
+                shell=False,
+                capture_output=True,
+                text=True,
+            )
+            checks.append(
+                {
+                    "name": "ruff_static:bangonpro_python",
+                    "status": "PASS" if proc.returncode == 0 else "FAIL",
+                    "duration_sec": round(time.monotonic() - t0, 3),
+                    "detail": (proc.stdout + proc.stderr).strip() or "ok",
+                }
+            )
+
     return checks
 
 
@@ -306,6 +338,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Skip shell/YAML/blueprint static checks and run pytest only.",
     )
     parser.add_argument(
+        "--require-ruff",
+        action="store_true",
+        help="Fail static checks if ruff is not installed on PATH instead of reporting a warning.",
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -325,7 +362,9 @@ def main(argv: list[str] | None = None) -> int:
         json_path = args.json_out
 
     try:
-        static_checks = [] if args.skip_static else run_static_checks()
+        static_checks = (
+            [] if args.skip_static else run_static_checks(require_ruff=args.require_ruff)
+        )
 
         # Discover pytest suites under tests/bangonpro/
         if args.suite:

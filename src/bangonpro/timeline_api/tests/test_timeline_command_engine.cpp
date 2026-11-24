@@ -72,6 +72,11 @@ private Q_SLOTS:
     void testValidationRejections();
     void testConcurrentSerializedWrites();
     void testStageTwoOperationsAndSelectiveApproval();
+    void testStaleProposalManualEditAndExplicitRebase();
+    void testContextSwitchAndDeletedEntityBlockRebase();
+    void testPartialApprovalDependencyValidation();
+    void testIsolatedPreviewNeverMutatesLiveTimeline();
+    void testMalformedPayloadAndControlCharFuzzing();
 };
 
 void TestTimelineCommandEngine::testMultiOpBatchExecution()
@@ -1023,6 +1028,239 @@ void TestTimelineCommandEngine::testStageTwoOperationsAndSelectiveApproval()
     // Undo restores state cleanly
     QCOMPARE(engine.undoLastTransaction().status, CommandStatus::Ok);
     QVERIFY(backend->markers().isEmpty());
+}
+
+void TestTimelineCommandEngine::testStaleProposalManualEditAndExplicitRebase()
+{
+    auto backend = std::make_shared<InMemoryTimelineBackend>();
+    TimelineCommandEngine engine(backend);
+    engine.setActiveContext(QStringLiteral("proj-bangonpro-01"), QStringLiteral("seq-main"));
+
+    // Setup base sequence & track at revision 0 -> 1
+    TimelineCommandBatch setup = makeBaseBatch(QStringLiteral("req-v11-setup"), 0, false, false);
+    TimelineOperation opTrack = makeOp(QStringLiteral("op-t1"), QStringLiteral("create_track"));
+    opTrack.trackId = QStringLiteral("V1");
+    opTrack.params.insert(QStringLiteral("kind"), QStringLiteral("video"));
+    setup.operations = {opTrack};
+    QCOMPARE(engine.executeBatch(setup).status, CommandStatus::Ok);
+    QCOMPARE(engine.currentRevision(), 1);
+
+    // Stage an AI marker proposal at revision 1
+    TimelineCommandBatch prop = makeBaseBatch(QStringLiteral("req-v11-stale"), 1, true, false);
+    TimelineOperation mkr = makeOp(QStringLiteral("op-m1"), QStringLiteral("add_marker"));
+    mkr.frameRange.timelineStart = 40;
+    mkr.params.insert(QStringLiteral("label"), QStringLiteral("AI Cut Point"));
+    prop.operations = {mkr};
+    QCOMPARE(engine.executeBatch(prop).status, CommandStatus::PendingApproval);
+
+    // Simulate a manual user edit advancing revision 1 -> 2
+    engine.notifyExternalEdit(QStringLiteral("User nudged playhead/clip manually"));
+    QCOMPARE(engine.currentRevision(), 2);
+
+    // Inspect freshness report: StaleRevision, rebaseable because marker has no deleted clip refs
+    const ProposalFreshnessReport report = engine.validateProposalFreshness(QStringLiteral("req-v11-stale"));
+    QCOMPARE(report.status, ProposalFreshnessStatus::StaleRevision);
+    QVERIFY(!report.fresh);
+    QVERIFY(report.canRebase);
+    QCOMPARE(report.baseRevision, 1);
+    QCOMPARE(report.currentRevision, 2);
+
+    // Default approval (rebase=false) MUST reject with RevisionConflict and keep proposal pending
+    const TimelineCommandResponse conflictResp = engine.approveProposal(QStringLiteral("req-v11-stale"), false);
+    QCOMPARE(conflictResp.status, CommandStatus::RevisionConflict);
+    QCOMPARE(engine.pendingProposals().size(), 1);
+    QVERIFY(backend->markers().isEmpty());
+
+    // Explicit user rebase approval (rebase=true) succeeds cleanly
+    const TimelineCommandResponse rebasedResp = engine.approveProposal(QStringLiteral("req-v11-stale"), true);
+    QVERIFY2(rebasedResp.status == CommandStatus::Ok, qPrintable(rebasedResp.errorMessage));
+    QCOMPARE(engine.currentRevision(), 3);
+    QCOMPARE(backend->markers().size(), 1);
+}
+
+void TestTimelineCommandEngine::testContextSwitchAndDeletedEntityBlockRebase()
+{
+    auto backend = std::make_shared<InMemoryTimelineBackend>();
+    TimelineCommandEngine engine(backend);
+    engine.setActiveContext(QStringLiteral("proj-bangonpro-01"), QStringLiteral("seq-main"));
+
+    // Create media, track V1, and clip-A
+    TimelineCommandBatch init = makeBaseBatch(QStringLiteral("req-ctx-init"), 0, false, false);
+    TimelineOperation imp = makeOp(QStringLiteral("op-imp"), QStringLiteral("import_media"));
+    imp.mediaRef = QStringLiteral("m1");
+    imp.params.insert(QStringLiteral("path"), QStringLiteral("/tmp/a.mov"));
+    imp.params.insert(QStringLiteral("duration_frames"), 200);
+    TimelineOperation trk = makeOp(QStringLiteral("op-trk"), QStringLiteral("create_track"));
+    trk.trackId = QStringLiteral("V1");
+    TimelineOperation plc = makeOp(QStringLiteral("op-plc"), QStringLiteral("place_clip"));
+    plc.clipId = QStringLiteral("clip-A");
+    plc.mediaRef = QStringLiteral("m1");
+    plc.trackId = QStringLiteral("V1");
+    plc.frameRange.inFrame = 0;
+    plc.frameRange.outFrame = 100;
+    plc.frameRange.timelineStart = 0;
+    init.operations = {imp, trk, plc};
+    QCOMPARE(engine.executeBatch(init).status, CommandStatus::Ok);
+    QCOMPARE(engine.currentRevision(), 1);
+
+    // Stage proposal referencing clip-A
+    TimelineCommandBatch prop = makeBaseBatch(QStringLiteral("req-del-target"), 1, true, false);
+    TimelineOperation trim = makeOp(QStringLiteral("op-trim"), QStringLiteral("trim_clip"));
+    trim.clipId = QStringLiteral("clip-A");
+    trim.frameRange.inFrame = 10;
+    trim.frameRange.outFrame = 80;
+    prop.operations = {trim};
+    QCOMPARE(engine.executeBatch(prop).status, CommandStatus::PendingApproval);
+
+    // Delete clip-A before user approves -> EntityConflict MUST block even explicit rebase!
+    TimelineCommandBatch delBatch = makeBaseBatch(QStringLiteral("req-del-clip"), 1, false, false);
+    TimelineOperation delOp = makeOp(QStringLiteral("op-del"), QStringLiteral("delete_clip"));
+    delOp.clipId = QStringLiteral("clip-A");
+    delBatch.operations = {delOp};
+    QCOMPARE(engine.executeBatch(delBatch).status, CommandStatus::Ok);
+
+    const ProposalFreshnessReport entityRep = engine.validateProposalFreshness(QStringLiteral("req-del-target"));
+    QCOMPARE(entityRep.status, ProposalFreshnessStatus::EntityConflict);
+    QVERIFY(!entityRep.canRebase);
+    QVERIFY(entityRep.requiresRegenerate);
+    QVERIFY(entityRep.missingReferencedClips.contains(QStringLiteral("clip-A")));
+    QCOMPARE(engine.approveProposal(QStringLiteral("req-del-target"), true).status, CommandStatus::RevisionConflict);
+
+    // Stage another proposal, then switch to a different project -> ContextMismatch blocks rebase!
+    TimelineCommandBatch prop2 = makeBaseBatch(QStringLiteral("req-ctx-prop"), engine.currentRevision(), true, false);
+    TimelineOperation mkr = makeOp(QStringLiteral("op-mkr"), QStringLiteral("add_marker"));
+    mkr.frameRange.timelineStart = 10;
+    mkr.params.insert(QStringLiteral("label"), QStringLiteral("Check"));
+    prop2.operations = {mkr};
+    QCOMPARE(engine.executeBatch(prop2).status, CommandStatus::PendingApproval);
+
+    engine.setActiveContext(QStringLiteral("proj-other-02"), QStringLiteral("seq-other"));
+    const ProposalFreshnessReport ctxRep = engine.validateProposalFreshness(QStringLiteral("req-ctx-prop"));
+    QCOMPARE(ctxRep.status, ProposalFreshnessStatus::ContextMismatch);
+    QVERIFY(!ctxRep.canRebase);
+    QCOMPARE(engine.approveProposal(QStringLiteral("req-ctx-prop"), true).status, CommandStatus::RevisionConflict);
+}
+
+void TestTimelineCommandEngine::testPartialApprovalDependencyValidation()
+{
+    auto backend = std::make_shared<InMemoryTimelineBackend>();
+    TimelineCommandEngine engine(backend);
+
+    TimelineCommandBatch prop = makeBaseBatch(QStringLiteral("req-dep-01"), 0, true, false);
+    TimelineOperation imp = makeOp(QStringLiteral("op-imp"), QStringLiteral("import_media"));
+    imp.mediaRef = QStringLiteral("med-dep");
+    imp.params.insert(QStringLiteral("path"), QStringLiteral("/tmp/dep.mov"));
+    imp.params.insert(QStringLiteral("duration_frames"), 200);
+
+    TimelineOperation trk = makeOp(QStringLiteral("op-trk"), QStringLiteral("create_track"));
+    trk.trackId = QStringLiteral("V-dep");
+
+    TimelineOperation plc = makeOp(QStringLiteral("op-plc"), QStringLiteral("place_clip"));
+    plc.clipId = QStringLiteral("clip-dep");
+    plc.mediaRef = QStringLiteral("med-dep");
+    plc.trackId = QStringLiteral("V-dep");
+    plc.frameRange.inFrame = 0;
+    plc.frameRange.outFrame = 100;
+    plc.frameRange.timelineStart = 0;
+
+    TimelineOperation eff = makeOp(QStringLiteral("op-eff"), QStringLiteral("add_effect"));
+    eff.clipId = QStringLiteral("clip-dep");
+    eff.params.insert(QStringLiteral("effect_id"), QStringLiteral("brightness"));
+    prop.operations = {imp, trk, plc, eff};
+
+    QCOMPARE(engine.executeBatch(prop).status, CommandStatus::PendingApproval);
+
+    // Selecting ONLY op-eff without op-plc MUST be rejected with clear dependency error
+    const QSet<QString> brokenSelection = {QStringLiteral("op-eff")};
+    const BatchDependencyAnalysis depReport = engine.analyzeProposalSelectionDependencies(QStringLiteral("req-dep-01"), brokenSelection);
+    QVERIFY(!depReport.valid);
+    QVERIFY(depReport.missingPrerequisiteOpIds.contains(QStringLiteral("op-plc")));
+
+    const TimelineCommandResponse badResp = engine.approveBatchWithSelection(QStringLiteral("req-dep-01"), brokenSelection);
+    QCOMPARE(badResp.status, CommandStatus::ValidationError);
+    QCOMPARE(engine.currentRevision(), 0);
+    QCOMPARE(engine.pendingProposals().size(), 1);
+
+    // Selecting prerequisite chain {op-imp, op-trk, op-plc} (dropping optional op-eff) MUST succeed
+    const QSet<QString> validSubset = {QStringLiteral("op-imp"), QStringLiteral("op-trk"), QStringLiteral("op-plc")};
+    const TimelineCommandResponse okResp = engine.approveBatchWithSelection(QStringLiteral("req-dep-01"), validSubset);
+    QVERIFY2(okResp.status == CommandStatus::Ok, qPrintable(okResp.errorMessage));
+    QVERIFY(backend->hasClip(QStringLiteral("clip-dep")));
+    QVERIFY(backend->clip(QStringLiteral("clip-dep"))->effects.isEmpty());
+}
+
+void TestTimelineCommandEngine::testIsolatedPreviewNeverMutatesLiveTimeline()
+{
+    auto backend = std::make_shared<InMemoryTimelineBackend>();
+    TimelineCommandEngine engine(backend);
+
+    TimelineCommandBatch prop = makeBaseBatch(QStringLiteral("req-prev-01"), 0, true, false);
+    TimelineOperation imp = makeOp(QStringLiteral("op-imp"), QStringLiteral("import_media"));
+    imp.mediaRef = QStringLiteral("med-prev");
+    imp.params.insert(QStringLiteral("path"), QStringLiteral("/tmp/prev.mov"));
+    imp.params.insert(QStringLiteral("duration_frames"), 300);
+    TimelineOperation trk = makeOp(QStringLiteral("op-trk"), QStringLiteral("create_track"));
+    trk.trackId = QStringLiteral("V-prev");
+    TimelineOperation plc = makeOp(QStringLiteral("op-plc"), QStringLiteral("place_clip"));
+    plc.clipId = QStringLiteral("clip-prev");
+    plc.mediaRef = QStringLiteral("med-prev");
+    plc.trackId = QStringLiteral("V-prev");
+    plc.frameRange.inFrame = 0;
+    plc.frameRange.outFrame = 150;
+    plc.frameRange.timelineStart = 0;
+    prop.operations = {imp, trk, plc};
+
+    QCOMPARE(engine.executeBatch(prop).status, CommandStatus::PendingApproval);
+    const QJsonObject snapBefore = engine.stateSnapshotJson();
+    const qint64 revBefore = engine.currentRevision();
+    const qint64 mutBefore = backend->mutationCounter();
+
+    const QJsonObject preview = engine.previewPendingProposal(QStringLiteral("req-prev-01"));
+    QVERIFY(preview.value(QStringLiteral("found")).toBool());
+    QCOMPARE(preview.value(QStringLiteral("live_timeline_mutated")).toBool(true), false);
+    QVERIFY(preview.value(QStringLiteral("can_apply")).toBool());
+    const QJsonObject diff = preview.value(QStringLiteral("diff")).toObject();
+    QVERIFY(diff.value(QStringLiteral("preview_isolated")).toBool());
+    QCOMPARE(diff.value(QStringLiteral("clips_added")).toArray().size(), 1);
+    QCOMPARE(diff.value(QStringLiteral("duration_delta")).toInt(), 150);
+
+    // Live timeline revision, mutation counter, and full state snapshot MUST be strictly untouched!
+    QCOMPARE(engine.currentRevision(), revBefore);
+    QCOMPARE(backend->mutationCounter(), mutBefore);
+    QCOMPARE(engine.stateSnapshotJson(), snapBefore);
+    QVERIFY(!backend->hasClip(QStringLiteral("clip-prev")));
+}
+
+void TestTimelineCommandEngine::testMalformedPayloadAndControlCharFuzzing()
+{
+    auto backend = std::make_shared<InMemoryTimelineBackend>();
+    TimelineCommandEngine engine(backend);
+
+    const QVector<QByteArray> fuzzPayloads = {
+        QByteArray(""),
+        QByteArray("{not json"),
+        QByteArray("[]"),
+        QByteArray("null"),
+        QByteArray("{\"api_version\":\"timeline_command_v1\",\"request_id\":\"bad\\u0000id\",\"project_id\":\"p\",\"sequence_id\":\"s\",\"expected_revision\":"
+                   "0,\"actor\":{\"agent_id\":\"a\",\"role\":\"r\"},\"operations\":[{\"op_id\":\"1\",\"type\":\"add_marker\"}]}"),
+        QByteArray("{\"api_version\":\"timeline_command_v1\",\"request_id\":\"r1\",\"project_id\":\"p\",\"sequence_id\":\"s\",\"expected_revision\":-5,"
+                   "\"actor\":{\"agent_id\":\"a\",\"role\":\"r\"},\"operations\":[{\"op_id\":\"1\",\"type\":\"add_marker\"}]}"),
+        QByteArray("{\"api_version\":\"timeline_command_v1\",\"request_id\":\"r2\",\"project_id\":\"p\",\"sequence_id\":\"s\",\"expected_revision\":0,"
+                   "\"actor\":{\"agent_id\":\"a\",\"role\":\"r\"},\"operations\":[{\"op_id\":\"1\",\"type\":\"rm -rf /\"}]}"),
+        QByteArray("{\"api_version\":\"timeline_command_v1\",\"request_id\":\"r3\",\"project_id\":\"p\",\"sequence_id\":\"s\",\"expected_revision\":0,"
+                   "\"actor\":{\"agent_id\":\"a\",\"role\":\"r\"},\"operations\":[{\"op_id\":\"1\",\"type\":\"place_clip\",\"frame_range\":{\"in_frame\":200,"
+                   "\"out_frame\":10,\"timeline_start\":-99}}]}"),
+        QByteArray("{\"api_version\":\"timeline_command_v1\",\"request_id\":\"r4\",\"project_id\":\"p\",\"sequence_id\":\"s\",\"expected_revision\":0,"
+                   "\"actor\":{\"agent_id\":\"a\",\"role\":\"r\"},\"operations\":[{\"op_id\":\"1\",\"type\":\"add_marker\",\"confidence\":999.0}]}"),
+    };
+
+    for (const QByteArray &payload : fuzzPayloads) {
+        const QByteArray respBytes = engine.executeJson(payload);
+        const QJsonObject respObj = QJsonDocument::fromJson(respBytes).object();
+        QCOMPARE(respObj.value(QStringLiteral("status")).toString(), QStringLiteral("validation_error"));
+    }
+    QCOMPARE(engine.currentRevision(), 0);
+    QVERIFY(backend->clips().isEmpty());
 }
 
 QTEST_MAIN(TestTimelineCommandEngine)

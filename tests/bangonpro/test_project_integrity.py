@@ -630,3 +630,115 @@ def test_atomic_transaction_rollback_on_failed_edit(
     assert sha256_file(project_path) == pre_tx_sha
     assert parse_kdenlive_structure(project_path) == pre_tx_struct
     assert sha256_file(media_file) == baseline_sha256
+
+
+def test_strict_exit_code_on_malformed_or_missing_project_render(
+    synthetic_source_media: tuple[Path, str], tmp_path: Path
+) -> None:
+    """Verify melt/render fails loudly with non-zero exit code on broken or missing project files."""
+    media_file, baseline_sha256 = synthetic_source_media
+    assert MELT_BIN is not None
+
+    env = os.environ.copy()
+    env.setdefault("SDL_AUDIODRIVER", "dummy")
+    env.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    # 1. Missing project file with nonexistent output directory must fail loudly (note MLT 7 melt
+    #    can exit 0 while printing "Failed to load" to stderr and producing no output; strict
+    #    render wrappers MUST reject missing/empty outputs or non-zero exit codes).
+    missing_proj = tmp_path / "does_not_exist.kdenlive"
+    bad_out = tmp_path / "no_such_dir" / "render.mp4"
+    proc_missing = subprocess.run(
+        [MELT_BIN, str(missing_proj), "-consumer", f"avformat:{bad_out}"],
+        env=env,
+        shell=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert (
+        proc_missing.returncode != 0
+        or "Failed to load" in (proc_missing.stderr + proc_missing.stdout)
+    ), "melt must report load failure on missing project target"
+    assert not bad_out.exists(), "melt must not produce an output file for a missing project"
+
+    # 2. Truncated/malformed XML must be rejected by defusedxml AND must not yield a rendered MP4
+    corrupt_proj = tmp_path / "corrupt_xml.kdenlive"
+    corrupt_proj.write_text('<?xml version="1.0"?><mlt><producer id="p0"><unclosed', encoding="utf-8")
+    with pytest.raises(Exception):
+        DefusedET.parse(corrupt_proj)
+
+    corrupt_out = tmp_path / "nonexistent_parent" / "corrupt_out.mp4"
+    proc_corrupt = subprocess.run(
+        [MELT_BIN, str(corrupt_proj), "-consumer", f"avformat:{corrupt_out}"],
+        env=env,
+        shell=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert (
+        proc_corrupt.returncode != 0
+        or "Failed to load" in (proc_corrupt.stderr + proc_corrupt.stdout)
+        or not corrupt_out.exists()
+    )
+    assert not corrupt_out.exists()
+
+    # 3. Source media untouched
+    assert sha256_file(media_file) == baseline_sha256
+
+
+def test_corrupt_xml_recovery_modes_and_double_corruption_safety(
+    synthetic_source_media: tuple[Path, str], tmp_path: Path
+) -> None:
+    """Verify recovery across binary corruption, XXE injection, missing primary, and double-corrupt safety."""
+    media_file, baseline_sha256 = synthetic_source_media
+    valid_xml = build_kdenlive_project_xml(media_file, brightness_level="1.08", volume_level="-1dB")
+    autosave_path = tmp_path / ".episode.kdenlive.autosave"
+    atomic_write_text(autosave_path, valid_xml)
+
+    # Case 1: Valid primary must NOT be overwritten
+    valid_primary = tmp_path / "valid_primary.kdenlive"
+    atomic_write_text(valid_primary, valid_xml)
+    pre_sha = sha256_file(valid_primary)
+    assert recover_project_from_autosave(valid_primary, autosave_path) is False
+    assert sha256_file(valid_primary) == pre_sha
+
+    # Case 2: Binary garbage / NUL-byte corruption -> recovers cleanly
+    bin_corrupt = tmp_path / "binary_corrupt.kdenlive"
+    bin_corrupt.write_bytes(b"\x00\xff\xfe<mlt>corrupted\x00bytes")
+    assert recover_project_from_autosave(bin_corrupt, autosave_path) is True
+    assert bin_corrupt.read_text(encoding="utf-8") == valid_xml
+
+    # Case 3: XXE DTD payload injected into primary -> rejected by defusedxml & restored from autosave
+    xxe_primary = tmp_path / "xxe_corrupt.kdenlive"
+    xxe_primary.write_text(
+        '<?xml version="1.0"?>'
+        '<!DOCTYPE mlt [<!ENTITY leak SYSTEM "file:///etc/passwd">]>'
+        "<mlt><producer>&leak;</producer></mlt>",
+        encoding="utf-8",
+    )
+    assert recover_project_from_autosave(xxe_primary, autosave_path) is True
+    assert xxe_primary.read_text(encoding="utf-8") == valid_xml
+
+    # Case 4: Missing primary file (deleted before crash) -> restored from autosave & renders cleanly
+    missing_primary = tmp_path / "deleted_primary.kdenlive"
+    assert not missing_primary.exists()
+    assert recover_project_from_autosave(missing_primary, autosave_path) is True
+    assert missing_primary.is_file()
+    restored_render = tmp_path / "restored_from_missing.mp4"
+    render_with_melt(missing_primary, restored_render)
+    assert restored_render.is_file() and restored_render.stat().st_size > 1000
+
+    # Case 5: Double corruption (both primary AND autosave corrupted) -> raises and does NOT wipe primary
+    double_primary = tmp_path / "double_corrupt_primary.kdenlive"
+    double_autosave = tmp_path / ".double_corrupt.autosave"
+    primary_corrupt_bytes = b"<mlt><broken_primary"
+    double_primary.write_bytes(primary_corrupt_bytes)
+    double_autosave.write_bytes(b"<mlt><broken_autosave")
+    with pytest.raises(Exception):
+        recover_project_from_autosave(double_primary, double_autosave)
+    assert double_primary.read_bytes() == primary_corrupt_bytes
+
+    assert sha256_file(media_file) == baseline_sha256
+

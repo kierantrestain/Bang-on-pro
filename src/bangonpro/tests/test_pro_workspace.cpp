@@ -7,6 +7,7 @@
 #include "ui/BangOnProTheme.h"
 #include "ui/BangOnProWorkspace.h"
 #include "ui/ExternalProviderConsentDialog.h"
+#include "ui/ModelManagerDialog.h"
 #include "ui/ShowProfileEditorDialog.h"
 #include "ui/TranscriptEditorWidget.h"
 
@@ -188,6 +189,59 @@ private Q_SLOTS:
         consentDlg.setExplicitConsentGranted(true);
         QVERIFY(consentDlg.canAcceptConfiguration());
         QVERIFY(consentDlg.currentSettings().isExternalTransmissionAllowed());
+    }
+
+    void testShortcutConflictDetectionAndModelManagerDialog()
+    {
+        ShortcutPresetManager mgr(QStringLiteral("BangOnProTest"), QStringLiteral("ShortcutConflictsUnitTest"));
+        for (const QString &presetId : mgr.availablePresetIds()) {
+            mgr.resetPresetToDefaults(presetId);
+            const auto conflicts = mgr.detectShortcutConflicts(presetId, true);
+            QVERIFY2(conflicts.isEmpty(), qPrintable(QStringLiteral("Unexpected default shortcut conflict in preset %1").arg(presetId)));
+        }
+
+        // Inject an intentional duplicate custom override and verify conflict detection catches it
+        mgr.setCustomOverride(QString::fromLatin1(kShortcutPresetPremiere), QStringLiteral("razor_tool"), QKeySequence(QStringLiteral("V")));
+        const auto injected = mgr.detectShortcutConflicts(QString::fromLatin1(kShortcutPresetPremiere), true);
+        QVERIFY(!injected.isEmpty());
+        QVERIFY(injected.first().actionIds.contains(QStringLiteral("razor_tool")));
+        QVERIFY(injected.first().actionIds.contains(QStringLiteral("select_tool")));
+        mgr.resetPresetToDefaults(QString::fromLatin1(kShortcutPresetPremiere));
+
+        // Verify ModelManagerDialog parses hardware & honest neural-vs-fallback model catalog JSON
+        ModelManagerDialog modelDlg(QStringLiteral("python3"), QStringLiteral("/tmp"));
+        QJsonObject report;
+        report.insert(QStringLiteral("model_dir"), QStringLiteral("/tmp/models"));
+        report.insert(QStringLiteral("total_mb"), 75.5);
+        report.insert(QStringLiteral("installed_count"), 1);
+        report.insert(QStringLiteral("ready_count"), 0);
+        report.insert(QStringLiteral("hardware"), QJsonObject{{QStringLiteral("os_name"), QStringLiteral("Darwin")},
+                                                              {QStringLiteral("arch"), QStringLiteral("arm64")},
+                                                              {QStringLiteral("is_apple_silicon"), true},
+                                                              {QStringLiteral("total_ram_gb"), 16.0},
+                                                              {QStringLiteral("ram_tier"), QStringLiteral("medium_16gb")},
+                                                              {QStringLiteral("mps_available"), true},
+                                                              {QStringLiteral("coreml_available"), true}});
+        QJsonObject m1;
+        m1.insert(QStringLiteral("model_id"), QStringLiteral("faster-whisper-small"));
+        m1.insert(QStringLiteral("display_name"), QStringLiteral("Faster-Whisper Small"));
+        m1.insert(QStringLiteral("family"), QStringLiteral("asr_whisper"));
+        m1.insert(QStringLiteral("runtime_backend"), QStringLiteral("faster_whisper"));
+        m1.insert(QStringLiteral("license_spdx"), QStringLiteral("MIT"));
+        m1.insert(QStringLiteral("disk_size_mb"), 244);
+        m1.insert(QStringLiteral("disk_usage_bytes"), 79167488);
+        m1.insert(QStringLiteral("backend_package_installed"), false);
+        m1.insert(QStringLiteral("model_available_on_disk"), true);
+        m1.insert(QStringLiteral("status"), QStringLiteral("backend_missing"));
+        m1.insert(QStringLiteral("hardware_compatible"), true);
+        m1.insert(QStringLiteral("recommended"), true);
+        report.insert(QStringLiteral("models"), QJsonArray{m1});
+
+        QVERIFY(modelDlg.loadStatusJson(report));
+        QCOMPARE(modelDlg.modelCount(), 1);
+        QVERIFY(modelDlg.hardwareSummaryText().contains(QStringLiteral("Apple Silicon")));
+        QVERIFY(modelDlg.selectModelById(QStringLiteral("faster-whisper-small")));
+        QCOMPARE(modelDlg.selectedModelId(), QStringLiteral("faster-whisper-small"));
     }
 };
 

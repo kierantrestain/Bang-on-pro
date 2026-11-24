@@ -45,6 +45,11 @@ public:
     bool supportsTransactionalDryRun() const override { return false; }
     bool supportsSnapshots() const override { return false; }
 
+    QString currentProjectId() const override;
+    QString currentSequenceId() const override;
+    TimelineStateFingerprint captureStateFingerprint(const QString &sequenceId = QString()) const override;
+    QJsonObject captureReadOnlyStateJson(const QString &sequenceId = QString()) const override;
+
     bool canNativeUndo() const override;
     bool canNativeRedo() const override;
     bool nativeUndo(QString *errorOut = nullptr) override;

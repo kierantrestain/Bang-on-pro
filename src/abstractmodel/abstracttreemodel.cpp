@@ -200,7 +200,11 @@ std::shared_ptr<TreeItem> AbstractTreeModel::getRoot() const
 bool AbstractTreeModel::checkConsistency()
 {
     // first check that the root is all good
-    if (!rootItem || !rootItem->m_isRoot || !rootItem->isInModel() || m_allItems.count(rootItem->getId()) == 0) {
+    if (!rootItem) {
+        qDebug() << "ERROR: Model is not valid because rootItem is null";
+        return false;
+    }
+    if (!rootItem->m_isRoot || !rootItem->isInModel() || m_allItems.count(rootItem->getId()) == 0) {
         qDebug() << !rootItem->m_isRoot << !rootItem->isInModel() << (m_allItems.count(rootItem->getId()) == 0);
         qDebug() << "ERROR: Model is not valid because root is not properly constructed";
         return false;

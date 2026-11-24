@@ -17,11 +17,11 @@ import json
 import os
 import shutil
 import uuid
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Sequence
-
+from typing import Any
 
 DEFAULT_LOCAL_PROVIDER_ID = "local_deterministic"
 
@@ -88,7 +88,9 @@ class AiProviderConfig:
     def __post_init__(self) -> None:
         self.kind = str(self.kind).strip().lower()
         if self.kind not in ("local", "external"):
-            raise ValueError(f"Unsupported provider kind '{self.kind}'; expected 'local' or 'external'")
+            raise ValueError(
+                f"Unsupported provider kind '{self.kind}'; expected 'local' or 'external'"
+            )
         if isinstance(self.capabilities, list):
             self.capabilities = tuple(str(c) for c in self.capabilities)
         if self.kind == "external":
@@ -98,6 +100,16 @@ class AiProviderConfig:
     def is_external(self) -> bool:
         """Return True if this provider transmits data outside the local machine."""
         return self.kind == "external" or self.requires_network
+
+    @property
+    def is_local(self) -> bool:
+        """Return True if this provider executes strictly locally without external transmission."""
+        return not self.is_external
+
+    @property
+    def requires_consent(self) -> bool:
+        """Return True if explicit user consent is required before invoking this provider."""
+        return self.is_external
 
     def resolve_api_key(self) -> str | None:
         """Resolve an API key from environment variable or private runtime extra config."""
@@ -121,7 +133,9 @@ class AiProviderConfig:
             "provider_id": self.provider_id,
             "display_name": self.display_name,
             "kind": self.kind,
+            "is_local": self.is_local,
             "is_external": self.is_external,
+            "requires_consent": self.requires_consent,
             "capabilities": list(self.capabilities),
             "requires_network": self.requires_network,
             "requires_api_key": self.requires_api_key,
@@ -138,13 +152,22 @@ class AiProviderConfig:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> AiProviderConfig:
         if not isinstance(data, dict):
-            raise ValueError("AiProviderConfig payload must be a JSON object")
+            raise ValueError("AiProviderConfig payload must be a JSON object")  # noqa: TRY004
         pid = str(data.get("provider_id", "")).strip()
         if not pid:
             raise ValueError("AiProviderConfig requires a non-empty 'provider_id'")
-        kind = str(data.get("kind", "external" if pid in ("openai_compatible", "anthropic", "deepgram") else "local"))
+        kind = str(
+            data.get(
+                "kind",
+                "external" if pid in ("openai_compatible", "anthropic", "deepgram") else "local",
+            )
+        )
         caps_raw = data.get("capabilities", ("transcription",))
-        caps = tuple(str(c) for c in caps_raw) if isinstance(caps_raw, (list, tuple)) else (str(caps_raw),)
+        caps = (
+            tuple(str(c) for c in caps_raw)
+            if isinstance(caps_raw, (list, tuple))
+            else (str(caps_raw),)
+        )
         return cls(
             provider_id=pid,
             display_name=str(data.get("display_name") or pid),
@@ -169,12 +192,15 @@ def _builtin_provider_configs() -> list[AiProviderConfig]:
             provider_id="local_deterministic",
             display_name="Local Deterministic Engine (GCC-PHAT + VAD + FFmpeg)",
             kind="local",
-            capabilities=("sync", "vad", "diarisation", "transcription", "audio_qc"),
+            capabilities=("sync", "vad", "diarisation", "audio_qc"),
             requires_network=False,
             requires_api_key=False,
             consent_granted=False,
             enabled=True,
-            description="Default zero-cost, 100% offline deterministic studio production engine.",
+            description=(
+                "Default zero-cost, 100% offline deterministic studio engine "
+                "(DSP spectral VAD speech segmentation; install Whisper ASR for spoken text)."
+            ),
         ),
         AiProviderConfig(
             provider_id="local_faster_whisper",
@@ -183,10 +209,22 @@ def _builtin_provider_configs() -> list[AiProviderConfig]:
             capabilities=("transcription", "word_timestamps"),
             requires_network=False,
             requires_api_key=False,
-            model="tiny",
+            model="faster-whisper-tiny",
             consent_granted=False,
             enabled=True,
             description="Offline CTranslate2 Whisper ASR using locally cached weights.",
+        ),
+        AiProviderConfig(
+            provider_id="local_openai_whisper",
+            display_name="Local OpenAI Whisper ASR (PyTorch)",
+            kind="local",
+            capabilities=("transcription", "word_timestamps"),
+            requires_network=False,
+            requires_api_key=False,
+            model="openai-whisper-tiny",
+            consent_granted=False,
+            enabled=True,
+            description="Offline PyTorch OpenAI Whisper ASR using locally verified checkpoints.",
         ),
         AiProviderConfig(
             provider_id="local_whisper_cpp",
@@ -195,7 +233,7 @@ def _builtin_provider_configs() -> list[AiProviderConfig]:
             capabilities=("transcription", "word_timestamps"),
             requires_network=False,
             requires_api_key=False,
-            model="ggml-base.en.bin",
+            model="whisper-cpp-base-en",
             consent_granted=False,
             enabled=True,
             description="Offline native whisper.cpp CLI speech recognition.",
@@ -314,35 +352,107 @@ class AiProviderRegistry:
             providers = [p for p in providers if not p.is_external]
         return sorted(providers, key=lambda p: (p.is_external, p.provider_id))
 
-    def check_local_availability(self, provider_id: str) -> dict[str, Any]:
-        """Feature-detect whether a built-in local provider's runtime binary/package is installed."""
+    def check_local_availability(
+        self,
+        provider_id: str,
+        *,
+        model_dir: str | Path | None = None,
+    ) -> dict[str, Any]:
+        """Honest feature detection separating package installation from downloaded weights on disk."""
+        from bangonpro.ai_engine.model_manager import ModelManager
+
         cfg = self.get(provider_id)
+        mgr = ModelManager(model_dir=model_dir)
+        backend_pkg = False
+        weights_on_disk = False
+        status = "not_installed"
+
         if cfg.provider_id == "local_deterministic":
-            available = bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
+            backend_pkg = bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
+            weights_on_disk = True
+            available = backend_pkg
+            status = "ready" if available else "backend_missing"
         elif cfg.provider_id == "local_faster_whisper":
-            available = importlib.util.find_spec("faster_whisper") is not None
+            backend_pkg = importlib.util.find_spec("faster_whisper") is not None
+            model_statuses = mgr.list_models(family="asr_whisper")
+            fw_statuses = [m for m in model_statuses if m.runtime_backend == "faster_whisper"]
+            weights_on_disk = any(m.model_available_on_disk for m in fw_statuses)
+            available = backend_pkg and weights_on_disk
+            if available:
+                status = "ready"
+            elif backend_pkg:
+                status = "weights_missing"
+            elif weights_on_disk:
+                status = "backend_missing"
+        elif cfg.provider_id == "local_openai_whisper":
+            backend_pkg = (
+                importlib.util.find_spec("whisper") is not None
+                and importlib.util.find_spec("torch") is not None
+            )
+            ow_statuses = [
+                m
+                for m in mgr.list_models(family="asr_whisper")
+                if m.runtime_backend == "openai_whisper"
+            ]
+            weights_on_disk = any(m.model_available_on_disk for m in ow_statuses)
+            available = backend_pkg and weights_on_disk
+            if available:
+                status = "ready"
+            elif backend_pkg:
+                status = "weights_missing"
+            elif weights_on_disk:
+                status = "backend_missing"
         elif cfg.provider_id == "local_whisper_cpp":
-            available = bool(shutil.which("whisper-cli") or shutil.which("whisper-cpp"))
+            backend_pkg = bool(shutil.which("whisper-cli") or shutil.which("whisper-cpp"))
+            wc_statuses = [
+                m
+                for m in mgr.list_models(family="asr_whisper")
+                if m.runtime_backend == "whisper_cpp"
+            ]
+            weights_on_disk = any(m.model_available_on_disk for m in wc_statuses)
+            available = backend_pkg and weights_on_disk
+            if available:
+                status = "ready"
+            elif backend_pkg:
+                status = "weights_missing"
+            elif weights_on_disk:
+                status = "backend_missing"
         elif cfg.provider_id == "local_ollama":
-            available = bool(shutil.which("ollama"))
+            backend_pkg = bool(shutil.which("ollama"))
+            weights_on_disk = False
+            available = backend_pkg
+            status = "ready" if available else "backend_missing"
         else:
+            backend_pkg = cfg.enabled
+            weights_on_disk = False
             available = cfg.enabled and (not cfg.requires_api_key or cfg.has_api_key())
+            status = "ready" if available else "disabled"
+
         return {
             "provider_id": cfg.provider_id,
+            "is_local": cfg.is_local,
             "is_external": cfg.is_external,
+            "requires_consent": cfg.requires_consent,
+            "backend_package_installed": backend_pkg,
+            "model_available_on_disk": weights_on_disk,
             "available": available,
+            "status": status,
         }
 
     def configure_from_dict(self, payload: dict[str, Any]) -> AiProviderConfig:
         """Merge a user provider configuration dictionary into the registry and return active provider."""
         if not isinstance(payload, dict):
-            raise ValueError("Provider config payload must be a JSON object")
+            raise ValueError("Provider config payload must be a JSON object")  # noqa: TRY004
 
         if "providers" in payload and isinstance(payload["providers"], list):
             for entry in payload["providers"]:
                 cfg = self._merge_provider_entry(entry)
                 self._providers[cfg.provider_id] = cfg
-            active_id = str(payload.get("active_provider") or payload.get("provider_id") or self.active_provider_id)
+            active_id = str(
+                payload.get("active_provider")
+                or payload.get("provider_id")
+                or self.active_provider_id
+            )
             if active_id not in self._providers:
                 raise KeyError(f"Configured active_provider '{active_id}' is not registered")
             if "consent_granted" in payload:
@@ -417,7 +527,7 @@ class AiProviderRegistry:
         ``ExternalConsentError`` is raised immediately and logged to ``audit_log``.
         """
         cfg = self.get(provider_id)
-        now_utc = datetime.now(timezone.utc).isoformat()
+        now_utc = datetime.now(UTC).isoformat()
         categories = tuple(str(c) for c in data_categories)
 
         if not cfg.is_external:

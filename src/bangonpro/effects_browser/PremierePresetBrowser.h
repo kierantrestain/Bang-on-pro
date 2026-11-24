@@ -46,6 +46,7 @@ struct PresetDisplayEntry
     QString previewBeforePath;
     QString previewAfterPath;
     QString previewSplitPath;
+    QString visualEquivalenceEvidence;
 };
 
 /**

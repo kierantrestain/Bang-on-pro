@@ -1,12 +1,12 @@
 """Command-Line Interface for Bang On Pro AI Production Engine.
 
-Example:
-    python3 -m bangonpro.ai_engine.cli \\
-        "Sync all four cameras, remove setup delays, build a first cut and add our standard graphics" \\
-        --profile podcast_multicam \\
-        --inputs cam_wide=wide.mp4 cam_host=host.mp4 cam_guest=guest.mp4 cam_reaction=react.mp4 \\
-        --output-dir ./out \\
-        --export
+Supports:
+- Full multi-agent production pipeline from raw media ``--inputs``
+- Active project context editing via ``--kdenlive-project`` / ``--project-state``
+  (without forcing media re-import) and ``--plan-only`` structured planning
+- Managed local AI model lifecycle (``--model-status``, ``--install-model``,
+  ``--remove-model``) with honest installed / neural / fallback reporting
+- Show Profile management, AI provider listing, and text-based transcript edits
 
 SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
 """
@@ -16,8 +16,11 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from typing import Sequence
+from collections.abc import Sequence
+from pathlib import Path
+from typing import Any
 
+from bangonpro.ai_engine.model_manager import ModelManager, ModelManagerError, ModelNotFoundError
 from bangonpro.ai_engine.pipeline import run_production_pipeline
 from bangonpro.show_profiles.loader import list_show_profiles, load_show_profile
 
@@ -48,6 +51,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Input camera media files (either plain paths or camera_id=path pairs)",
     )
     parser.add_argument(
+        "--kdenlive-project",
+        default=None,
+        help="Optional active .kdenlive XML project file for context-aware editing without media re-import",
+    )
+    parser.add_argument(
+        "--project-state",
+        default=None,
+        help="Optional read-only Timeline Command Engine JSON state snapshot for context-aware editing",
+    )
+    parser.add_argument(
+        "--plan-only",
+        action="store_true",
+        help="Run the 4-stage AI planner and emit validated timeline_command_v1 proposals without rendering",
+    )
+    parser.add_argument(
         "--output-dir",
         default="./bangonpro_output",
         help="Output directory for .kdenlive, .otio, captions, reports, and exported video",
@@ -63,14 +81,54 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Run analysis and emit dry-run Timeline Command API v1 batches without rendering video",
     )
     parser.add_argument(
+        "--project-id",
+        default=None,
+        help="Optional active project identifier to preserve across planning and approval",
+    )
+    parser.add_argument(
         "--sequence-id",
-        default="seq_main",
-        help="Target sequence identifier (default: seq_main)",
+        default=None,
+        help="Optional target sequence identifier (defaults to active project sequence or seq_main)",
     )
     parser.add_argument(
         "--rnnoise-model",
         default=None,
         help="Optional path to an RNNoise .rnnn model file for avfilter.arnndn",
+    )
+    parser.add_argument(
+        "--model-dir",
+        default=None,
+        help="Managed local AI model storage directory (overrides BANGONPRO_MODEL_DIR)",
+    )
+    parser.add_argument(
+        "--asr-model",
+        default=None,
+        help="Optional Whisper-family catalog model ID to prefer for local neural transcription",
+    )
+    parser.add_argument(
+        "--model-status",
+        action="store_true",
+        help="Report hardware capabilities, installed AI models, backend packages, and disk usage",
+    )
+    parser.add_argument(
+        "--install-model",
+        default=None,
+        help="Download/stage and SHA-256 verify a managed local AI model by catalog model_id",
+    )
+    parser.add_argument(
+        "--model-source-path",
+        default=None,
+        help="Optional local weights file to stage into BANGONPRO_MODEL_DIR when using --install-model",
+    )
+    parser.add_argument(
+        "--model-sha256",
+        default=None,
+        help="Optional expected SHA-256 hex digest to verify when using --install-model",
+    )
+    parser.add_argument(
+        "--remove-model",
+        default=None,
+        help="Safely remove a managed local AI model by catalog model_id",
     )
     parser.add_argument(
         "--list-profiles",
@@ -110,16 +168,96 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--json",
         action="store_true",
-        help="Print final structured production summary as JSON",
+        help="Print final structured output as JSON",
     )
     return parser
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    from pathlib import Path
+def _handle_model_commands(args: argparse.Namespace) -> int | None:
+    if not (args.model_status or args.install_model or args.remove_model):
+        return None
 
+    manager = ModelManager(model_dir=args.model_dir)
+
+    if args.model_status:
+        report = manager.get_storage_report()
+        if args.json:
+            print(json.dumps(report, indent=2))
+        else:
+            hw = report["hardware"]
+            print(
+                f"Model Dir: {report['model_dir']} | "
+                f"Hardware: {hw['os_name']}/{hw['arch']} ({hw['total_ram_gb']} GB, tier={hw['ram_tier']})"
+            )
+            for m in report["models"]:
+                rec = " [RECOMMENDED]" if m["recommended"] else ""
+                print(
+                    f"  {m['model_id']:26s} | {m['status']:16s} | "
+                    f"pkg={m['backend_package_installed']} disk={m['model_available_on_disk']} | "
+                    f"{m['display_name']}{rec}"
+                )
+        return 0
+
+    if args.install_model:
+        def _on_dl_progress(frac: float, done: int, total: int, msg: str) -> None:
+            progress_evt = {
+                "event": "progress",
+                "model_id": args.install_model,
+                "fraction": frac,
+                "bytes_done": done,
+                "bytes_total": total,
+                "message": msg,
+            }
+            print(json.dumps(progress_evt), file=sys.stderr, flush=True)
+
+        try:
+            result = manager.install_model(
+                args.install_model,
+                source_path=args.model_source_path,
+                expected_sha256=args.model_sha256,
+                progress_callback=_on_dl_progress,
+            )
+        except (ModelNotFoundError, ModelManagerError, FileNotFoundError, OSError) as exc:
+            err_payload = {"installed": False, "model_id": args.install_model, "error": str(exc)}
+            if args.json:
+                print(json.dumps(err_payload, indent=2))
+            else:
+                print(f"Model install failed: {exc}", file=sys.stderr)
+            return 2
+
+        if args.json:
+            print(json.dumps(result, indent=2))
+        else:
+            print(f"Installed {result['model_id']} -> {result['install_path']} (sha256={result['sha256'][:12]}...)")
+        return 0
+
+    if args.remove_model:
+        try:
+            result = manager.remove_model(args.remove_model)
+        except (ModelNotFoundError, ModelManagerError, OSError) as exc:
+            err_payload = {"removed": False, "model_id": args.remove_model, "error": str(exc)}
+            if args.json:
+                print(json.dumps(err_payload, indent=2))
+            else:
+                print(f"Model remove failed: {exc}", file=sys.stderr)
+            return 2
+
+        if args.json:
+            print(json.dumps(result, indent=2))
+        else:
+            print(result["message"])
+        return 0
+
+    return None
+
+
+def main(argv: Sequence[str] | None = None) -> int:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
+
+    model_rc = _handle_model_commands(args)
+    if model_rc is not None:
+        return model_rc
 
     if args.list_profiles:
         profiles = []
@@ -147,10 +285,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         from bangonpro.ai_engine.providers import AiProviderRegistry
 
         registry = AiProviderRegistry()
-        providers = [
+        providers: list[dict[str, Any]] = [
             {
                 "provider_id": p.provider_id,
                 "display_name": p.display_name,
+                "kind": p.kind,
                 "is_local": p.is_local,
                 "requires_consent": p.requires_consent,
                 "capabilities": list(p.capabilities),
@@ -191,7 +330,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         batch = build_transcript_edit_command_batch(
             original,
             edited,
-            sequence_id=args.sequence_id,
+            sequence_id=args.sequence_id or "seq_main",
         )
         if args.output:
             out_path = Path(args.output)
@@ -200,8 +339,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps(batch, indent=2))
         return 0
 
-    if not args.inputs:
-        parser.error("--inputs is required unless a utility subcommand flag is specified")
+    if not args.inputs and not args.kdenlive_project and not args.project_state:
+        parser.error(
+            "--inputs, --kdenlive-project, or --project-state is required unless a utility subcommand flag is specified"
+        )
 
     provider_config = None
     if args.provider_config:
@@ -213,30 +354,46 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     export_override = True if args.export else None
     state, _ = run_production_pipeline(
-        inputs=args.inputs,
+        inputs=args.inputs or None,
         output_dir=args.output_dir,
         profile_ref=args.profile,
         instruction=args.instruction,
         export_video=export_override,
         dry_run=args.dry_run,
+        project_id=args.project_id,
         sequence_id=args.sequence_id,
         rnnoise_model_path=args.rnnoise_model,
         provider_config=provider_config,
         progress_callback=_on_progress,
+        kdenlive_project=args.kdenlive_project,
+        project_state=args.project_state,
+        plan_only=args.plan_only,
+        model_dir=args.model_dir,
+        asr_model_id=args.asr_model,
     )
 
+    asr_rep = state.metadata.get("asr_backend_report")
+    asr_rep_dict = asr_rep if isinstance(asr_rep, dict) else {}
     summary = {
         "project_id": state.project_id,
         "sequence_id": state.sequence_id,
         "profile_id": state.profile["profile_id"],
         "dry_run": state.dry_run,
         "revision": state.revision,
+        "execution_status": state.metadata.get("execution_status", "executed"),
+        "needs_clarification": state.intent.needs_clarification,
+        "clarification_question": state.intent.clarification_question,
+        "intent_scope": state.intent.scope,
         "parsed_actions": state.intent.parsed_actions,
+        "command_batch_count": len(state.command_batches),
         "offsets_sec": state.sync_result.offsets_sec if state.sync_result else {},
         "setup_delay_sec": state.setup_delay_sec,
         "shot_count": len(state.rough_cut_shots),
         "caption_count": len(state.captions),
         "lower_third_count": len(state.lower_thirds),
+        "asr_backend_used": asr_rep_dict.get("backend_id") or state.metadata.get("asr_backend_used"),
+        "is_neural_inference": bool(asr_rep_dict.get("is_neural_inference", state.metadata.get("is_neural_inference", False))),
+        "asr_backend_report": asr_rep_dict,
         "qc_passed": state.qc_report.passed,
         "qc_issue_count": len(state.qc_report.issues),
         "missing_media_count": len(state.missing_media),
@@ -247,11 +404,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.json:
         print(json.dumps(summary, indent=2))
     else:
-        print(f"Bang On Pro Production Complete — Profile: {summary['profile_id']}")
-        print(f"  Shots: {summary['shot_count']} | Captions: {summary['caption_count']} | Lower Thirds: {summary['lower_third_count']}")
-        print(f"  QC Passed: {summary['qc_passed']} | Total Time: {summary['stage_timings_sec'].get('total_pipeline', 0.0):.2f}s")
-        for key, val in sorted(summary["artifacts"].items()):
-            print(f"  {key}: {val}")
+        if summary["needs_clarification"]:
+            print(f"Clarification required: {summary['clarification_question']}")
+        else:
+            print(f"Bang On Pro Production Complete — Profile: {summary['profile_id']}")
+            print(f"  Status:  {summary['execution_status']} (scope={summary['intent_scope']})")
+            print(f"  Actions: {', '.join(summary['parsed_actions']) or 'none'}")
+            print(f"  Shots:   {summary['shot_count']} | Captions: {summary['caption_count']} | Lower thirds: {summary['lower_third_count']}")
+            print(f"  QC Pass: {summary['qc_passed']} (issues={summary['qc_issue_count']})")
+            for name, path in summary["artifacts"].items():
+                print(f"  Artifact [{name}]: {path}")
     return 0
 
 

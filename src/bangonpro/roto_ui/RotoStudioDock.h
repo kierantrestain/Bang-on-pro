@@ -98,6 +98,10 @@ public:
     void setCurrentFrame(int frame);
     QJsonObject exportRotoSessionJson() const;
 
+    /** @brief Display honest runtime backend status (neural SAM / MobileSAM ONNX vs OpenCV fallback). */
+    void setSegmentationBackendStatus(const QString &backendName, bool isNeuralInference, const QString &details = QString());
+    QString segmentationBackendStatusText() const;
+
     // ArtCraft-adapted 2D Layer Composition API
     int canvas2DLayerCount() const { return m_canvasLayers.size(); }
     QString addCanvas2DLayer(const QString &name, const QString &kind = QStringLiteral("solid"),
@@ -165,6 +169,7 @@ private:
     QSlider *m_edgeRefineSlider = nullptr;
     QSlider *m_opacitySlider = nullptr;
     QSpinBox *m_frameSpin = nullptr;
+    QLabel *m_backendStatusLabel = nullptr;
     QLabel *m_rotoStatusLabel = nullptr;
 
     QVector<StudioMaskLayerEntry> m_masks;

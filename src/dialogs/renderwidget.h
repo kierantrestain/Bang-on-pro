@@ -227,6 +227,9 @@ private:
     QTreeWidgetItem *loadFromMltPreset(const QString &groupName, const QString &path, QString profileName, bool codecInName = false);
     RenderJobItem *createRenderJob(const RenderRequest::RenderJob &job);
     void updateRenderInfoMessage();
+    static bool isOwnedTempRenderFile(const QString &filePath);
+    void cleanupTempRenderFiles(const QStringList &paths, const RenderJobItem *excludingItem = nullptr) const;
+    void cleanupJobItemTempFiles(const RenderJobItem *item) const;
 
 Q_SIGNALS:
     void abortProcess(const QString &url);

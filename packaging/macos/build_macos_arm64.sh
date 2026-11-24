@@ -25,7 +25,7 @@ CRAFT_ROOT="${CRAFT_ROOT:-${HOME}/CraftRoot}"
 CRAFT_PREFIX=""
 APP_NAME="Bang On Pro"
 DMG_BASENAME="BangOnPro"
-APP_VERSION="${BANGONPRO_VERSION:-1.0.0}"
+APP_VERSION="${BANGONPRO_VERSION:-1.1.0}"
 MIN_MACOS="${MACOSX_DEPLOYMENT_TARGET:-13.0}"
 SIGN_IDENTITY="${APPLE_SIGNING_IDENTITY:-${MACOS_SIGNING_IDENTITY:-}}"
 NOTARY_PROFILE="${MACOS_NOTARY_PROFILE:-}"
@@ -36,6 +36,27 @@ SKIP_TESTS=0
 SKIP_DMG=0
 SKIP_PYTHON_VENV=0
 JOBS="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)"
+
+DMG_VERIFY_MOUNT_DIR=""
+DMG_VERIFY_APPS_DIR=""
+DMG_VERIFY_HOME_DIR=""
+
+cleanup_verification_artifacts() {
+    if [[ -n "${DMG_VERIFY_MOUNT_DIR}" && -d "${DMG_VERIFY_MOUNT_DIR}" ]]; then
+        if mount | grep -Fq " on ${DMG_VERIFY_MOUNT_DIR} "; then
+            hdiutil detach "${DMG_VERIFY_MOUNT_DIR}" >/dev/null 2>&1 || \
+                hdiutil detach -force "${DMG_VERIFY_MOUNT_DIR}" >/dev/null 2>&1 || true
+        fi
+        rm -rf "${DMG_VERIFY_MOUNT_DIR}"
+    fi
+    if [[ -n "${DMG_VERIFY_APPS_DIR}" && -d "${DMG_VERIFY_APPS_DIR}" ]]; then
+        rm -rf "${DMG_VERIFY_APPS_DIR}"
+    fi
+    if [[ -n "${DMG_VERIFY_HOME_DIR}" && -d "${DMG_VERIFY_HOME_DIR}" ]]; then
+        rm -rf "${DMG_VERIFY_HOME_DIR}"
+    fi
+}
+trap cleanup_verification_artifacts EXIT
 
 usage() {
     cat <<'EOF'
@@ -52,7 +73,7 @@ Options:
   --output-dir <path>           Output directory for .app/.dmg/logs (default: ./dist/macos-arm64)
   --craft-root <path>           KDE Craft root or CraftMaster target prefix
                                 (auto-detects <root>/macos-arm-clang if present)
-  --version <ver>               Release version string (default: 1.0.0)
+  --version <ver>               Release version string (default: 1.1.0)
   --min-macos <ver>             MACOSX_DEPLOYMENT_TARGET (default: 13.0)
   --sign-identity <id>          Developer ID Application signing identity
                                 (omit to fall back cleanly to ad-hoc signing)
@@ -83,30 +104,36 @@ die() {
     exit 1
 }
 
+require_arg() {
+    local opt="$1"
+    local remaining="$2"
+    [[ "${remaining}" -ge 2 ]] || die "Option ${opt} requires a value."
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --mode)
-            BUILD_MODE="$2"; shift 2 ;;
+            require_arg "$1" "$#"; BUILD_MODE="$2"; shift 2 ;;
         --build-type)
-            BUILD_TYPE="$2"; shift 2 ;;
+            require_arg "$1" "$#"; BUILD_TYPE="$2"; shift 2 ;;
         --source-dir)
-            SOURCE_DIR="$2"; shift 2 ;;
+            require_arg "$1" "$#"; SOURCE_DIR="$2"; shift 2 ;;
         --build-dir)
-            BUILD_DIR="$2"; shift 2 ;;
+            require_arg "$1" "$#"; BUILD_DIR="$2"; shift 2 ;;
         --output-dir)
-            OUTPUT_DIR="$2"; shift 2 ;;
+            require_arg "$1" "$#"; OUTPUT_DIR="$2"; shift 2 ;;
         --craft-root)
-            CRAFT_ROOT="$2"; shift 2 ;;
+            require_arg "$1" "$#"; CRAFT_ROOT="$2"; shift 2 ;;
         --version)
-            APP_VERSION="$2"; shift 2 ;;
+            require_arg "$1" "$#"; APP_VERSION="$2"; shift 2 ;;
         --min-macos)
-            MIN_MACOS="$2"; shift 2 ;;
+            require_arg "$1" "$#"; MIN_MACOS="$2"; shift 2 ;;
         --sign-identity)
-            SIGN_IDENTITY="$2"; shift 2 ;;
+            require_arg "$1" "$#"; SIGN_IDENTITY="$2"; shift 2 ;;
         --notary-profile)
-            NOTARY_PROFILE="$2"; shift 2 ;;
+            require_arg "$1" "$#"; NOTARY_PROFILE="$2"; shift 2 ;;
         --jobs)
-            JOBS="$2"; shift 2 ;;
+            require_arg "$1" "$#"; JOBS="$2"; shift 2 ;;
         --skip-tests)
             SKIP_TESTS=1; shift ;;
         --skip-dmg)
@@ -214,7 +241,7 @@ resolve_prefixes() {
 
 verify_dependencies() {
     log "Checking required build & packaging tools..."
-    local required_tools=(cmake ninja pkg-config codesign hdiutil lipo otool install_name_tool plutil shasum)
+    local required_tools=(cmake ninja pkg-config codesign hdiutil ditto lipo otool install_name_tool plutil shasum)
     local tool
     for tool in "${required_tools[@]}"; do
         command -v "${tool}" >/dev/null 2>&1 || die "Required tool missing: ${tool}"
@@ -369,6 +396,19 @@ ensure_rpath() {
     fi
 }
 
+strip_external_rpaths() {
+    local macho="$1"
+    local bad_rpath
+    while IFS= read -r bad_rpath; do
+        [[ -n "${bad_rpath}" ]] || continue
+        case "${bad_rpath}" in
+            /Users/*|/opt/homebrew*|/usr/local/Cellar*|"${CRAFT_ROOT}"*|"${BUILD_DIR}"*|"${STAGE_DIR}"*|"${REPO_ROOT}"*)
+                install_name_tool -delete_rpath "${bad_rpath}" "${macho}" 2>/dev/null || true
+                ;;
+        esac
+    done < <(otool -l "${macho}" 2>/dev/null | awk '/cmd LC_RPATH/{f=1; next} f && /path /{print $2; f=0}')
+}
+
 relocate_macho_deps() {
     local app_bundle="$1"
     local frameworks_dir="${app_bundle}/Contents/Frameworks"
@@ -412,6 +452,9 @@ relocate_macho_deps() {
             printf '%s\n' "${target}" >> "${seen_file}"
             chmod u+w "${target}" 2>/dev/null || true
 
+            # Strip any build-host, Craft, or Homebrew absolute LC_RPATH entries first
+            strip_external_rpaths "${target}"
+
             # Ensure appropriate @rpath entries based on Mach-O location inside .app
             case "${target}" in
                 "${app_bundle}/Contents/MacOS/"*)
@@ -422,6 +465,10 @@ relocate_macho_deps() {
                     ensure_rpath "${target}" "@executable_path/../Frameworks"
                     ;;
                 "${app_bundle}/Contents/PlugIns/"*|"${app_bundle}/Contents/Resources/qml/"*)
+                    # Normalize plugin's own LC_ID_DYLIB so otool -L does not expose host paths
+                    if [[ "${target}" == *.dylib || "${target}" == *.so ]]; then
+                        install_name_tool -id "@rpath/$(basename "${target}")" "${target}" 2>/dev/null || true
+                    fi
                     ensure_rpath "${target}" "@loader_path/../Frameworks"
                     ensure_rpath "${target}" "@loader_path/../../Frameworks"
                     ensure_rpath "${target}" "@loader_path/../../../Frameworks"
@@ -710,12 +757,17 @@ assemble_app_bundle() {
         find "${resources_dir}/bangonpro" -type d -name "__pycache__" -prune -exec rm -rf {} + 2>/dev/null || true
     fi
 
-    if [[ "${SKIP_PYTHON_VENV}" -eq 0 && -x "${SCRIPT_DIR}/bootstrap_ai_runtime.sh" ]]; then
-        log "Building self-contained Python 3.12 runtime inside Contents/Resources/python-env/..."
+    if [[ "${SKIP_PYTHON_VENV}" -eq 0 ]]; then
+        [[ -x "${SCRIPT_DIR}/bootstrap_ai_runtime.sh" ]] || die "Required script missing or not executable: ${SCRIPT_DIR}/bootstrap_ai_runtime.sh"
+        local py_req_file="${SOURCE_DIR}/requirements-bangonpro.lock"
+        if [[ ! -f "${py_req_file}" ]]; then
+            py_req_file="${SOURCE_DIR}/requirements-bangonpro.txt"
+        fi
+        log "Building self-contained Python 3.12 runtime inside Contents/Resources/python-env/ using $(basename "${py_req_file}")..."
         "${SCRIPT_DIR}/bootstrap_ai_runtime.sh" \
             --venv-dir "${resources_dir}/python-env" \
-            --requirements "${SOURCE_DIR}/requirements-bangonpro.txt"
-    elif [[ "${SKIP_PYTHON_VENV}" -eq 1 ]]; then
+            --requirements "${py_req_file}"
+    else
         warn "Skipping bundled Python 3.12 virtualenv (--skip-python-venv specified)."
     fi
 
@@ -982,102 +1034,376 @@ package_dmg() {
 }
 
 # ---------------------------------------------------------------------------
-# 8. Smoke-Test Launch Verification, Dylib Audit & Artifact Metadata
+# 8. Smoke-Test Launch Verification, Dylib/RPATH Audit, DMG Clean-Copy Test & Metadata
 # ---------------------------------------------------------------------------
+append_verify_log() {
+    local log_file="$1"
+    shift
+    printf '%s\n' "$@" | tee -a "${log_file}"
+}
+
 audit_no_leaked_dylib_paths() {
     local app_bundle="$1"
     local leaked=0
+    local checked=0
+    local scan_roots=(
+        "${app_bundle}/Contents/MacOS"
+        "${app_bundle}/Contents/Frameworks"
+        "${app_bundle}/Contents/PlugIns"
+    )
+    if [[ -d "${app_bundle}/Contents/Resources/qml" ]]; then
+        scan_roots+=("${app_bundle}/Contents/Resources/qml")
+    fi
+
+    local leak_regex='^(/Users/|/opt/homebrew|/usr/local/Cellar'
+    [[ -n "${CRAFT_ROOT}" ]] && leak_regex="${leak_regex}|${CRAFT_ROOT}"
+    [[ -n "${BUILD_DIR}" ]] && leak_regex="${leak_regex}|${BUILD_DIR}"
+    [[ -n "${STAGE_DIR}" ]] && leak_regex="${leak_regex}|${STAGE_DIR}"
+    leak_regex="${leak_regex})"
+
     local bin
     while IFS= read -r bin; do
         [[ -n "${bin}" ]] || continue
+        if ! file -b "${bin}" 2>/dev/null | grep -q "Mach-O"; then
+            continue
+        fi
+        checked=$((checked + 1))
+
+        local otool_l_out="" otool_l_rc=0
+        otool_l_out="$(otool -L "${bin}" 2>&1)" || otool_l_rc=$?
+        if [[ "${otool_l_rc}" -ne 0 ]]; then
+            printf 'OTOOL_L_FAILED (rc=%d) for %s:\n%s\n' "${otool_l_rc}" "${bin}" "${otool_l_out}"
+            leaked=1
+            continue
+        fi
+
         local bad_deps
-        bad_deps="$(otool -L "${bin}" 2>/dev/null | tail -n +2 | awk '{print $1}' | \
-            grep -E '^(/Users/runner|/opt/homebrew|/usr/local/Cellar|'"${CRAFT_ROOT}"')' || true)"
+        bad_deps="$(printf '%s\n' "${otool_l_out}" | tail -n +2 | awk '{print $1}' | grep -E "${leak_regex}" || true)"
         if [[ -n "${bad_deps}" ]]; then
             printf 'LEAKED DYLIB PATH in %s:\n%s\n' "${bin}" "${bad_deps}"
             leaked=1
         fi
-    done < <(find "${app_bundle}/Contents/MacOS" "${app_bundle}/Contents/Frameworks" "${app_bundle}/Contents/PlugIns" \
-        -type f \( -perm -111 -o -name "*.dylib" -o -name "*.so" \) 2>/dev/null)
 
+        local otool_r_out="" otool_r_rc=0
+        otool_r_out="$(otool -l "${bin}" 2>&1)" || otool_r_rc=$?
+        if [[ "${otool_r_rc}" -ne 0 ]]; then
+            printf 'OTOOL_RPATH_FAILED (rc=%d) for %s:\n%s\n' "${otool_r_rc}" "${bin}" "${otool_r_out}"
+            leaked=1
+            continue
+        fi
+
+        local bad_rpaths
+        bad_rpaths="$(printf '%s\n' "${otool_r_out}" | awk '/cmd LC_RPATH/{f=1; next} f && /path /{print $2; f=0}' | grep -E "${leak_regex}" || true)"
+        if [[ -n "${bad_rpaths}" ]]; then
+            printf 'LEAKED LC_RPATH in %s:\n%s\n' "${bin}" "${bad_rpaths}"
+            leaked=1
+        fi
+    done < <(find "${scan_roots[@]}" -type f \( -perm -111 -o -name "*.dylib" -o -name "*.so" \) 2>/dev/null)
+
+    if [[ "${checked}" -eq 0 ]]; then
+        printf 'LEAKED DYLIB PATH: no Mach-O binaries discovered inside %s\n' "${app_bundle}"
+        return 1
+    fi
     if [[ "${leaked}" -ne 0 ]]; then
         return 1
     fi
-    echo "PASS: Zero leaked /Users/runner, /opt/homebrew, or CraftRoot paths detected by otool -L."
+    printf 'PASS: Audited %d Mach-O object(s); zero leaked host/Homebrew/Craft dylib or LC_RPATH paths.\n' "${checked}"
     return 0
 }
 
-run_smoke_verification() {
-    local app_bundle="${OUTPUT_DIR}/${APP_NAME}.app"
-    local log_file="${OUTPUT_DIR}/BUILD_VERIFICATION.log"
-    local status_file="${OUTPUT_DIR}/SIGNING_STATUS.txt"
-    local dylib_audit_ok=0
+audit_bundle_security_hygiene() {
+    local app_bundle="$1"
+    local bad_files
+    bad_files="$(find "${app_bundle}" -type f \( -name "*.p12" -o -name "*.p8" -o -name ".env" -o -name ".netrc" -o -name "*.prfpset" -o -name "effects pr.zip" \) 2>/dev/null || true)"
+    if [[ -n "${bad_files}" ]]; then
+        printf 'FORBIDDEN FILE(S) IN BUNDLE:\n%s\n' "${bad_files}"
+        return 1
+    fi
 
-    {
-        echo "=== Bang On Pro Apple Silicon (arm64) Self-Contained Build Verification ==="
-        echo "Timestamp (UTC): $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-        echo "Version:         ${APP_VERSION}"
-        echo "Host macOS:      $(sw_vers -productVersion) ($(uname -m))"
-        echo "Signing State:   ${SIGNING_STATE}"
-        echo ""
-        echo "--- Info.plist Validation ---"
-        plutil -lint "${app_bundle}/Contents/Info.plist"
-        echo ""
-        echo "--- Mach-O Architecture Check ---"
-        file "${app_bundle}/Contents/MacOS/${APP_NAME}"
-        lipo -archs "${app_bundle}/Contents/MacOS/${APP_NAME}"
-        test "$(lipo -archs "${app_bundle}/Contents/MacOS/${APP_NAME}")" = "arm64"
-        echo ""
-        echo "--- Code Signature Verification ---"
-        codesign -dvv "${app_bundle}" 2>&1 || true
-        codesign --verify --deep --strict --verbose=2 "${app_bundle}" 2>&1
-        echo ""
-        echo "--- Self-Contained Mach-O Dylib Linkage Audit (otool -L) ---"
-        if audit_no_leaked_dylib_paths "${app_bundle}"; then
-            dylib_audit_ok=1
+    if [[ -d "${app_bundle}/Contents/Resources/bangonpro" ]]; then
+        local bad_artcraft
+        bad_artcraft="$(find "${app_bundle}/Contents/Resources/bangonpro" -type d \( -name "sound" -o -name "memes" -o -name "skybox" -o -name "pose" -o -name "characters_gif" \) 2>/dev/null || true)"
+        if [[ -n "${bad_artcraft}" ]]; then
+            printf 'EXCLUDED ARTCRAFT ASSET DIR(S) IN BUNDLE:\n%s\n' "${bad_artcraft}"
+            return 1
         fi
-        echo ""
-        echo "--- Headless Launch Smoke Test (--version) ---"
-        local abs_bundle
-        abs_bundle="$(cd "$(dirname "${app_bundle}")" && pwd)/$(basename "${app_bundle}")"
+    fi
+
+    printf 'PASS: Zero credentials, signing keys, proprietary presets, or excluded ArtCraft asset dirs in bundle.\n'
+    return 0
+}
+
+verify_bundle_launch() {
+    local app_bundle="$1"
+    local context_label="$2"
+    local log_file="$3"
+
+    local abs_bundle
+    abs_bundle="$(cd "$(dirname "${app_bundle}")" && pwd)/$(basename "${app_bundle}")"
+    [[ -d "${abs_bundle}" ]] || die "[${context_label}] App bundle directory missing: ${abs_bundle}"
+
+    append_verify_log "${log_file}" "" "=== ${context_label}: ${abs_bundle} ==="
+
+    # 1. Info.plist validation
+    append_verify_log "${log_file}" "--- Info.plist Validation ---"
+    local out="" rc=0
+    out="$(plutil -lint "${abs_bundle}/Contents/Info.plist" 2>&1)" || rc=$?
+    append_verify_log "${log_file}" "${out}"
+    [[ "${rc}" -eq 0 ]] || die "[${context_label}] plutil -lint failed (rc=${rc})"
+
+    # 2. Mach-O architecture check (main app + bundled helper binaries)
+    append_verify_log "${log_file}" "" "--- Mach-O Architecture Check ---"
+    rc=0; out="$(file "${abs_bundle}/Contents/MacOS/${APP_NAME}" 2>&1)" || rc=$?
+    append_verify_log "${log_file}" "${out}"
+    [[ "${rc}" -eq 0 ]] || die "[${context_label}] file check failed for ${APP_NAME} (rc=${rc})"
+
+    local archs=""
+    rc=0; archs="$(lipo -archs "${abs_bundle}/Contents/MacOS/${APP_NAME}" 2>&1)" || rc=$?
+    append_verify_log "${log_file}" "lipo -archs (${APP_NAME}): ${archs}"
+    [[ "${rc}" -eq 0 && "${archs}" == "arm64" ]] || die "[${context_label}] Expected arm64 Mach-O slice for ${APP_NAME}, got '${archs}' (rc=${rc})"
+
+    local helper
+    for helper in kdenlive_render melt ffmpeg ffprobe; do
+        if [[ -x "${abs_bundle}/Contents/MacOS/${helper}" ]]; then
+            local h_archs="" h_rc=0
+            h_archs="$(lipo -archs "${abs_bundle}/Contents/MacOS/${helper}" 2>&1)" || h_rc=$?
+            append_verify_log "${log_file}" "lipo -archs (${helper}): ${h_archs}"
+            [[ "${h_rc}" -eq 0 && "${h_archs}" == *"arm64"* ]] || die "[${context_label}] Helper '${helper}' missing arm64 slice (got '${h_archs}', rc=${h_rc})"
+        fi
+    done
+
+    # 3. Code signature inspection & strict deep verification (never masked)
+    append_verify_log "${log_file}" "" "--- Code Signature Verification ---"
+    rc=0; out="$(codesign -dvv "${abs_bundle}" 2>&1)" || rc=$?
+    append_verify_log "${log_file}" "${out}"
+    [[ "${rc}" -eq 0 ]] || die "[${context_label}] codesign -dvv failed (rc=${rc})"
+
+    rc=0; out="$(codesign --verify --deep --strict --verbose=2 "${abs_bundle}" 2>&1)" || rc=$?
+    append_verify_log "${log_file}" "${out}"
+    [[ "${rc}" -eq 0 ]] || die "[${context_label}] codesign --verify --deep --strict failed (rc=${rc})"
+
+    # 4. Self-contained Mach-O dylib & LC_RPATH audit
+    append_verify_log "${log_file}" "" "--- Self-Contained Mach-O Dylib & LC_RPATH Audit ---"
+    rc=0; out="$(audit_no_leaked_dylib_paths "${abs_bundle}" 2>&1)" || rc=$?
+    append_verify_log "${log_file}" "${out}"
+    [[ "${rc}" -eq 0 ]] || die "[${context_label}] Mach-O dylib / LC_RPATH audit failed (rc=${rc})"
+
+    # 5. Bundle credential & compliance hygiene audit
+    append_verify_log "${log_file}" "" "--- Bundle Security & Asset Hygiene Audit ---"
+    rc=0; out="$(audit_bundle_security_hygiene "${abs_bundle}" 2>&1)" || rc=$?
+    append_verify_log "${log_file}" "${out}"
+    [[ "${rc}" -eq 0 ]] || die "[${context_label}] Bundle security hygiene audit failed (rc=${rc})"
+
+    # Prepare clean minimal environment with zero inherited Craft/Homebrew/CI secrets
+    local clean_home
+    clean_home="$(mktemp -d "${TMPDIR:-/tmp}/bangonpro-verify-home.XXXXXX")"
+    chmod 700 "${clean_home}"
+    DMG_VERIFY_HOME_DIR="${clean_home}"
+    local clean_tmp="${clean_home}/tmp"
+    mkdir -p "${clean_tmp}"
+    chmod 700 "${clean_tmp}"
+    local clean_user="${USER:-$(id -un)}"
+
+    # 6. Headless launch smoke test (--version)
+    append_verify_log "${log_file}" "" "--- Headless Launch Smoke Test (--version) ---"
+    rc=0
+    out="$(env -i \
+        HOME="${clean_home}" \
+        TMPDIR="${clean_tmp}" \
+        USER="${clean_user}" \
+        LANG="en_US.UTF-8" \
+        PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
         MLT_REPOSITORY="${abs_bundle}/Contents/PlugIns/mlt" \
         MLT_DATA="${abs_bundle}/Contents/Resources/mlt" \
         FREI0R_PATH="${abs_bundle}/Contents/PlugIns/frei0r-1" \
         QT_QPA_PLATFORM=offscreen \
-            "${abs_bundle}/Contents/MacOS/${APP_NAME}" --version 2>&1
-        echo ""
-        echo "--- Bundled Media Stack (MLT 7 + FFmpeg VideoToolbox) ---"
-        if [[ -x "${abs_bundle}/Contents/MacOS/melt" ]]; then
-            MLT_REPOSITORY="${abs_bundle}/Contents/PlugIns/mlt" \
-            MLT_DATA="${abs_bundle}/Contents/Resources/mlt" \
-            FREI0R_PATH="${abs_bundle}/Contents/PlugIns/frei0r-1" \
-                "${abs_bundle}/Contents/MacOS/melt" --version 2>&1 | head -n 3
-            MLT_REPOSITORY="${abs_bundle}/Contents/PlugIns/mlt" \
-            MLT_DATA="${abs_bundle}/Contents/Resources/mlt" \
-            FREI0R_PATH="${abs_bundle}/Contents/PlugIns/frei0r-1" \
-                "${abs_bundle}/Contents/MacOS/melt" -query producers 2>&1 | grep -q "avformat" \
-                && echo "PASS: Bundled melt loaded avformat producer from Contents/PlugIns/mlt" \
-                || die "Bundled melt failed to load avformat producer from Contents/PlugIns/mlt"
-        fi
-        if [[ -x "${abs_bundle}/Contents/MacOS/ffmpeg" ]]; then
-            "${abs_bundle}/Contents/MacOS/ffmpeg" -version 2>&1 | head -n 2
-            "${abs_bundle}/Contents/MacOS/ffmpeg" -hide_banner -hwaccels 2>&1
-        fi
-        echo ""
-        echo "--- Bundled Self-Contained Python AI Engine CLI Smoke Test ---"
-        if [[ -x "${app_bundle}/Contents/Resources/python-env/bin/python3" ]]; then
-            PYTHONPATH="${app_bundle}/Contents/Resources" \
-                "${app_bundle}/Contents/Resources/python-env/bin/python3" -m bangonpro.ai_engine.cli --help 2>&1 | head -n 20
-        else
-            echo "SKIPPED: bundled python-env not present (--skip-python-venv)."
-        fi
-        echo ""
-        echo "--- Bundled Licence & Attribution Files ---"
-        ls -la "${app_bundle}/Contents/Resources/LICENSES"
-    } | tee "${log_file}"
+        SDL_AUDIODRIVER=dummy \
+        "${abs_bundle}/Contents/MacOS/${APP_NAME}" --version 2>&1)" || rc=$?
+    append_verify_log "${log_file}" "${out}"
+    [[ "${rc}" -eq 0 ]] || die "[${context_label}] '${APP_NAME} --version' failed (rc=${rc})"
+    [[ -n "${out}" ]] || die "[${context_label}] '${APP_NAME} --version' produced empty output"
 
-    if grep -q "LEAKED DYLIB PATH" "${log_file}"; then
-        die "Bundle dylib audit failed: leaked non-relocated library path(s) detected in ${log_file}."
+    # 7. Bundled Media Stack (MLT 7 + FFmpeg VideoToolbox)
+    append_verify_log "${log_file}" "" "--- Bundled Media Stack (MLT 7 + FFmpeg VideoToolbox) ---"
+    [[ -x "${abs_bundle}/Contents/MacOS/melt" ]] || die "[${context_label}] Bundled melt binary missing from Contents/MacOS/melt"
+    rc=0
+    out="$(env -i \
+        HOME="${clean_home}" \
+        TMPDIR="${clean_tmp}" \
+        USER="${clean_user}" \
+        PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
+        MLT_REPOSITORY="${abs_bundle}/Contents/PlugIns/mlt" \
+        MLT_DATA="${abs_bundle}/Contents/Resources/mlt" \
+        FREI0R_PATH="${abs_bundle}/Contents/PlugIns/frei0r-1" \
+        "${abs_bundle}/Contents/MacOS/melt" --version 2>&1)" || rc=$?
+    append_verify_log "${log_file}" "$(printf '%s\n' "${out}" | head -n 3)"
+    [[ "${rc}" -eq 0 ]] || die "[${context_label}] Bundled melt --version failed (rc=${rc})"
+
+    rc=0
+    out="$(env -i \
+        HOME="${clean_home}" \
+        TMPDIR="${clean_tmp}" \
+        USER="${clean_user}" \
+        PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
+        MLT_REPOSITORY="${abs_bundle}/Contents/PlugIns/mlt" \
+        MLT_DATA="${abs_bundle}/Contents/Resources/mlt" \
+        FREI0R_PATH="${abs_bundle}/Contents/PlugIns/frei0r-1" \
+        "${abs_bundle}/Contents/MacOS/melt" -query producers 2>&1)" || rc=$?
+    [[ "${rc}" -eq 0 ]] || {
+        append_verify_log "${log_file}" "${out}"
+        die "[${context_label}] Bundled melt -query producers failed (rc=${rc})"
+    }
+    if printf '%s\n' "${out}" | grep -q "avformat"; then
+        append_verify_log "${log_file}" "PASS: Bundled melt loaded avformat producer from Contents/PlugIns/mlt"
+    else
+        append_verify_log "${log_file}" "${out}"
+        die "[${context_label}] Bundled melt failed to load avformat producer from Contents/PlugIns/mlt"
+    fi
+
+    [[ -x "${abs_bundle}/Contents/MacOS/ffmpeg" ]] || die "[${context_label}] Bundled ffmpeg binary missing from Contents/MacOS/ffmpeg"
+    rc=0
+    out="$(env -i HOME="${clean_home}" TMPDIR="${clean_tmp}" PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
+        "${abs_bundle}/Contents/MacOS/ffmpeg" -version 2>&1)" || rc=$?
+    append_verify_log "${log_file}" "$(printf '%s\n' "${out}" | head -n 2)"
+    [[ "${rc}" -eq 0 ]] || die "[${context_label}] Bundled ffmpeg -version failed (rc=${rc})"
+
+    rc=0
+    out="$(env -i HOME="${clean_home}" TMPDIR="${clean_tmp}" PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
+        "${abs_bundle}/Contents/MacOS/ffmpeg" -hide_banner -hwaccels 2>&1)" || rc=$?
+    append_verify_log "${log_file}" "${out}"
+    [[ "${rc}" -eq 0 ]] || die "[${context_label}] Bundled ffmpeg -hwaccels failed (rc=${rc})"
+
+    # 8. Bundled Self-Contained Python AI Engine CLI Smoke Test
+    append_verify_log "${log_file}" "" "--- Bundled Self-Contained Python AI Engine CLI Smoke Test ---"
+    if [[ "${SKIP_PYTHON_VENV}" -eq 0 ]]; then
+        local bundled_py="${abs_bundle}/Contents/Resources/python-env/bin/python3"
+        [[ -x "${bundled_py}" ]] || die "[${context_label}] Bundled Python interpreter missing: ${bundled_py}"
+
+        rc=0
+        out="$(env -i \
+            HOME="${clean_home}" \
+            TMPDIR="${clean_tmp}" \
+            USER="${clean_user}" \
+            LANG="en_US.UTF-8" \
+            PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
+            PYTHONNOUSERSITE=1 \
+            PYTHONPATH="${abs_bundle}/Contents/Resources" \
+            "${bundled_py}" -s -m bangonpro.ai_engine.cli --help 2>&1)" || rc=$?
+        append_verify_log "${log_file}" "$(printf '%s\n' "${out}" | head -n 20)"
+        [[ "${rc}" -eq 0 ]] || die "[${context_label}] Bundled Python AI Engine CLI --help failed (rc=${rc})"
+
+        rc=0
+        out="$(env -i \
+            HOME="${clean_home}" \
+            TMPDIR="${clean_tmp}" \
+            USER="${clean_user}" \
+            LANG="en_US.UTF-8" \
+            PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
+            PYTHONNOUSERSITE=1 \
+            PYTHONPATH="${abs_bundle}/Contents/Resources" \
+            "${bundled_py}" -s -c "import bangonpro.ai_engine, bangonpro.macos, bangonpro.premiere_compat, bangonpro.roto_studio; print('PASS: All Bang On Pro Python packages importable offline')" 2>&1)" || rc=$?
+        append_verify_log "${log_file}" "${out}"
+        [[ "${rc}" -eq 0 ]] || die "[${context_label}] Bundled Python module import smoke check failed (rc=${rc})"
+    else
+        append_verify_log "${log_file}" "SKIPPED: bundled python-env disabled (--skip-python-venv)."
+    fi
+
+    # 9. Bundled Licence & Attribution Files
+    append_verify_log "${log_file}" "" "--- Bundled Licence & Attribution Files ---"
+    local req_lic
+    for req_lic in \
+        "${abs_bundle}/Contents/Resources/COPYING" \
+        "${abs_bundle}/Contents/Resources/LICENSES/COPYING" \
+        "${abs_bundle}/Contents/Resources/LICENSES/ARTCRAFT_NOTICE.txt" \
+        "${abs_bundle}/Contents/Resources/LICENSES/MIT.txt" \
+        "${abs_bundle}/Contents/Resources/LICENSES/Apache-2.0.txt" \
+        "${abs_bundle}/Contents/Resources/LICENSES/OPEN_SOURCE_COMPONENTS.md"; do
+        [[ -f "${req_lic}" ]] || die "[${context_label}] Missing required bundled licence file: ${req_lic}"
+    done
+    rc=0; out="$(ls -la "${abs_bundle}/Contents/Resources/LICENSES" 2>&1)" || rc=$?
+    append_verify_log "${log_file}" "${out}"
+    [[ "${rc}" -eq 0 ]] || die "[${context_label}] Failed to list bundled LICENSES directory (rc=${rc})"
+
+    rm -rf "${clean_home}"
+    DMG_VERIFY_HOME_DIR=""
+    append_verify_log "${log_file}" "PASS: ${context_label} succeeded."
+}
+
+verify_packaged_dmg() {
+    local dmg_path="$1"
+    local log_file="$2"
+
+    [[ -f "${dmg_path}" && -s "${dmg_path}" ]] || die "Packaged DMG missing or empty: ${dmg_path}"
+
+    append_verify_log "${log_file}" "" "=== Packaged DMG Mount & Isolated Clean-Copy Launch Verification ==="
+
+    # 1. Verify SHA-256 checksum matches SHA256SUMS.txt
+    local out="" rc=0
+    out="$(cd "${OUTPUT_DIR}" && shasum -a 256 -c SHA256SUMS.txt 2>&1)" || rc=$?
+    append_verify_log "${log_file}" "${out}"
+    [[ "${rc}" -eq 0 ]] || die "SHA-256 checksum verification failed for ${dmg_path} (rc=${rc})"
+
+    # 2. Mount DMG read-only at private temp mountpoint and copy .app outside build tree
+    DMG_VERIFY_MOUNT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/bangonpro-dmg-mount.XXXXXX")"
+    DMG_VERIFY_APPS_DIR="$(mktemp -d "${TMPDIR:-/tmp}/bangonpro-dmg-apps.XXXXXX")"
+    chmod 700 "${DMG_VERIFY_MOUNT_DIR}" "${DMG_VERIFY_APPS_DIR}"
+
+    rc=0
+    out="$(hdiutil attach "${dmg_path}" -mountpoint "${DMG_VERIFY_MOUNT_DIR}" -nobrowse -readonly 2>&1)" || rc=$?
+    append_verify_log "${log_file}" "${out}"
+    [[ "${rc}" -eq 0 ]] || die "hdiutil attach failed for ${dmg_path} (rc=${rc})"
+
+    [[ -d "${DMG_VERIFY_MOUNT_DIR}/${APP_NAME}.app" ]] || die "Mounted DMG does not contain '${APP_NAME}.app'"
+    [[ -L "${DMG_VERIFY_MOUNT_DIR}/Applications" ]] || die "Mounted DMG is missing /Applications drag-install symlink"
+
+    local copied_app="${DMG_VERIFY_APPS_DIR}/${APP_NAME}.app"
+    rc=0
+    out="$(ditto "${DMG_VERIFY_MOUNT_DIR}/${APP_NAME}.app" "${copied_app}" 2>&1)" || rc=$?
+    [[ -n "${out}" ]] && append_verify_log "${log_file}" "${out}"
+    [[ "${rc}" -eq 0 && -d "${copied_app}" ]] || die "Failed to clean-copy '${APP_NAME}.app' from mounted DMG (rc=${rc})"
+
+    # 3. Detach DMG BEFORE launching copied app to guarantee zero dependency on mounted image
+    rc=0
+    out="$(hdiutil detach "${DMG_VERIFY_MOUNT_DIR}" 2>&1)" || rc=$?
+    if [[ "${rc}" -ne 0 ]]; then
+        sleep 1
+        rc=0
+        out="$(hdiutil detach -force "${DMG_VERIFY_MOUNT_DIR}" 2>&1)" || rc=$?
+    fi
+    append_verify_log "${log_file}" "${out}"
+    [[ "${rc}" -eq 0 ]] || die "hdiutil detach failed for ${DMG_VERIFY_MOUNT_DIR} (rc=${rc})"
+    rm -rf "${DMG_VERIFY_MOUNT_DIR}"
+    DMG_VERIFY_MOUNT_DIR=""
+
+    # 4. Run full verification & launch tests against the copied app outside build/dist dirs
+    verify_bundle_launch "${copied_app}" "DMG Clean-Copy Applications Verification" "${log_file}"
+
+    rm -rf "${DMG_VERIFY_APPS_DIR}"
+    DMG_VERIFY_APPS_DIR=""
+    append_verify_log "${log_file}" "PASS: Packaged DMG mounted, clean-copied, detached, and verified end-to-end."
+}
+
+run_smoke_verification() {
+    local app_bundle="${OUTPUT_DIR}/${APP_NAME}.app"
+    local dmg_path="${OUTPUT_DIR}/${DMG_BASENAME}-${APP_VERSION}-arm64.dmg"
+    local log_file="${OUTPUT_DIR}/BUILD_VERIFICATION.log"
+    local status_file="${OUTPUT_DIR}/SIGNING_STATUS.txt"
+    local dmg_verified_flag="false"
+
+    : > "${log_file}"
+    append_verify_log "${log_file}" \
+        "=== Bang On Pro Apple Silicon (arm64) Self-Contained Build Verification ===" \
+        "Timestamp (UTC): $(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        "Version:         ${APP_VERSION}" \
+        "Host macOS:      $(sw_vers -productVersion) ($(uname -m))" \
+        "Host CPU:        $(sysctl -n machdep.cpu.brand_string 2>/dev/null || uname -m)" \
+        "Signing State:   ${SIGNING_STATE}"
+
+    verify_bundle_launch "${app_bundle}" "Staged App Bundle Verification" "${log_file}"
+
+    if [[ "${SKIP_DMG}" -eq 0 ]]; then
+        verify_packaged_dmg "${dmg_path}" "${log_file}"
+        dmg_verified_flag="true"
     fi
 
     local notarized_flag="false"
@@ -1097,6 +1423,7 @@ architecture=arm64
 signing_state=${SIGNING_STATE}
 notarized=${notarized_flag}
 self_contained_bundle=true
+dmg_verified=${dmg_verified_flag}
 gatekeeper_note=${gatekeeper_note}
 EOF
     log "Wrote verification log (${log_file}) and signing annotation (${status_file})."
@@ -1117,3 +1444,4 @@ main() {
 }
 
 main
+

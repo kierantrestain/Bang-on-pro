@@ -42,16 +42,162 @@ def _normalize_custom_dirs(
 ) -> list[Path]:
     if custom_dirs is None:
         return []
-    if isinstance(custom_dirs, (str, Path)):
-        raw_list = [custom_dirs]
-    else:
-        raw_list = list(custom_dirs)
+    raw_list = [custom_dirs] if isinstance(custom_dirs, (str, Path)) else list(custom_dirs)
     resolved: list[Path] = []
     for item in raw_list:
         p = Path(item).expanduser()
         if p.is_dir():
             resolved.append(p.resolve())
     return resolved
+
+
+def get_effective_profile_settings(profile: dict[str, Any]) -> dict[str, Any]:
+    """Resolve effective V1.1 production profile rules with full v1.0 fallback compatibility."""
+    editing = profile.get("editing_rules", {})
+    audio = profile.get("audio_rules", {})
+    graphics = profile.get("graphics_rules", {})
+    video = profile.get("video_spec", {})
+
+    camera_roles: dict[str, str] = {}
+    speaker_camera_map: dict[str, str] = {}
+    for cam in profile.get("cameras", []):
+        cid = str(cam["camera_id"])
+        role = str(cam["role"])
+        camera_roles[cid] = role
+        spk = cam.get("speaker_label")
+        if spk and str(spk) not in speaker_camera_map and role not in ("wide", "broll", "reaction"):
+            speaker_camera_map[str(spk)] = cid
+    # Second pass for reaction/desk speakers if not yet mapped
+    for cam in profile.get("cameras", []):
+        cid = str(cam["camera_id"])
+        spk = cam.get("speaker_label")
+        if spk and str(spk) not in speaker_camera_map:
+            speaker_camera_map[str(spk)] = cid
+
+    # Explicit profile camera_roles / speaker_camera_map take priority
+    if isinstance(profile.get("camera_roles"), dict):
+        for cid, role in profile["camera_roles"].items():
+            camera_roles[str(cid)] = str(role)
+    if isinstance(profile.get("speaker_camera_map"), dict):
+        for spk, cid in profile["speaker_camera_map"].items():
+            speaker_camera_map[str(spk)] = str(cid)
+
+    min_shot = float(
+        profile.get(
+            "min_shot_duration_sec",
+            editing.get("min_shot_duration_sec", editing.get("min_shot_sec", 2.0)),
+        )
+    )
+    max_shot = float(
+        profile.get(
+            "max_shot_duration_sec",
+            editing.get("max_shot_duration_sec", editing.get("max_shot_sec", 10.0)),
+        )
+    )
+    wide_interval = float(
+        profile.get(
+            "wide_shot_interval_sec",
+            editing.get("wide_shot_interval_sec", max(max_shot * 1.5, 14.0)),
+        )
+    )
+    reaction_freq = float(
+        profile.get(
+            "reaction_shot_frequency",
+            editing.get("reaction_shot_frequency", 0.5),
+        )
+    )
+    silence_thresh = float(
+        profile.get(
+            "silence_threshold_db",
+            editing.get("silence_threshold_db", -36.0),
+        )
+    )
+    loudness_lufs = float(
+        profile.get(
+            "loudness_target_lufs",
+            audio.get(
+                "loudness_target_lufs",
+                audio.get(
+                    "target_lufs",
+                    profile.get("delivery_spec", {}).get("target_lufs", -16.0),
+                ),
+            ),
+        )
+    )
+
+    intro_outro_defaults = {
+        "open_on_wide": True,
+        "opening_wide_sec": 2.0,
+        "close_on_wide": True,
+        "closing_wide_sec": 2.0,
+        "intro_asset": None,
+        "outro_asset": None,
+        "fade_in_sec": 0.0,
+        "fade_out_sec": 0.5,
+    }
+    intro_outro = {**intro_outro_defaults, **(profile.get("intro_outro_rules") or {})}
+
+    accent_hex = str(graphics.get("brand_accent_hex", "#FF5A1F"))
+    graphics_template_defaults = {
+        "lower_third_template": "studio_clean_bar",
+        "lower_third_position": "bottom_left",
+        "title_card_template": "studio_opener",
+        "bug_position": "top_right",
+        "font_family": "DejaVu Sans",
+        "accent_hex": accent_hex,
+    }
+    graphics_templates = {
+        **graphics_template_defaults,
+        **(profile.get("graphics_templates") or {}),
+    }
+
+    caption_style_defaults = {
+        "font_family": "DejaVu Sans",
+        "font_size_px": max(24, round(int(video.get("height", 1080)) * 0.044)),
+        "primary_color_hex": "#FFFFFF",
+        "highlight_color_hex": accent_hex,
+        "outline_color_hex": "#121212",
+        "outline_width": 3.0,
+        "alignment": "bottom_center",
+        "max_chars_per_line": 42,
+        "uppercase": False,
+        "burn_in": False,
+    }
+    caption_style = {**caption_style_defaults, **(profile.get("caption_style") or {})}
+
+    first_preset = (profile.get("export_presets") or [{}])[0]
+    delivery_defaults = {
+        "container": str(first_preset.get("container", "mp4")),
+        "video_codec": str(first_preset.get("video_codec", "libx264")),
+        "audio_codec": str(first_preset.get("audio_codec", "aac")),
+        "width": int(video.get("width", 1920)),
+        "height": int(video.get("height", 1080)),
+        "fps_num": int(video.get("fps_num", 25)),
+        "fps_den": int(video.get("fps_den", 1)),
+        "color_space": str(video.get("color_space", "bt709")),
+        "audio_sample_rate": 48000,
+        "audio_channels": 2,
+        "target_lufs": loudness_lufs,
+        "true_peak_dbtp": float(audio.get("true_peak_dbtp", -1.5)),
+        "video_bitrate": str(first_preset.get("video_bitrate", "12M")),
+        "audio_bitrate": str(first_preset.get("audio_bitrate", "192k")),
+    }
+    delivery_spec = {**delivery_defaults, **(profile.get("delivery_spec") or {})}
+
+    return {
+        "camera_roles": camera_roles,
+        "speaker_camera_map": speaker_camera_map,
+        "wide_shot_interval_sec": wide_interval,
+        "reaction_shot_frequency": reaction_freq,
+        "min_shot_duration_sec": min_shot,
+        "max_shot_duration_sec": max_shot,
+        "silence_threshold_db": silence_thresh,
+        "intro_outro_rules": intro_outro,
+        "graphics_templates": graphics_templates,
+        "loudness_target_lufs": loudness_lufs,
+        "caption_style": caption_style,
+        "delivery_spec": delivery_spec,
+    }
 
 
 def validate_show_profile(profile: dict[str, Any]) -> dict[str, Any]:
@@ -75,25 +221,65 @@ def validate_show_profile(profile: dict[str, Any]) -> dict[str, Any]:
             "editing_rules.max_shot_sec must be >= editing_rules.min_shot_sec"
         )
 
+    min_dur = profile.get("min_shot_duration_sec", editing_rules.get("min_shot_duration_sec"))
+    max_dur = profile.get("max_shot_duration_sec", editing_rules.get("max_shot_duration_sec"))
+    if min_dur is not None and max_dur is not None and float(max_dur) < float(min_dur):
+        raise ShowProfileValidationError(
+            "max_shot_duration_sec must be >= min_shot_duration_sec"
+        )
+
+    eff_min = float(min_dur) if min_dur is not None else float(editing_rules["min_shot_sec"])
+    wide_interval = profile.get(
+        "wide_shot_interval_sec", editing_rules.get("wide_shot_interval_sec")
+    )
+    if wide_interval is not None and float(wide_interval) < eff_min:
+        raise ShowProfileValidationError(
+            "wide_shot_interval_sec must be >= min_shot_duration_sec"
+        )
+
+    reaction_freq = profile.get(
+        "reaction_shot_frequency", editing_rules.get("reaction_shot_frequency")
+    )
+    if reaction_freq is not None and not (0.0 <= float(reaction_freq) <= 1.0):
+        raise ShowProfileValidationError(
+            "reaction_shot_frequency must be between 0.0 and 1.0"
+        )
+
     interruption_gap = editing_rules.get("interruption_gap_sec")
-    if interruption_gap is not None and float(interruption_gap) < float(editing_rules["min_silence_sec"]):
+    if interruption_gap is not None and float(interruption_gap) < float(
+        editing_rules["min_silence_sec"]
+    ):
         raise ShowProfileValidationError(
             "editing_rules.interruption_gap_sec must be >= editing_rules.min_silence_sec"
         )
 
     audio_rules = profile.get("audio_rules", {})
-    if "target_lufs" in audio_rules:
-        lufs = float(audio_rules["target_lufs"])
-        if lufs < -40.0 or lufs > -6.0:
-            raise ShowProfileValidationError(
-                f"audio_rules.target_lufs ({lufs}) must be between -40.0 and -6.0 LUFS"
-            )
-    if "true_peak_dbtp" in audio_rules:
-        tp = float(audio_rules["true_peak_dbtp"])
-        if tp < -12.0 or tp > 0.0:
-            raise ShowProfileValidationError(
-                f"audio_rules.true_peak_dbtp ({tp}) must be between -12.0 and 0.0 dBTP"
-            )
+    for lufs_key, lufs_val in (
+        ("audio_rules.target_lufs", audio_rules.get("target_lufs")),
+        ("audio_rules.loudness_target_lufs", audio_rules.get("loudness_target_lufs")),
+        ("loudness_target_lufs", profile.get("loudness_target_lufs")),
+        ("delivery_spec.target_lufs", (profile.get("delivery_spec") or {}).get("target_lufs")),
+    ):
+        if lufs_val is not None:
+            lufs = float(lufs_val)
+            if lufs < -40.0 or lufs > -6.0:
+                raise ShowProfileValidationError(
+                    f"{lufs_key} ({lufs}) must be between -40.0 and -6.0 LUFS"
+                )
+
+    for tp_key, tp_val in (
+        ("audio_rules.true_peak_dbtp", audio_rules.get("true_peak_dbtp")),
+        (
+            "delivery_spec.true_peak_dbtp",
+            (profile.get("delivery_spec") or {}).get("true_peak_dbtp"),
+        ),
+    ):
+        if tp_val is not None:
+            tp = float(tp_val)
+            if tp < -12.0 or tp > 0.0:
+                raise ShowProfileValidationError(
+                    f"{tp_key} ({tp}) must be between -12.0 and 0.0 dBTP"
+                )
 
     cam_ids = [cam["camera_id"] for cam in profile["cameras"]]
     if len(cam_ids) != len(set(cam_ids)):
@@ -181,17 +367,29 @@ def create_custom_profile(
     description: str | None = None,
     video_spec: dict[str, Any] | None = None,
     cameras: list[dict[str, Any]] | None = None,
+    camera_roles: dict[str, str] | None = None,
+    speaker_camera_map: dict[str, str] | None = None,
     camera_preferences: dict[str, Any] | None = None,
+    wide_shot_interval_sec: float | None = None,
+    reaction_shot_frequency: float | None = None,
+    min_shot_duration_sec: float | None = None,
+    max_shot_duration_sec: float | None = None,
+    silence_threshold_db: float | None = None,
+    loudness_target_lufs: float | None = None,
+    intro_outro_rules: dict[str, Any] | None = None,
     editing_rules: dict[str, Any] | None = None,
     audio_rules: dict[str, Any] | None = None,
     graphics_rules: dict[str, Any] | None = None,
+    graphics_templates: dict[str, Any] | None = None,
+    caption_style: dict[str, Any] | None = None,
+    delivery_spec: dict[str, Any] | None = None,
     export_presets: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Create and strictly validate a custom Show Profile dictionary.
 
     Can optionally inherit from a built-in/custom ``base_profile`` and override
-    camera preferences, pacing, silence/interruption thresholds, graphics,
-    audio LUFS/restoration rules, and export presets.
+    camera roles/maps, pacing, silence/interruption thresholds, intro/outro rules,
+    graphics templates, caption styling, loudness/restoration rules, and delivery specs.
     """
     if base_profile is not None:
         if isinstance(base_profile, dict):
@@ -216,14 +414,43 @@ def create_custom_profile(
                 {"camera_id": "cam_host", "role": "host", "speaker_label": "Host", "priority": 2},
                 {"camera_id": "cam_guest", "role": "guest", "speaker_label": "Guest", "priority": 2},
             ],
+            "camera_roles": {
+                "cam_wide": "wide",
+                "cam_host": "host",
+                "cam_guest": "guest",
+            },
+            "speaker_camera_map": {
+                "Host": "cam_host",
+                "Guest": "cam_guest",
+            },
             "camera_preferences": {
                 "prefer_wide_on_overlap": True,
                 "default_opening_role": "wide",
                 "avoid_jump_cuts": True,
             },
+            "wide_shot_interval_sec": 16.0,
+            "reaction_shot_frequency": 0.5,
+            "min_shot_duration_sec": 2.0,
+            "max_shot_duration_sec": 10.0,
+            "silence_threshold_db": -36.0,
+            "loudness_target_lufs": -16.0,
+            "intro_outro_rules": {
+                "open_on_wide": True,
+                "opening_wide_sec": 2.0,
+                "close_on_wide": True,
+                "closing_wide_sec": 2.0,
+                "intro_asset": None,
+                "outro_asset": None,
+                "fade_in_sec": 0.0,
+                "fade_out_sec": 0.5,
+            },
             "editing_rules": {
                 "min_shot_sec": 2.0,
                 "max_shot_sec": 10.0,
+                "min_shot_duration_sec": 2.0,
+                "max_shot_duration_sec": 10.0,
+                "wide_shot_interval_sec": 16.0,
+                "reaction_shot_frequency": 0.5,
                 "reaction_cut_interval_sec": 5.0,
                 "silence_threshold_db": -36.0,
                 "min_silence_sec": 0.7,
@@ -236,6 +463,7 @@ def create_custom_profile(
             },
             "audio_rules": {
                 "target_lufs": -16.0,
+                "loudness_target_lufs": -16.0,
                 "true_peak_dbtp": -1.5,
                 "highpass_hz": 80.0,
                 "enable_denoise": True,
@@ -249,6 +477,42 @@ def create_custom_profile(
                 "enable_lower_thirds": True,
                 "lower_third_duration_sec": 4.5,
                 "brand_accent_hex": "#FF5A1F",
+            },
+            "graphics_templates": {
+                "lower_third_template": "studio_clean_bar",
+                "lower_third_position": "bottom_left",
+                "title_card_template": "studio_opener",
+                "bug_position": "top_right",
+                "font_family": "DejaVu Sans",
+                "accent_hex": "#FF5A1F",
+            },
+            "caption_style": {
+                "font_family": "DejaVu Sans",
+                "font_size_px": 48,
+                "primary_color_hex": "#FFFFFF",
+                "highlight_color_hex": "#FF5A1F",
+                "outline_color_hex": "#121212",
+                "outline_width": 3.0,
+                "alignment": "bottom_center",
+                "max_chars_per_line": 42,
+                "uppercase": False,
+                "burn_in": False,
+            },
+            "delivery_spec": {
+                "container": "mp4",
+                "video_codec": "libx264",
+                "audio_codec": "aac",
+                "width": 1920,
+                "height": 1080,
+                "fps_num": 25,
+                "fps_den": 1,
+                "color_space": "bt709",
+                "audio_sample_rate": 48000,
+                "audio_channels": 2,
+                "target_lufs": -16.0,
+                "true_peak_dbtp": -1.5,
+                "video_bitrate": "12M",
+                "audio_bitrate": "192k",
             },
             "export_presets": [
                 {
@@ -273,25 +537,111 @@ def create_custom_profile(
         profile["video_spec"] = {**profile.get("video_spec", {}), **copy.deepcopy(video_spec)}
     if cameras is not None:
         profile["cameras"] = copy.deepcopy(cameras)
+        profile["camera_roles"] = {
+            str(cam["camera_id"]): str(cam["role"]) for cam in profile["cameras"]
+        }
+        profile["speaker_camera_map"] = {
+            str(cam["speaker_label"]): str(cam["camera_id"])
+            for cam in profile["cameras"]
+            if cam.get("speaker_label")
+        }
+    if camera_roles is not None:
+        profile["camera_roles"] = {
+            **profile.get("camera_roles", {}),
+            **copy.deepcopy(camera_roles),
+        }
+    if speaker_camera_map is not None:
+        profile["speaker_camera_map"] = {
+            **profile.get("speaker_camera_map", {}),
+            **copy.deepcopy(speaker_camera_map),
+        }
     if camera_preferences is not None:
         profile["camera_preferences"] = {
             **profile.get("camera_preferences", {}),
             **copy.deepcopy(camera_preferences),
         }
+    if intro_outro_rules is not None:
+        profile["intro_outro_rules"] = {
+            **profile.get("intro_outro_rules", {}),
+            **copy.deepcopy(intro_outro_rules),
+        }
     if editing_rules is not None:
-        profile["editing_rules"] = {
-            **profile.get("editing_rules", {}),
-            **copy.deepcopy(editing_rules),
-        }
+        merged_editing = {**profile.get("editing_rules", {}), **copy.deepcopy(editing_rules)}
+        # Sync min/max shot duration aliases if caller only passed one form
+        if "min_shot_sec" in editing_rules and "min_shot_duration_sec" not in editing_rules:
+            merged_editing["min_shot_duration_sec"] = merged_editing["min_shot_sec"]
+            profile["min_shot_duration_sec"] = merged_editing["min_shot_sec"]
+        elif "min_shot_duration_sec" in editing_rules and "min_shot_sec" not in editing_rules:
+            merged_editing["min_shot_sec"] = merged_editing["min_shot_duration_sec"]
+            profile["min_shot_duration_sec"] = merged_editing["min_shot_duration_sec"]
+        if "max_shot_sec" in editing_rules and "max_shot_duration_sec" not in editing_rules:
+            merged_editing["max_shot_duration_sec"] = merged_editing["max_shot_sec"]
+            profile["max_shot_duration_sec"] = merged_editing["max_shot_sec"]
+        elif "max_shot_duration_sec" in editing_rules and "max_shot_sec" not in editing_rules:
+            merged_editing["max_shot_sec"] = merged_editing["max_shot_duration_sec"]
+            profile["max_shot_duration_sec"] = merged_editing["max_shot_duration_sec"]
+        if "silence_threshold_db" in editing_rules:
+            profile["silence_threshold_db"] = merged_editing["silence_threshold_db"]
+        if "wide_shot_interval_sec" in editing_rules:
+            profile["wide_shot_interval_sec"] = merged_editing["wide_shot_interval_sec"]
+        if "reaction_shot_frequency" in editing_rules:
+            profile["reaction_shot_frequency"] = merged_editing["reaction_shot_frequency"]
+        profile["editing_rules"] = merged_editing
+
+    if min_shot_duration_sec is not None:
+        profile["min_shot_duration_sec"] = float(min_shot_duration_sec)
+        profile["editing_rules"]["min_shot_sec"] = float(min_shot_duration_sec)
+        profile["editing_rules"]["min_shot_duration_sec"] = float(min_shot_duration_sec)
+    if max_shot_duration_sec is not None:
+        profile["max_shot_duration_sec"] = float(max_shot_duration_sec)
+        profile["editing_rules"]["max_shot_sec"] = float(max_shot_duration_sec)
+        profile["editing_rules"]["max_shot_duration_sec"] = float(max_shot_duration_sec)
+    if wide_shot_interval_sec is not None:
+        profile["wide_shot_interval_sec"] = float(wide_shot_interval_sec)
+        profile["editing_rules"]["wide_shot_interval_sec"] = float(wide_shot_interval_sec)
+    if reaction_shot_frequency is not None:
+        profile["reaction_shot_frequency"] = float(reaction_shot_frequency)
+        profile["editing_rules"]["reaction_shot_frequency"] = float(reaction_shot_frequency)
+    if silence_threshold_db is not None:
+        profile["silence_threshold_db"] = float(silence_threshold_db)
+        profile["editing_rules"]["silence_threshold_db"] = float(silence_threshold_db)
+
     if audio_rules is not None:
-        profile["audio_rules"] = {
-            **profile.get("audio_rules", {}),
-            **copy.deepcopy(audio_rules),
-        }
+        merged_audio = {**profile.get("audio_rules", {}), **copy.deepcopy(audio_rules)}
+        if "target_lufs" in audio_rules and "loudness_target_lufs" not in audio_rules:
+            merged_audio["loudness_target_lufs"] = merged_audio["target_lufs"]
+            profile["loudness_target_lufs"] = merged_audio["target_lufs"]
+        elif "loudness_target_lufs" in audio_rules and "target_lufs" not in audio_rules:
+            merged_audio["target_lufs"] = merged_audio["loudness_target_lufs"]
+            profile["loudness_target_lufs"] = merged_audio["loudness_target_lufs"]
+        profile["audio_rules"] = merged_audio
+
+    if loudness_target_lufs is not None:
+        profile["loudness_target_lufs"] = float(loudness_target_lufs)
+        profile["audio_rules"]["target_lufs"] = float(loudness_target_lufs)
+        profile["audio_rules"]["loudness_target_lufs"] = float(loudness_target_lufs)
+        if "delivery_spec" in profile:
+            profile["delivery_spec"]["target_lufs"] = float(loudness_target_lufs)
+
     if graphics_rules is not None:
         profile["graphics_rules"] = {
             **profile.get("graphics_rules", {}),
             **copy.deepcopy(graphics_rules),
+        }
+    if graphics_templates is not None:
+        profile["graphics_templates"] = {
+            **profile.get("graphics_templates", {}),
+            **copy.deepcopy(graphics_templates),
+        }
+    if caption_style is not None:
+        profile["caption_style"] = {
+            **profile.get("caption_style", {}),
+            **copy.deepcopy(caption_style),
+        }
+    if delivery_spec is not None:
+        profile["delivery_spec"] = {
+            **profile.get("delivery_spec", {}),
+            **copy.deepcopy(delivery_spec),
         }
     if export_presets is not None:
         profile["export_presets"] = copy.deepcopy(export_presets)

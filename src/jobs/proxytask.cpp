@@ -18,6 +18,8 @@ SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
 #include <QTemporaryFile>
 #include <QThread>
 
+#include <memory>
+
 #include <KLocalizedString>
 
 ProxyTask::ProxyTask(const ObjectId &owner, QObject *object)
@@ -72,7 +74,8 @@ void ProxyTask::run()
         // change FFmpeg params to MLT format
         m_isFfmpegJob = false;
         QStringList mltParameters;
-        QTemporaryFile *playlist = nullptr;
+        std::unique_ptr<QTemporaryFile> playlist;
+        bool playlistReady = true;
         // set clip origin
         if (type == ClipType::Playlist) {
             // Special case: playlists use the special 'consumer' producer to support resizing
@@ -82,18 +85,23 @@ void ProxyTask::run()
             // we save a temporary .mlt clip for rendering
             QDomDocument doc;
             QDomElement xml = binClip->toXml(doc, false);
-            playlist = new QTemporaryFile();
+            Q_UNUSED(xml);
+            playlist = std::make_unique<QTemporaryFile>();
             playlist->setFileTemplate(playlist->fileTemplate() + QStringLiteral(".mlt"));
             if (playlist->open()) {
                 source = playlist->fileName();
-                QTextStream out(playlist);
+                QTextStream out(playlist.get());
 #if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
                 out.setCodec("UTF-8");
 #endif
                 out << doc.toString();
                 playlist->close();
+            } else {
+                playlistReady = false;
+                m_logDetails = i18n("Cannot create temporary playlist file for proxy creation.");
             }
         }
+        if (playlistReady) {
         mltParameters << QStringLiteral("-profile") << pCore->getCurrentProfilePath();
         mltParameters << source;
         // set destination
@@ -186,8 +194,8 @@ void ProxyTask::run()
         m_jobProcess->start(KdenliveSettings::meltpath(), mltParameters);
         AbstractTask::setPreferredPriority(m_jobProcess->processId());
         m_jobProcess->waitForFinished(-1);
-        result = m_jobProcess->exitStatus() == QProcess::NormalExit;
-        delete playlist;
+        result = (m_jobProcess->error() != QProcess::FailedToStart && m_jobProcess->exitStatus() == QProcess::NormalExit && m_jobProcess->exitCode() == 0);
+        }
     } else if (type == ClipType::Image) {
         m_isFfmpegJob = false;
         // Image proxy
@@ -210,6 +218,7 @@ void ProxyTask::run()
             } else {
                 proxy = i.scaledToHeight(KdenliveSettings::proxyimagesize());
             }
+            bool saved = false;
             if (exif > 1) {
                 // Rotate image according to exif data
                 QImage processed;
@@ -241,11 +250,15 @@ void ProxyTask::run()
                     break;
                 }
                 processed = proxy.transformed(matrix);
-                processed.save(dest);
+                saved = !processed.isNull() && processed.save(dest);
             } else {
-                proxy.save(dest);
+                saved = !proxy.isNull() && proxy.save(dest);
             }
-            result = true;
+            const QFileInfo savedInfo(dest);
+            result = saved && savedInfo.exists() && savedInfo.size() > 0;
+            if (!result) {
+                m_logDetails = i18n("Failed to save image proxy to %1.", dest);
+            }
         } else {
             // Image is too small to be proxied
             m_logDetails = i18n("Image too small to be proxied.");
@@ -258,7 +271,7 @@ void ProxyTask::run()
             QMetaObject::invokeMethod(pCore.get(), "displayBinMessage", Qt::QueuedConnection,
                                       Q_ARG(QString, i18n("FFmpeg not found, please set path in Kdenlive's settings Environment")),
                                       Q_ARG(int, int(KMessageWidget::Warning)));
-            result = true;
+            result = false;
             m_progress = 100;
             QMetaObject::invokeMethod(m_object, "updateJobProgress");
             return;
@@ -323,10 +336,11 @@ void ProxyTask::run()
                     int h = 0;
                     int oW = binClip->getProducerProperty(QStringLiteral("meta.media.width")).toInt();
                     int oH = binClip->getProducerProperty(QStringLiteral("meta.media.height")).toInt();
-                    if (oH > 0) {
+                    if (oH > 0 && oW > 0) {
                         h = w * oH / oW;
                     } else {
-                        h = int(w / pCore->getCurrentDar());
+                        const double dar = pCore->getCurrentDar();
+                        h = (dar > 1e-6) ? int(w / dar) : w;
                     }
                     h += h % 2;
                     proxyParams.replace(QStringLiteral("%frameSize"), QString("%1x%2").arg(w).arg(h));
@@ -387,7 +401,7 @@ void ProxyTask::run()
         m_jobProcess->start(KdenliveSettings::ffmpegpath(), parameters, QIODevice::ReadOnly);
         AbstractTask::setPreferredPriority(m_jobProcess->processId());
         m_jobProcess->waitForFinished(-1);
-        result = m_jobProcess->exitStatus() == QProcess::NormalExit;
+        result = (m_jobProcess->error() != QProcess::FailedToStart && m_jobProcess->exitStatus() == QProcess::NormalExit && m_jobProcess->exitCode() == 0);
     }
     // remove temporary playlist if it exists
     m_progress = 100;
@@ -423,7 +437,7 @@ void ProxyTask::processLogInfo()
     m_logDetails.append(buffer);
     if (m_isFfmpegJob) {
         // Parse FFmpeg output
-        if (m_jobDuration == 0) {
+        if (m_jobDuration <= 0) {
             if (buffer.contains(QLatin1String("Duration:"))) {
                 QString data = buffer.section(QStringLiteral("Duration:"), 1, 1).section(QLatin1Char(','), 0, 0).simplified();
                 if (!data.isEmpty()) {

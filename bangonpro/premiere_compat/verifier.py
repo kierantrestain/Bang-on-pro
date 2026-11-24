@@ -16,13 +16,20 @@ import os
 import re
 import subprocess
 import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any
 
 from .catalog import DEFAULT_HEIGHT, DEFAULT_WIDTH
 from .mapper import generate_mlt_filter_xml
-from .models import CompatibilityStatus, MappedPreset, MltFilterSpec
+from .models import (
+    CompatibilityStatus,
+    MappedPreset,
+    MltFilterSpec,
+    VisualEquivalenceEvidence,
+    default_visual_equivalence_evidence,
+)
 
 _PSNR_RE = re.compile(r"average:([0-9.]+|inf)")
 _SSIM_RE = re.compile(r"All:([0-9.]+)")
@@ -37,10 +44,10 @@ class VisualMetrics:
     ssim: float
     mse: float
     frame_count: int
-    frame_hashes_after: List[str] = field(default_factory=list)
+    frame_hashes_after: list[str] = field(default_factory=list)
     visual_changed: bool = False
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "psnr_db": round(self.psnr_db, 4) if math.isfinite(self.psnr_db) else "inf",
             "ssim": round(self.ssim, 6),
@@ -65,7 +72,7 @@ class AudioMetrics:
     audio_sha256_after: str
     audio_changed: bool = False
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "rms_before_db": round(self.rms_before_db, 4),
             "rms_after_db": round(self.rms_after_db, 4),
@@ -79,6 +86,72 @@ class AudioMetrics:
         }
 
 
+def classify_visual_equivalence_evidence(
+    preset: MappedPreset,
+    *,
+    rendered_ok: bool,
+    premiere_reference_metrics: VisualMetrics | None = None,
+) -> tuple[str, bool, str]:
+    """Honestly classify visual-equivalence evidence for a verified preset.
+
+    Returns ``(visual_equivalence_evidence, premiere_reference_verified, honest_status)``.
+    NEVER claims pixel-identical Premiere equivalence solely because ``melt`` rendered
+    without error!
+    """
+    if not rendered_ok:
+        return (
+            preset.visual_equivalence_evidence or default_visual_equivalence_evidence(preset.compatibility_status),
+            False,
+            preset.compatibility_status.value,
+        )
+
+    if premiere_reference_metrics is not None:
+        psnr_ok = (not math.isfinite(premiere_reference_metrics.psnr_db)) or (
+            premiere_reference_metrics.psnr_db >= 35.0
+        )
+        ssim_ok = premiere_reference_metrics.ssim >= 0.98
+        if psnr_ok and ssim_ok:
+            return (
+                VisualEquivalenceEvidence.PIXEL_VERIFIED_REFERENCE.value,
+                True,
+                CompatibilityStatus.EXACT_VALIDATED.value,
+            )
+        return (
+            VisualEquivalenceEvidence.PREMIERE_REFERENCE_MISMATCH.value,
+            False,
+            CompatibilityStatus.APPROXIMATED.value,
+        )
+
+    # Without a Premiere reference render, melt rendering cleanly proves execution only —
+    # NEVER pixel-identical Premiere output.
+    if (
+        preset.compatibility_status == CompatibilityStatus.EXACT_VALIDATED
+        and preset.visual_equivalence_evidence
+        in ("", VisualEquivalenceEvidence.MATHEMATICALLY_EQUIVALENT_MAPPING.value)
+    ):
+        return (
+            VisualEquivalenceEvidence.MATHEMATICALLY_EQUIVALENT_MAPPING.value,
+            False,
+            CompatibilityStatus.EXACT_VALIDATED.value,
+        )
+
+    if preset.compatibility_status in (
+        CompatibilityStatus.MISSING_DEPENDENCY,
+        CompatibilityStatus.UNSUPPORTED,
+    ):
+        return (
+            default_visual_equivalence_evidence(preset.compatibility_status),
+            False,
+            preset.compatibility_status.value,
+        )
+
+    return (
+        VisualEquivalenceEvidence.MELT_RENDER_ONLY_UNVERIFIED.value,
+        False,
+        CompatibilityStatus.APPROXIMATED.value,
+    )
+
+
 @dataclass
 class PresetVerificationResult:
     """Full before/after and determinism verification result for a single MappedPreset."""
@@ -90,18 +163,25 @@ class PresetVerificationResult:
     deterministic: bool
     has_video_filters: bool
     has_audio_filters: bool
-    visual: Optional[VisualMetrics] = None
-    audio: Optional[AudioMetrics] = None
+    visual: VisualMetrics | None = None
+    audio: AudioMetrics | None = None
     error: str = ""
-    preview_before_path: Optional[str] = None
-    preview_after_path: Optional[str] = None
-    preview_split_path: Optional[str] = None
+    preview_before_path: str | None = None
+    preview_after_path: str | None = None
+    preview_split_path: str | None = None
+    visual_equivalence_evidence: str = VisualEquivalenceEvidence.MELT_RENDER_ONLY_UNVERIFIED.value
+    reference_comparison_performed: bool = False
+    premiere_reference_verified: bool = False
+    premiere_reference_metrics: VisualMetrics | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
-        data: Dict[str, Any] = {
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
             "preset_id": self.preset_id,
             "preset_name": self.preset_name,
             "status": self.status,
+            "visual_equivalence_evidence": self.visual_equivalence_evidence,
+            "reference_comparison_performed": self.reference_comparison_performed,
+            "premiere_reference_verified": self.premiere_reference_verified,
             "rendered_ok": self.rendered_ok,
             "deterministic": self.deterministic,
             "has_video_filters": self.has_video_filters,
@@ -111,6 +191,8 @@ class PresetVerificationResult:
             data["visual"] = self.visual.to_dict()
         if self.audio is not None:
             data["audio"] = self.audio.to_dict()
+        if self.premiere_reference_metrics is not None:
+            data["premiere_reference_metrics"] = self.premiere_reference_metrics.to_dict()
         if self.preview_before_path is not None:
             data["preview_before_path"] = self.preview_before_path
         if self.preview_after_path is not None:
@@ -122,7 +204,7 @@ class PresetVerificationResult:
         return data
 
 
-def _headless_env(runtime_dir: Path) -> Dict[str, str]:
+def _headless_env(runtime_dir: Path) -> dict[str, str]:
     env = dict(os.environ)
     env["QT_QPA_PLATFORM"] = "offscreen"
     # MLT 7.x libmltqt.so checks getenv("DISPLAY") on Linux before creating QApplication
@@ -136,7 +218,7 @@ def _headless_env(runtime_dir: Path) -> Dict[str, str]:
 
 
 def generate_reference_clip(
-    output_path: Union[str, Path],
+    output_path: str | Path,
     duration_sec: float = 0.8,
     fps: int = 25,
     width: int = 320,
@@ -195,10 +277,10 @@ def _rescale_rect_token(token: str, sx: float, sy: float) -> str:
     if len(parts) < 4:
         return token
     try:
-        x = int(round(float(parts[0]) * sx))
-        y = int(round(float(parts[1]) * sy))
-        w = max(1, int(round(float(parts[2]) * sx)))
-        h = max(1, int(round(float(parts[3]) * sy)))
+        x = round(float(parts[0]) * sx)
+        y = round(float(parts[1]) * sy)
+        w = max(1, round(float(parts[2]) * sx))
+        h = max(1, round(float(parts[3]) * sy))
         tail = " ".join(parts[4:])
         return f"{x} {y} {w} {h} {tail}".strip()
     except ValueError:
@@ -211,14 +293,14 @@ def _rescale_filters_for_canvas(
     target_h: int,
     source_w: int = DEFAULT_WIDTH,
     source_h: int = DEFAULT_HEIGHT,
-) -> List[MltFilterSpec]:
+) -> list[MltFilterSpec]:
     """Scale pixel-coordinate filter properties (`qtblend`/`qtcrop` rect) for verification canvas."""
     if target_w == source_w and target_h == source_h:
         return list(filters)
 
     sx = target_w / float(source_w)
     sy = target_h / float(source_h)
-    scaled: List[MltFilterSpec] = []
+    scaled: list[MltFilterSpec] = []
     op_re = re.compile(r"^(\d+)([~|]?=)(.+)$")
 
     for flt in filters:
@@ -227,7 +309,7 @@ def _rescale_filters_for_canvas(
             raw_rect = props["rect"]
             if "%" not in raw_rect:
                 segments = [s.strip() for s in raw_rect.split(";") if s.strip()]
-                new_segs: List[str] = []
+                new_segs: list[str] = []
                 for seg in segments:
                     m = op_re.match(seg)
                     if m:
@@ -249,7 +331,7 @@ def _rescale_filters_for_canvas(
 
 def render_mlt_xml(
     mlt_xml: str,
-    output_path: Union[str, Path],
+    output_path: str | Path,
     work_dir: Path,
     timeout_sec: int = 90,
 ) -> Path:
@@ -292,7 +374,7 @@ def _extract_raw_rgb_frames(
     media_path: Path,
     width: int,
     height: int,
-) -> List[bytes]:
+) -> list[bytes]:
     """Decode deterministic RGB24 frame buffers via FFmpeg."""
     cmd = [
         "ffmpeg",
@@ -503,32 +585,37 @@ def compute_audio_metrics(before_path: Path, after_path: Path, sample_rate: int 
 
 def verify_preset_render(
     preset: MappedPreset,
-    reference_clip: Optional[Path] = None,
+    reference_clip: Path | None = None,
     fps: int = 25,
     width: int = 320,
     height: int = 180,
     duration_sec: float = 0.8,
     check_determinism: bool = True,
-    preview_dir: Optional[Union[str, Path]] = None,
-    before_clip: Optional[Path] = None,
+    preview_dir: str | Path | None = None,
+    before_clip: Path | None = None,
+    premiere_reference_clip: Path | None = None,
 ) -> PresetVerificationResult:
     """Verify a single MappedPreset end-to-end with real `melt` before/after + determinism renders."""
     has_video = any(f.media_type == "video" for f in preset.mlt_filters)
     has_audio = any(f.media_type == "audio" for f in preset.mlt_filters)
 
     if not preset.mlt_filters:
+        ev, ref_ok, honest_status = classify_visual_equivalence_evidence(preset, rendered_ok=False)
         return PresetVerificationResult(
             preset_id=preset.preset_id,
             preset_name=preset.name,
-            status=preset.compatibility_status.value,
+            status=honest_status,
             rendered_ok=False,
             deterministic=True,
             has_video_filters=False,
             has_audio_filters=False,
             error="No executable MLT filters mapped for this preset.",
+            visual_equivalence_evidence=ev,
+            reference_comparison_performed=False,
+            premiere_reference_verified=ref_ok,
         )
 
-    out_frame = max(4, int(round(duration_sec * fps)) - 1)
+    out_frame = max(4, round(duration_sec * fps) - 1)
 
     with tempfile.TemporaryDirectory(prefix="bangonpro_verify_") as tmp:
         work_dir = Path(tmp)
@@ -579,6 +666,21 @@ def verify_preset_render(
             visual = compute_visual_metrics(before_out, after_out_1, width=width, height=height)
             audio = compute_audio_metrics(before_out, after_out_1)
 
+            ref_metrics: VisualMetrics | None = None
+            if premiere_reference_clip is not None and premiere_reference_clip.is_file():
+                ref_metrics = compute_visual_metrics(
+                    premiere_reference_clip,
+                    after_out_1,
+                    width=width,
+                    height=height,
+                )
+
+            evidence, premiere_verified, honest_status = classify_visual_equivalence_evidence(
+                preset,
+                rendered_ok=True,
+                premiere_reference_metrics=ref_metrics,
+            )
+
             deterministic = True
             if check_determinism:
                 after_out_2 = render_mlt_xml(after_xml, work_dir / "after_run2.mkv", work_dir)
@@ -590,9 +692,9 @@ def verify_preset_render(
                     and audio_2 == audio.audio_sha256_after
                 )
 
-            preview_before: Optional[str] = None
-            preview_after: Optional[str] = None
-            preview_split: Optional[str] = None
+            preview_before: str | None = None
+            preview_after: str | None = None
+            preview_split: str | None = None
             if preview_dir is not None:
                 from .preview_generator import generate_preset_previews
 
@@ -615,7 +717,7 @@ def verify_preset_render(
             return PresetVerificationResult(
                 preset_id=preset.preset_id,
                 preset_name=preset.name,
-                status=preset.compatibility_status.value,
+                status=honest_status,
                 rendered_ok=True,
                 deterministic=deterministic,
                 has_video_filters=has_video,
@@ -625,17 +727,25 @@ def verify_preset_render(
                 preview_before_path=preview_before,
                 preview_after_path=preview_after,
                 preview_split_path=preview_split,
+                visual_equivalence_evidence=evidence,
+                reference_comparison_performed=ref_metrics is not None,
+                premiere_reference_verified=premiere_verified,
+                premiere_reference_metrics=ref_metrics,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
+            ev, ref_ok, honest_status = classify_visual_equivalence_evidence(preset, rendered_ok=False)
             return PresetVerificationResult(
                 preset_id=preset.preset_id,
                 preset_name=preset.name,
-                status=preset.compatibility_status.value,
+                status=honest_status,
                 rendered_ok=False,
                 deterministic=False,
                 has_video_filters=has_video,
                 has_audio_filters=has_audio,
                 error=str(exc),
+                visual_equivalence_evidence=ev,
+                reference_comparison_performed=False,
+                premiere_reference_verified=ref_ok,
             )
 
 
@@ -646,10 +756,10 @@ def verify_presets_batch(
     height: int = 180,
     duration_sec: float = 0.8,
     check_determinism: bool = True,
-    preview_dir: Optional[Union[str, Path]] = None,
-) -> List[PresetVerificationResult]:
+    preview_dir: str | Path | None = None,
+) -> list[PresetVerificationResult]:
     """Verify multiple mapped presets reusing a single generated reference clip & baseline render."""
-    out_frame = max(4, int(round(duration_sec * fps)) - 1)
+    out_frame = max(4, round(duration_sec * fps) - 1)
     with tempfile.TemporaryDirectory(prefix="bangonpro_batch_ref_") as tmp:
         work_dir = Path(tmp)
         ref = generate_reference_clip(
@@ -670,7 +780,7 @@ def verify_presets_batch(
         )
         shared_before = render_mlt_xml(before_xml, work_dir / "shared_before.mkv", work_dir)
 
-        results: List[PresetVerificationResult] = []
+        results: list[PresetVerificationResult] = []
         for preset in presets:
             if preset.compatibility_status in (
                 CompatibilityStatus.EXACT_VALIDATED,

@@ -42,13 +42,56 @@
         "type": "object",
         "required": ["camera_id", "role"],
         "properties": {
-          "camera_id": { "type": "string" },
-          "role": { "type": "string", "enum": ["wide", "host", "guest", "panel", "reaction", "overhead", "desk", "broll"] },
+          "camera_id": { "type": "string", "minLength": 1 },
+          "role": {
+            "type": "string",
+            "enum": [
+              "wide",
+              "host",
+              "guest",
+              "panel",
+              "reaction",
+              "overhead",
+              "desk",
+              "broll",
+              "audio_recorder"
+            ]
+          },
           "speaker_label": { "type": ["string", "null"] },
           "priority": { "type": "integer", "default": 1 }
         }
       }
     },
+    "camera_roles": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "enum": [
+          "wide",
+          "host",
+          "guest",
+          "panel",
+          "reaction",
+          "overhead",
+          "desk",
+          "broll",
+          "audio_recorder"
+        ]
+      }
+    },
+    "speaker_camera_map": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "wide_shot_interval_sec": { "type": "number", "minimum": 2.0 },
+    "reaction_shot_frequency": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+    "min_shot_duration_sec": { "type": "number", "minimum": 0.4 },
+    "max_shot_duration_sec": { "type": "number", "minimum": 1.0 },
+    "silence_threshold_db": { "type": "number", "minimum": -90.0, "maximum": 0.0 },
+    "loudness_target_lufs": { "type": "number", "minimum": -40.0, "maximum": -6.0 },
     "camera_preferences": {
       "type": "object",
       "properties": {
@@ -61,13 +104,30 @@
         "avoid_jump_cuts": { "type": "boolean", "default": true }
       }
     },
+    "intro_outro_rules": {
+      "type": "object",
+      "properties": {
+        "open_on_wide": { "type": "boolean", "default": true },
+        "opening_wide_sec": { "type": "number", "minimum": 0.0, "maximum": 30.0, "default": 2.5 },
+        "close_on_wide": { "type": "boolean", "default": true },
+        "closing_wide_sec": { "type": "number", "minimum": 0.0, "maximum": 30.0, "default": 2.0 },
+        "intro_asset": { "type": ["string", "null"], "default": null },
+        "outro_asset": { "type": ["string", "null"], "default": null },
+        "fade_in_sec": { "type": "number", "minimum": 0.0, "maximum": 5.0, "default": 0.0 },
+        "fade_out_sec": { "type": "number", "minimum": 0.0, "maximum": 5.0, "default": 0.5 }
+      }
+    },
     "editing_rules": {
       "type": "object",
       "required": ["min_shot_sec", "max_shot_sec", "silence_threshold_db", "min_silence_sec"],
       "properties": {
         "min_shot_sec": { "type": "number", "minimum": 0.4 },
         "max_shot_sec": { "type": "number", "minimum": 1.0 },
-        "reaction_cut_interval_sec": { "type": "number", "minimum": 2.0 },
+        "min_shot_duration_sec": { "type": "number", "minimum": 0.4 },
+        "max_shot_duration_sec": { "type": "number", "minimum": 1.0 },
+        "wide_shot_interval_sec": { "type": "number", "minimum": 2.0 },
+        "reaction_shot_frequency": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+        "reaction_cut_interval_sec": { "type": "number", "minimum": 1.5 },
         "silence_threshold_db": { "type": "number" },
         "min_silence_sec": { "type": "number", "minimum": 0.1 },
         "interruption_gap_sec": { "type": "number", "minimum": 2.0, "default": 10.0 },
@@ -82,6 +142,7 @@
       "type": "object",
       "properties": {
         "target_lufs": { "type": "number", "default": -16.0 },
+        "loudness_target_lufs": { "type": "number", "default": -16.0 },
         "true_peak_dbtp": { "type": "number", "default": -1.5 },
         "highpass_hz": { "type": "number", "minimum": 20.0, "maximum": 300.0, "default": 80.0 },
         "enable_denoise": { "type": "boolean", "default": true },
@@ -98,6 +159,63 @@
         "enable_lower_thirds": { "type": "boolean", "default": true },
         "lower_third_duration_sec": { "type": "number", "default": 4.5 },
         "brand_accent_hex": { "type": "string", "default": "#FF5A1F" }
+      }
+    },
+    "graphics_templates": {
+      "type": "object",
+      "properties": {
+        "lower_third_template": { "type": "string", "minLength": 1 },
+        "lower_third_position": {
+          "type": "string",
+          "enum": ["bottom_left", "bottom_center", "bottom_right", "top_left", "top_right"],
+          "default": "bottom_left"
+        },
+        "title_card_template": { "type": "string" },
+        "bug_position": {
+          "type": "string",
+          "enum": ["none", "top_left", "top_right", "bottom_left", "bottom_right"],
+          "default": "top_right"
+        },
+        "font_family": { "type": "string", "default": "DejaVu Sans" },
+        "accent_hex": { "type": "string", "default": "#FF5A1F" }
+      }
+    },
+    "caption_style": {
+      "type": "object",
+      "properties": {
+        "font_family": { "type": "string", "default": "DejaVu Sans" },
+        "font_size_px": { "type": "integer", "minimum": 14, "maximum": 144, "default": 48 },
+        "primary_color_hex": { "type": "string", "default": "#FFFFFF" },
+        "highlight_color_hex": { "type": "string", "default": "#FF5A1F" },
+        "outline_color_hex": { "type": "string", "default": "#121212" },
+        "outline_width": { "type": "number", "minimum": 0.0, "maximum": 12.0, "default": 3.0 },
+        "alignment": {
+          "type": "string",
+          "enum": ["bottom_left", "bottom_center", "bottom_right", "top_center"],
+          "default": "bottom_center"
+        },
+        "max_chars_per_line": { "type": "integer", "minimum": 16, "maximum": 120, "default": 42 },
+        "uppercase": { "type": "boolean", "default": false },
+        "burn_in": { "type": "boolean", "default": false }
+      }
+    },
+    "delivery_spec": {
+      "type": "object",
+      "properties": {
+        "container": { "type": "string", "default": "mp4" },
+        "video_codec": { "type": "string", "default": "libx264" },
+        "audio_codec": { "type": "string", "default": "aac" },
+        "width": { "type": "integer", "minimum": 320 },
+        "height": { "type": "integer", "minimum": 240 },
+        "fps_num": { "type": "integer", "minimum": 1 },
+        "fps_den": { "type": "integer", "minimum": 1 },
+        "color_space": { "type": "string", "default": "bt709" },
+        "audio_sample_rate": { "type": "integer", "minimum": 8000, "default": 48000 },
+        "audio_channels": { "type": "integer", "minimum": 1, "maximum": 8, "default": 2 },
+        "target_lufs": { "type": "number", "minimum": -40.0, "maximum": -6.0, "default": -16.0 },
+        "true_peak_dbtp": { "type": "number", "minimum": -12.0, "maximum": 0.0, "default": -1.5 },
+        "video_bitrate": { "type": "string", "default": "12M" },
+        "audio_bitrate": { "type": "string", "default": "192k" }
       }
     },
     "export_presets": {

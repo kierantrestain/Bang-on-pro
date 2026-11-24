@@ -13,7 +13,6 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 from .mapper import export_report_bundle, generate_kdenlive_effect_xml
 from .models import (
@@ -23,23 +22,24 @@ from .models import (
     MappedPreset,
     MltFilterSpec,
     SourceArchiveInfo,
+    VisualEquivalenceEvidence,
 )
 
 # Each entry:
 # (slug, name, category, tags, description, media_type, status, list[(service, properties)])
-_PresetDef = Tuple[
+_PresetDef = tuple[
     str,
     str,
     str,
-    Tuple[str, ...],
+    tuple[str, ...],
     str,
     str,
     CompatibilityStatus,
-    List[Tuple[str, Dict[str, str]]],
+    list[tuple[str, dict[str, str]]],
 ]
 
 
-BUILTIN_STARTER_DEFINITIONS: Tuple[_PresetDef, ...] = (
+BUILTIN_STARTER_DEFINITIONS: tuple[_PresetDef, ...] = (
     # =========================================================================
     # 1. Colour & Film Looks (12 presets)
     # =========================================================================
@@ -905,10 +905,47 @@ BUILTIN_STARTER_DEFINITIONS: Tuple[_PresetDef, ...] = (
 )
 
 
-def get_builtin_starter_presets() -> List[MappedPreset]:
-    """Instantiate all 64 legal native Bang On Pro starter presets."""
-    presets: List[MappedPreset] = []
-    for slug, name, category, tags, description, media_type, status, filter_defs in BUILTIN_STARTER_DEFINITIONS:
+# Presets whose look is a stylized multi-filter / creative approximation of Premiere
+# looks and lacks pixel-identical Premiere Pro reference verification.
+_APPROXIMATED_STARTER_SLUGS: frozenset[str] = frozenset(
+    {
+        "color_cinematic_teal_orange",
+        "color_vintage_warm_sepia",
+        "color_broadcast_rec709_clean",
+        "color_neon_vibrance_boost",
+        "color_golden_hour_warmth",
+        "color_bleach_bypass",
+        "color_cool_documentary_slate",
+        "color_matte_pastel_fade",
+        "motion_basic_3d_card_tilt",
+        "motion_deshake_stabilize",
+        "stylize_dreamy_soft_glow",
+        "stylize_rgb_chromatic_glitch",
+        "stylize_pop_art_posterize",
+        "stylize_35mm_film_grain",
+        "key_alpha_edge_soften",
+        "trans_film_dissolve",
+        "audio_deesser_vocal",
+        "audio_fft_denoise",
+        "audio_studio_hall_reverb",
+    }
+)
+
+
+def get_builtin_starter_presets() -> list[MappedPreset]:
+    """Instantiate all 64 legal native Bang On Pro starter presets with honest equivalence evidence."""
+    presets: list[MappedPreset] = []
+    for slug, name, category, tags, description, media_type, declared_status, filter_defs in BUILTIN_STARTER_DEFINITIONS:
+        status = (
+            CompatibilityStatus.APPROXIMATED
+            if slug in _APPROXIMATED_STARTER_SLUGS
+            else declared_status
+        )
+        evidence = (
+            VisualEquivalenceEvidence.APPROXIMATED_NATIVE_EQUIVALENT.value
+            if status == CompatibilityStatus.APPROXIMATED
+            else VisualEquivalenceEvidence.MATHEMATICALLY_EQUIVALENT_MAPPING.value
+        )
         preset_id = f"bangonpro_native__{slug}"
         mlt_filters = [
             MltFilterSpec(
@@ -937,6 +974,16 @@ def get_builtin_starter_presets() -> List[MappedPreset]:
             preset_id=preset_id,
             compatibility_status=status,
         )
+        notes = [description]
+        if status == CompatibilityStatus.APPROXIMATED:
+            notes.append(
+                "Native MLT/FFmpeg creative equivalent; renders cleanly but has NOT been "
+                "pixel-verified against an Adobe Premiere Pro reference render."
+            )
+        else:
+            notes.append(
+                "Deterministic native MLT/FFmpeg mathematical parameter mapping (original Bang On Pro preset)."
+            )
         presets.append(
             MappedPreset(
                 preset_id=preset_id,
@@ -947,7 +994,7 @@ def get_builtin_starter_presets() -> List[MappedPreset]:
                 source_file="builtin_native_library",
                 preset_type="scale",
                 compatibility_status=status,
-                notes=[description],
+                notes=notes,
                 effect_chain=effect_chain,
                 missing_dependencies=[],
                 mlt_filters=mlt_filters,
@@ -956,6 +1003,7 @@ def get_builtin_starter_presets() -> List[MappedPreset]:
                 description=description,
                 category=category,
                 tags=list(tags),
+                visual_equivalence_evidence=evidence,
             )
         )
     return presets
@@ -966,7 +1014,7 @@ def build_builtin_starter_report() -> CompatibilityReport:
     presets = get_builtin_starter_presets()
     fingerprint_src = "|".join(p.preset_id for p in presets).encode("utf-8")
     digest = hashlib.sha256(fingerprint_src).hexdigest()
-    generated_at = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
+    generated_at = dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat()
     return CompatibilityReport(
         schema_version=SCHEMA_VERSION,
         generated_at=generated_at,
@@ -981,12 +1029,12 @@ def build_builtin_starter_report() -> CompatibilityReport:
 
 
 def export_builtin_starter_library(
-    output_dir: Union[str, Path],
+    output_dir: str | Path,
     *,
     generate_previews: bool = False,
-    preview_dir: Optional[Union[str, Path]] = None,
-    preview_limit: Optional[int] = None,
-) -> Dict[str, Path]:
+    preview_dir: str | Path | None = None,
+    preview_limit: int | None = None,
+) -> dict[str, Path]:
     """Export the native starter library report bundle (with optional visual thumbnails)."""
     report = build_builtin_starter_report()
     if generate_previews:

@@ -28,7 +28,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from .builtin_library import build_builtin_starter_report
 from .mapper import (
@@ -199,7 +199,7 @@ def _run_audit(args: argparse.Namespace) -> int:
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    missing_inputs: List[MissingSourceInput] = []
+    missing_inputs: list[MissingSourceInput] = []
     if not input_path.exists():
         missing_inputs.append(
             MissingSourceInput(
@@ -244,7 +244,7 @@ def _run_audit(args: argparse.Namespace) -> int:
             json.dumps(report_dict, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
-        out_payload: Dict[str, Any] = {
+        out_payload: dict[str, Any] = {
             "status": "missing_source_inputs",
             "report_path": str(out_path),
             "summary": blocker_report.summary(),
@@ -271,7 +271,7 @@ def _run_audit(args: argparse.Namespace) -> int:
     previews_generated = 0
     if args.generate_previews:
         pdir = Path(args.preview_dir) if args.preview_dir else (out_path.parent / "previews")
-        previews = attach_previews_to_report(report, cache_dir=pdir, fps=max(1, int(round(args.fps))))
+        previews = attach_previews_to_report(report, cache_dir=pdir, fps=max(1, round(args.fps)))
         previews_generated = len(previews)
 
     report_dict = report.to_dict()
@@ -292,7 +292,7 @@ def _run_audit(args: argparse.Namespace) -> int:
     return 0
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
@@ -312,17 +312,17 @@ def main(argv: Optional[List[str]] = None) -> int:
             )
 
             if args.generate_previews:
-                pdir = (
+                gen_preview_dir = (
                     Path(args.preview_dir)
                     if args.preview_dir
                     else (Path(args.output_dir) / "previews")
                 )
-                attach_previews_to_report(report, cache_dir=pdir, fps=max(1, int(round(args.fps))))
+                attach_previews_to_report(report, cache_dir=gen_preview_dir, fps=max(1, round(args.fps)))
 
             exported = export_report_bundle(report, output_dir=args.output_dir)
 
             summary = report.summary()
-            out_payload: Dict[str, Any] = {
+            out_payload: dict[str, Any] = {
                 "status": "ok",
                 "summary": summary,
                 "json_report": str(exported["json_report"]),
@@ -331,16 +331,16 @@ def main(argv: Optional[List[str]] = None) -> int:
             }
 
             if args.verify_render:
-                pdir = (
+                verify_preview_dir: Path | None = (
                     Path(args.preview_dir)
                     if args.preview_dir
                     else (Path(args.output_dir) / "previews" if args.generate_previews else None)
                 )
                 ver_results = verify_presets_batch(
                     report.presets,
-                    fps=max(1, int(round(args.fps))),
+                    fps=max(1, round(args.fps)),
                     check_determinism=True,
-                    preview_dir=pdir,
+                    preview_dir=verify_preview_dir,
                 )
                 ver_path = Path(args.output_dir) / "verification_results.json"
                 ver_data = [r.to_dict() for r in ver_results]

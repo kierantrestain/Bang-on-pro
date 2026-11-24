@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: 2026 Bang On Pro Contributors
+# SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
+#
+# Bang On Pro V1.1.0 — Reproducible Locked Python 3.12 Dependency Manifest
+# Exact pinned versions (==) verified for core runtime & QA test suite
+# (direct requirements from requirements-bangonpro.txt + full transitive closure).
+# All packages below are audited GPL-3.0-compatible (MIT / BSD / Apache-2.0 / PSF / MPL-2.0+MIT).
+attrs==26.1.0
+click==8.5.1
+defusedxml==0.7.1
+iniconfig==2.3.1
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
+numpy==2.5.5
+opencv-python==5.1.0.95
+OpenTimelineIO==0.18.1
+packaging==26.4
+pillow==13.0.0
+platformdirs==4.14.8
+pluggy==1.7.0
+Pygments==2.21.0
+pytest==8.4.2
+PyYAML==6.0.4
+referencing==0.37.0
+rpds-py==2026.9.1
+scenedetect==0.7.3
+scipy==1.18.1
+tqdm==4.70.1
+typing_extensions==4.16.0

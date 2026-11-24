@@ -343,10 +343,10 @@ QImage MonitorProxy::extractFrame(const QString &path, int width, int height, bo
         QScopedPointer<Mlt::Profile> tmpProfile(new Mlt::Profile());
         QString service = q->m_producer->get("mlt_service");
         QScopedPointer<Mlt::Producer> tmpProd(new Mlt::Producer(*tmpProfile, service.toUtf8().constData(), q->m_producer->get("resource")));
-        tmpProfile->from_producer(*tmpProd);
-        width = tmpProfile->width();
-        height = tmpProfile->height();
         if (tmpProd && tmpProd->is_valid()) {
+            tmpProfile->from_producer(*tmpProd);
+            width = tmpProfile->width();
+            height = tmpProfile->height();
             Mlt::Filter scaler(*tmpProfile, "swscale");
             Mlt::Filter converter(*tmpProfile, "avcolor_space");
             tmpProd->attach(scaler);

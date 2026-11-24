@@ -31,6 +31,81 @@ using RecursiveMutexLocker = QMutexLocker<QRecursiveMutex>;
 using RecursiveMutexLocker = QMutexLocker;
 #endif
 
+struct TimelineStateFingerprint
+{
+    QString projectId;
+    QString sequenceId;
+    qint64 engineRevision = 0;
+    qint64 backendMutationCounter = 0;
+    QStringList trackIds;
+    QStringList clipIds;
+    QMap<QString, QString> trackSignatures;
+    QMap<QString, QString> clipSignatures;
+    QString digest;
+    bool valid = false;
+
+    QJsonObject toJson() const;
+};
+
+enum class ProposalFreshnessStatus {
+    Fresh,
+    StaleRevision,
+    ManualEditDrift,
+    ContextMismatch,
+    EntityConflict,
+    NotFound,
+};
+
+QString proposalFreshnessStatusToString(ProposalFreshnessStatus status);
+
+struct ProposalFreshnessReport
+{
+    QString requestId;
+    ProposalFreshnessStatus status = ProposalFreshnessStatus::NotFound;
+    bool fresh = false;
+    bool canRebase = false;
+    bool requiresRegenerate = false;
+    qint64 baseRevision = 0;
+    qint64 currentRevision = 0;
+    QString originalProjectId;
+    QString currentProjectId;
+    QString originalSequenceId;
+    QString currentSequenceId;
+    QStringList addedTrackIds;
+    QStringList removedTrackIds;
+    QStringList addedClipIds;
+    QStringList removedClipIds;
+    QStringList modifiedClipIds;
+    QStringList missingReferencedTracks;
+    QStringList missingReferencedClips;
+    QStringList modifiedReferencedClips;
+    QString summary;
+    QString recommendedAction = QStringLiteral("regenerate");
+
+    QJsonObject toJson() const;
+};
+
+struct OperationDependencyIssue
+{
+    QString opId;
+    QString opType;
+    QString requiredOpId;
+    QString entityKind;
+    QString entityId;
+    QString message;
+};
+
+struct BatchDependencyAnalysis
+{
+    bool valid = true;
+    QStringList missingPrerequisiteOpIds;
+    QStringList unknownSelectedOpIds;
+    QVector<OperationDependencyIssue> issues;
+    QString errorMessage;
+
+    QJsonObject toJson() const;
+};
+
 /**
  * @brief Abstract timeline backend adapter for Bang On Pro's Versioned Timeline Command API.
  *
@@ -77,6 +152,26 @@ public:
             *errorOut = QStringLiteral("Backend does not support state snapshot restoration");
         }
         return false;
+    }
+
+    /** @brief Returns active project identifier known to the backend, or empty if unmanaged. */
+    virtual QString currentProjectId() const { return {}; }
+
+    /** @brief Returns active sequence identifier known to the backend, or empty if unmanaged. */
+    virtual QString currentSequenceId() const { return {}; }
+
+    /** @brief Captures a strictly read-only structural state fingerprint for stale-proposal detection. */
+    virtual TimelineStateFingerprint captureStateFingerprint(const QString &sequenceId = QString()) const
+    {
+        Q_UNUSED(sequenceId);
+        return {};
+    }
+
+    /** @brief Captures a strictly read-only InMemoryTimelineBackend-compatible state snapshot for isolated preview simulation. */
+    virtual QJsonObject captureReadOnlyStateJson(const QString &sequenceId = QString()) const
+    {
+        Q_UNUSED(sequenceId);
+        return supportsSnapshots() ? captureStateSnapshot() : QJsonObject{};
     }
 
     /** @brief Native backend undo support (used when delegating to Kdenlive DocUndoStack). */
@@ -308,6 +403,13 @@ public:
     QJsonObject captureStateSnapshot() const override;
     bool restoreStateSnapshot(const QJsonObject &snapshot, QString *errorOut = nullptr) override;
 
+    void setActiveContext(const QString &projectId, const QString &sequenceId);
+    QString currentProjectId() const override;
+    QString currentSequenceId() const override;
+    TimelineStateFingerprint captureStateFingerprint(const QString &sequenceId = QString()) const override;
+    QJsonObject captureReadOnlyStateJson(const QString &sequenceId = QString()) const override;
+    qint64 mutationCounter() const { return m_mutationCounter; }
+
     // Read-only state inspection helpers for UI previews, diffs, and unit tests.
     QString activeSequenceId() const;
     bool hasSequence(const QString &sequenceId) const;
@@ -404,6 +506,8 @@ private:
     static bool deserializeState(const QJsonObject &obj, State *stateOut, QString *errorOut);
 
     State m_state;
+    QString m_projectId;
+    qint64 m_mutationCounter = 0;
     bool m_inTransaction = false;
     State m_transactionBackup;
 };
@@ -411,8 +515,12 @@ private:
 struct PendingProposal
 {
     TimelineCommandBatch batch;
+    QString projectId;
+    QString sequenceId;
+    qint64 baseRevision = 0;
     qint64 stagedAtRevision = 0;
     QString stagedAtUtc;
+    TimelineStateFingerprint baseFingerprint;
     QJsonObject proposedDiff;
     QVector<TimelineOperationResult> previewResults;
 };
@@ -454,6 +562,12 @@ public:
     std::shared_ptr<ITimelineBackend> backend() const;
     qint64 currentRevision() const;
 
+    // Active project/sequence context tracking & external/manual edit notification.
+    void setActiveContext(const QString &projectId, const QString &sequenceId);
+    QString activeProjectId() const;
+    QString activeSequenceId() const;
+    void notifyExternalEdit(const QString &reason = QString());
+
     bool canUndo() const;
     bool canRedo() const;
     int undoDepth() const;
@@ -475,6 +589,14 @@ public:
     // Approval workflow for AI-proposed timeline edits.
     QVector<PendingProposal> pendingProposals() const;
     QJsonArray pendingProposalsJson() const;
+    ProposalFreshnessReport validateProposalFreshness(const QString &requestId) const;
+    QJsonObject validateProposalFreshnessJson(const QString &requestId) const;
+    static BatchDependencyAnalysis analyzeSelectionDependencies(const TimelineCommandBatch &batch, const QSet<QString> &selectedOpIds,
+                                                                const QJsonObject &currentStateJson = QJsonObject(),
+                                                                const QVector<TimelineOperationResult> &stagedPreviewResults = {});
+    BatchDependencyAnalysis analyzeProposalSelectionDependencies(const QString &requestId, const QSet<QString> &selectedOpIds) const;
+    QJsonObject previewPendingProposal(const QString &requestId, const QSet<QString> *selectedOpIds = nullptr) const;
+    TimelineCommandResponse approveBatch(const QString &requestId, bool rebaseToCurrentRevision = false);
     TimelineCommandResponse approveProposal(const QString &requestId, bool rebaseToCurrentRevision = false);
     TimelineCommandResponse approveBatchWithSelection(const QString &requestId, const QSet<QString> &acceptedOpIds,
                                                       const QString &approvedBy = QStringLiteral("user"), bool rebaseToCurrentRevision = false);
@@ -511,8 +633,14 @@ private:
         QJsonObject afterSnapshot;
     };
 
+    QString resolveCurrentProjectIdLocked() const;
+    QString resolveCurrentSequenceIdLocked() const;
+    TimelineStateFingerprint captureStateFingerprintLocked(const QString &sequenceId) const;
+    ProposalFreshnessReport validateProposalFreshnessLocked(const PendingProposal &proposal, const QSet<QString> *selectedOpIds = nullptr) const;
+    QJsonObject simulateBatchOnIsolatedCloneLocked(const TimelineCommandBatch &batch, const QSet<QString> *selectedOpIds,
+                                                   QVector<TimelineOperationResult> *previewResultsOut) const;
     TimelineCommandResponse executeBatchLocked(const TimelineCommandBatch &batch, bool bypassApprovalGate);
-    QJsonObject computeProposalDiffLocked(const TimelineCommandBatch &batch, QVector<TimelineOperationResult> *previewResultsOut);
+    QJsonObject computeProposalDiffLocked(const TimelineCommandBatch &batch, QVector<TimelineOperationResult> *previewResultsOut) const;
     void appendActivityLogLocked(const TimelineCommandBatch &batch, const TimelineCommandResponse &response, const QString &overrideMessage = QString());
     void appendActivityLogSimpleLocked(const QString &requestId, const QString &projectId, const QString &sequenceId, const QString &agentId,
                                        const QString &agentRole, const QString &label, CommandStatus status, qint64 prevRev, qint64 currRev, int opCount,
@@ -526,6 +654,9 @@ private:
     mutable QRecursiveMutex m_writeMutex;
     qint64 m_revision = 0;
     qint64 m_nextLogEntryId = 1;
+    QString m_activeProjectId;
+    QString m_activeSequenceId;
+    bool m_hasExplicitContext = false;
     QVector<PendingProposal> m_pendingProposals;
     QVector<UndoRecord> m_undoStack;
     QVector<UndoRecord> m_redoStack;

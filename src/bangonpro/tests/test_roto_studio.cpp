@@ -111,6 +111,14 @@ private Q_SLOTS:
         QVERIFY(dock.moveSelectedStoryboardShot(-1));
         const QJsonObject sb = dock.exportStoryboardJson();
         QCOMPARE(sb.value(QStringLiteral("shots")).toArray().size(), initialShots + 1);
+
+        // Honest neural vs OpenCV fallback status reporting
+        QVERIFY(dock.segmentationBackendStatusText().contains(QStringLiteral("OpenCV")));
+        dock.setSegmentationBackendStatus(QStringLiteral("MobileSAM ONNX"), true, QStringLiteral("CPUExecutionProvider"));
+        QVERIFY(dock.segmentationBackendStatusText().contains(QStringLiteral("MobileSAM ONNX")));
+        QVERIFY(dock.segmentationBackendStatusText().contains(QStringLiteral("Neural")));
+        dock.setSegmentationBackendStatus(QStringLiteral("OpenCV GrabCut"), false, QStringLiteral("weights not downloaded"));
+        QVERIFY(dock.segmentationBackendStatusText().contains(QStringLiteral("Fallback")));
     }
 };
 
