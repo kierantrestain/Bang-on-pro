@@ -88,10 +88,10 @@ jobs:
             brew install ffmpeg mlt frei0r qt@6
           fi
 
-      - name: Cache KDE Craft Qt6/KF6 Apple Silicon prefix
+      - name: Restore KDE Craft Qt6/KF6 Apple Silicon prefix cache
         id: craft-cache
         if: ${{ (inputs.build_mode || 'craft') != 'homebrew' }}
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: ${{ env.CRAFT_ROOT }}
           key: craft-qt6-master-macos15-arm64-${{ hashFiles('packaging/macos/CraftConfig.ini', 'packaging/macos/craft_blueprint.py', 'CMakeLists.txt') }}
@@ -99,7 +99,7 @@ jobs:
             craft-qt6-master-macos15-arm64-
 
       - name: Bootstrap KDE CraftMaster (Qt6 + KF6 + MLT 7 + FFmpeg binary cache, arm64)
-        if: ${{ (inputs.build_mode || 'craft') != 'homebrew' }}
+        if: ${{ (inputs.build_mode || 'craft') != 'homebrew' && steps.craft-cache.outputs.cache-hit != 'true' }}
         run: |
           CRAFTMASTER_DIR="${RUNNER_TEMP}/craftmaster"
           rm -rf "${CRAFTMASTER_DIR}"
@@ -136,6 +136,13 @@ jobs:
 
           # Trim transient downloaded archives to keep actions/cache compact
           rm -rf "${CRAFT_PREFIX}/download/archives" "${CRAFT_ROOT}/cache/download" 2>/dev/null || true
+
+      - name: Save KDE Craft Qt6/KF6 Apple Silicon prefix cache
+        if: ${{ (inputs.build_mode || 'craft') != 'homebrew' && steps.craft-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.CRAFT_ROOT }}
+          key: ${{ steps.craft-cache.outputs.cache-primary-key }}
 
       - name: Configure optional Developer ID signing & notarization
         id: signing

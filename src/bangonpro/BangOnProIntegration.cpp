@@ -353,8 +353,14 @@ void BangOnProIntegration::setupMenu()
 
     // Studio Workspaces submenu (all 9 workspaces)
     QMenu *wsMenu = menu->addMenu(QStringLiteral("Workspaces"));
+    auto *kdenliveWin = qobject_cast<MainWindow *>(m_mainWindow);
     for (const WorkspaceMode mode : allWorkspaceModes()) {
         QAction *wsAct = wsMenu->addAction(workspaceModeDisplayName(mode));
+        const QString actName = QStringLiteral("bangonpro_ws_") + workspaceModeToId(mode);
+        wsAct->setObjectName(actName);
+        if (kdenliveWin && kdenliveWin->actionCollection()) {
+            kdenliveWin->actionCollection()->addAction(actName, wsAct);
+        }
         connect(wsAct, &QAction::triggered, this, [this, mode]() {
             applyStudioWorkspace(mode);
             if (m_workspaceBar) {

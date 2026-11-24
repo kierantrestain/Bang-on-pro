@@ -302,8 +302,18 @@ build_application() {
     fi
 
     cmake "${cmake_args[@]}"
-    log "Compiling kdenlive, kdenlive_render, and Bang On Pro targets with ${JOBS} parallel Ninja jobs..."
-    cmake --build "${BUILD_DIR}" --parallel "${JOBS}"
+    local build_targets=(kdenlive kdenlive_render)
+    if [[ "${SKIP_TESTS}" -eq 0 ]]; then
+        build_targets+=(
+            bangonpro_test_timeline_command_engine
+            bangonpro_test_ai_assistant_dock
+            bangonpro_test_premiere_preset_browser
+            bangonpro_test_pro_workspace
+            bangonpro_test_roto_studio
+        )
+    fi
+    log "Compiling ${build_targets[*]} with ${JOBS} parallel Ninja jobs..."
+    cmake --build "${BUILD_DIR}" --target "${build_targets[@]}" --parallel "${JOBS}"
 
     if [[ "${SKIP_TESTS}" -eq 0 ]]; then
         log "Running Bang On Pro C++ CTest unit tests (offscreen Qt platform)..."

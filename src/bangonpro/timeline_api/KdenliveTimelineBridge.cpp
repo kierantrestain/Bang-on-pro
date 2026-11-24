@@ -280,7 +280,7 @@ bool KdenliveTimelineBridge::rollbackTransaction(QString *errorOut)
 
 bool KdenliveTimelineBridge::canNativeUndo() const
 {
-    if (!Core::self()) {
+    if (!Core::self() || !Core::self()->projectManager() || !Core::self()->projectManager()->current()) {
         return false;
     }
     const std::shared_ptr<DocUndoStack> stack = Core::self()->undoStack();
@@ -289,7 +289,7 @@ bool KdenliveTimelineBridge::canNativeUndo() const
 
 bool KdenliveTimelineBridge::canNativeRedo() const
 {
-    if (!Core::self()) {
+    if (!Core::self() || !Core::self()->projectManager() || !Core::self()->projectManager()->current()) {
         return false;
     }
     const std::shared_ptr<DocUndoStack> stack = Core::self()->undoStack();
@@ -298,9 +298,9 @@ bool KdenliveTimelineBridge::canNativeRedo() const
 
 bool KdenliveTimelineBridge::nativeUndo(QString *errorOut)
 {
-    if (!Core::self()) {
+    if (!Core::self() || !Core::self()->projectManager() || !Core::self()->projectManager()->current()) {
         if (errorOut != nullptr) {
-            *errorOut = QStringLiteral("Kdenlive Core singleton is not initialized");
+            *errorOut = QStringLiteral("Kdenlive project document is not initialized");
         }
         return false;
     }
@@ -317,9 +317,9 @@ bool KdenliveTimelineBridge::nativeUndo(QString *errorOut)
 
 bool KdenliveTimelineBridge::nativeRedo(QString *errorOut)
 {
-    if (!Core::self()) {
+    if (!Core::self() || !Core::self()->projectManager() || !Core::self()->projectManager()->current()) {
         if (errorOut != nullptr) {
-            *errorOut = QStringLiteral("Kdenlive Core singleton is not initialized");
+            *errorOut = QStringLiteral("Kdenlive project document is not initialized");
         }
         return false;
     }
