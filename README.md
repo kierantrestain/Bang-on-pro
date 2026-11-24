@@ -1,6 +1,49 @@
+# Bang On Pro
+
+**Bang On Pro** is an AI-native professional non-linear video editor built on **Kdenlive (`release/24.08` / `v24.08.3`)**, **Qt**, and **MLT (`>= 7.22.0`)**, distributed under the **GNU General Public License Version 3** (`GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL`).
+
+It preserves Kdenlive's complete manual editing workflow, `.kdenlive` project compatibility, autosave, and crash recovery while adding:
+
+- **Native AI Timeline Command API v1** (`src/bangonpro/timeline_api/`): single authorized transactional timeline writer with revision conflict detection, atomic rollback, approval staging, undo/redo, local Unix-domain IPC (`TimelineCommandServer`), and native `TimelineItemModel`/`DocUndoStack` bridge (`KdenliveTimelineBridge`).
+- **Premiere Preset Compatibility Engine & Browser** (`bangonpro/premiere_compat/`, `src/bangonpro/effects_browser/`): hardened `.prfpset`/ZIP extractor (zip-slip/zip-bomb & XXE-disabled `defusedxml`), `254016000000` ticks/sec keyframe/easing conversion, MLT/FFmpeg `avfilter`/frei0r/Kdenlive `<effectgroup>` XML converter, honest 4-tier compatibility classification (`exact_validated`, `approximated`, `missing_dependency`, `unsupported`), deterministic `melt` before/after visual & audio verifier, and dockable C++ Qt preset browser.
+- **Autonomous Multi-Agent Production Pipeline** (`bangonpro/ai_engine/`, `bangonpro/show_profiles/`): FFprobe verification, SHA-256 source-media immutability, GCC-PHAT audio cross-correlation multicamera sync, pluggable WhisperX/faster-whisper + deterministic VAD/multi-mic diarisation, rough-cut & speaker-aware camera switching, FFmpeg/MLT audio restoration, SRT/ASS captions & lower thirds, technical QC, OpenTimelineIO (`.otio`) & editable `.kdenlive` project emission, and 4 validated Show Profiles (`podcast_multicam`, `gameshow_multicam`, `sports_discussion`, `daily_news`).
+- **Professional UI & Apple Silicon macOS Toolkit** (`src/bangonpro/ui/`, `bangonpro/macos/`): collapsible AI Assistant Dock (proposed timeline diff tree, Accept/Reject/Compare/Refine/Undo, live Agent Activity Log), Premiere-style workspace layout, VideoToolbox/ProRes profiles with CPU fallback, automatic proxy generator, low-storage LRU cache manager, consent-gated TLS remote GPU protocol, and `melt`/`ffmpeg` benchmark runner.
+
+## Quick Commands
+
+```bash
+# 1. Install pinned Python runtime & verification dependencies
+pip3 install -r requirements-bangonpro.txt
+
+# 2. Import and audit a Premiere Pro preset archive (.zip / .prfpset)
+python3 -m bangonpro.premiere_compat.cli import \
+  --input "effects pr.zip" \
+  --audit-json "Bang_on_pro_premiere_preset_audit.json" \
+  --output-dir ./preset_audit_out \
+  --verify-render
+
+# 3. Run the autonomous multicamera first-cut pipeline
+python3 -m bangonpro.ai_engine.cli \
+  "Sync all four cameras, remove setup delays, build a first cut and add our standard graphics" \
+  --profile podcast_multicam \
+  --inputs cam_wide.mp4 cam_host.mp4 cam_guest.mp4 cam_react.mp4 \
+  --output-dir ./first_cut_out \
+  --export
+
+# 4. Run the full automated QA, security, licence & integration suite
+python3 tests/bangonpro/run_all_checks.py
+```
+
+See also:
+- [Architecture & Module Boundaries](docs/BANG_ON_PRO_ARCHITECTURE.md)
+- [Open-Source Component Matrix & Licensing](docs/OPEN_SOURCE_COMPONENTS.md)
+- [Apple Silicon macOS Build, Signing & Installation Guide](docs/MACOS_BUILD_AND_INSTALL.md)
+
+---
+
 ![](data/pics/kdenlive-logo.png)
 
-# About Kdenlive
+# About Kdenlive (Upstream Foundation)
 
 [Kdenlive](https://kdenlive.org) is a Free and Open Source video editing application, based on MLT Framework and KDE Frameworks 6. It is distributed under the [GNU General Public License Version 3](https://www.gnu.org/licenses/gpl-3.0.en.html) or any later version that is accepted by the KDE project.
 

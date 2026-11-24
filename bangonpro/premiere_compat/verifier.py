@@ -116,6 +116,10 @@ class PresetVerificationResult:
 def _headless_env(runtime_dir: Path) -> Dict[str, str]:
     env = dict(os.environ)
     env["QT_QPA_PLATFORM"] = "offscreen"
+    # MLT 7.x libmltqt.so checks getenv("DISPLAY") on Linux before creating QApplication
+    # even when Qt uses the offscreen QPA plugin; provide a non-connecting fallback.
+    if os.name == "posix" and not env.get("DISPLAY") and not env.get("WAYLAND_DISPLAY"):
+        env["DISPLAY"] = ":99"
     env["XDG_RUNTIME_DIR"] = str(runtime_dir)
     env["MLT_THREADS"] = "1"
     env["LC_ALL"] = "C"

@@ -259,6 +259,7 @@ ecm_qt_install_logging_categories(
 # Tests
 if(BUILD_TESTING)
     add_subdirectory(tests)
+    add_subdirectory(src/bangonpro/tests)
 endif()
 if(BUILD_FUZZING AND ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang"))
     add_subdirectory(fuzzer)

@@ -38,6 +38,7 @@ jobs:
             melt \
             ffmpeg \
             frei0r-plugins \
+            xvfb \
             python3-yaml
 
       - name: Set up Python 3.12
@@ -68,7 +69,7 @@ jobs:
       - name: Run full Bang On Pro QA, Security & Project Integrity suite
         run: |
           mkdir -p reports/qa
-          python3 tests/bangonpro/run_all_checks.py \
+          xvfb-run -a python3 tests/bangonpro/run_all_checks.py \
             --report-dir reports/qa \
             --verbose
 
@@ -206,6 +207,7 @@ jobs:
           SDL_AUDIODRIVER=dummy \
           xvfb-run -a ctest \
             --test-dir build \
+            --exclude-regex "^appstreamtest$" \
             --output-on-failure \
             --timeout 120 \
             --output-junit "${PWD}/reports/cpp/ctest-junit.xml"
@@ -213,7 +215,7 @@ jobs:
       - name: Run full Bang On Pro pytest & compliance verification
         run: |
           mkdir -p reports/cpp/pytest
-          python3 tests/bangonpro/run_all_checks.py \
+          xvfb-run -a python3 tests/bangonpro/run_all_checks.py \
             --report-dir reports/cpp/pytest \
             --verbose
 

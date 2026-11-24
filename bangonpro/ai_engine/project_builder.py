@@ -776,6 +776,8 @@ def render_kdenlive_project_with_melt(
 
     env = os.environ.copy()
     env.setdefault("QT_QPA_PLATFORM", "offscreen")
+    if os.name == "posix" and not env.get("DISPLAY") and not env.get("WAYLAND_DISPLAY"):
+        env["DISPLAY"] = ":99"
 
     cmd = [
         "melt",

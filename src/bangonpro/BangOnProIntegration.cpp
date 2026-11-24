@@ -15,9 +15,11 @@
 #include "core.h"
 #include "effects/effectlist/view/effectlistwidget.hpp"
 #include "mainwindow.h"
+#include "project/projectmanager.h"
 #include "timeline2/view/timelinecontroller.h"
 #include "timeline2/view/timelinewidget.h"
 
+#include <QAction>
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QDir>
@@ -28,10 +30,15 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMainWindow>
+#include <QMenu>
+#include <QMenuBar>
 #include <QProcess>
 #include <QProcessEnvironment>
+#include <QRegularExpression>
 #include <QStandardPaths>
+#include <QUrl>
 #include <QUuid>
+#include <QXmlStreamWriter>
 
 #ifndef BANGONPRO_SOURCE_DIR
 #define BANGONPRO_SOURCE_DIR ""
@@ -59,6 +66,53 @@ QJsonObject readJsonFile(const QString &path, QString *err)
     }
     return doc.object();
 }
+
+QString sanitizeFileSlug(const QString &raw)
+{
+    QString slug = raw.toLower();
+    slug.replace(QRegularExpression(QStringLiteral("[^a-z0-9_-]+")), QStringLiteral("_"));
+    slug = slug.left(64);
+    return slug.isEmpty() ? QStringLiteral("custom_stack") : slug;
+}
+
+QString buildEffectGroupXml(const QString &stackName, const QJsonArray &mltFilters)
+{
+    if (mltFilters.isEmpty()) {
+        return {};
+    }
+    QString xml;
+    QXmlStreamWriter writer(&xml);
+    writer.setAutoFormatting(true);
+    writer.writeStartDocument();
+    writer.writeStartElement(QStringLiteral("effectgroup"));
+    writer.writeAttribute(QStringLiteral("id"), stackName);
+    writer.writeAttribute(QStringLiteral("parentIn"), QStringLiteral("0"));
+    for (const QJsonValue &fv : mltFilters) {
+        const QJsonObject fObj = fv.toObject();
+        const QString service = fObj.value(QStringLiteral("service")).toString();
+        if (service.isEmpty()) {
+            continue;
+        }
+        writer.writeStartElement(QStringLiteral("effect"));
+        writer.writeAttribute(QStringLiteral("id"), service);
+        const QJsonObject props = fObj.value(QStringLiteral("properties")).toObject();
+        for (auto it = props.constBegin(); it != props.constEnd(); ++it) {
+            writer.writeStartElement(QStringLiteral("property"));
+            writer.writeAttribute(QStringLiteral("name"), it.key());
+            writer.writeCharacters(it.value().toVariant().toString());
+            writer.writeEndElement();
+        }
+        writer.writeStartElement(QStringLiteral("property"));
+        writer.writeAttribute(QStringLiteral("name"), QStringLiteral("kdenlive:collapsed"));
+        writer.writeCharacters(QStringLiteral("0"));
+        writer.writeEndElement();
+        writer.writeEndElement();
+    }
+    writer.writeTextElement(QStringLiteral("description"), QStringLiteral("Bang On Pro custom effect stack: %1").arg(stackName));
+    writer.writeEndElement();
+    writer.writeEndDocument();
+    return xml;
+}
 } // namespace
 
 BangOnProIntegration::BangOnProIntegration(QMainWindow *mainWindow, EffectListWidget *effectList, QObject *parent)
@@ -69,6 +123,7 @@ BangOnProIntegration::BangOnProIntegration(QMainWindow *mainWindow, EffectListWi
     setupEngine();
     setupAiDock();
     setupPresetBrowser();
+    setupMenu();
 }
 
 BangOnProIntegration::~BangOnProIntegration()
@@ -87,7 +142,8 @@ QString BangOnProIntegration::locatePythonPackageRoot()
         candidates << envPath;
     }
     const QString appDir = QCoreApplication::applicationDirPath();
-    candidates << appDir + QStringLiteral("/../Resources/bangonpro-python") // macOS bundle
+    candidates << appDir + QStringLiteral("/../Resources")                  // macOS .app bundle (packaging/macos/build_macos_arm64.sh)
+               << appDir + QStringLiteral("/../Resources/bangonpro-python") // alternate macOS layout
                << appDir + QStringLiteral("/../share/bangonpro/python")     // installed prefix
                << QString::fromUtf8(BANGONPRO_SOURCE_DIR);                  // developer build
     for (const QString &c : std::as_const(candidates)) {
@@ -153,11 +209,7 @@ void BangOnProIntegration::setupAiDock()
     connect(m_aiWidget, &AiAssistantDock::batchRejectRequested, this, &BangOnProIntegration::rejectBatch);
     connect(m_aiWidget, &AiAssistantDock::undoRequested, this, &BangOnProIntegration::undoLast);
     connect(m_aiWidget, &AiAssistantDock::taskCancelRequested, this, &BangOnProIntegration::cancelTask);
-    connect(m_aiWidget, &AiAssistantDock::compareModeToggled, this, [this](bool on) {
-        m_aiWidget->appendActivityLog(QStringLiteral("integration"),
-                                      on ? QStringLiteral("Compare: proposal not yet applied — the programme monitor shows the current (A) timeline")
-                                         : QStringLiteral("Compare off"));
-    });
+    connect(m_aiWidget, &AiAssistantDock::compareModeToggled, this, &BangOnProIntegration::toggleCompareMode);
     connect(m_engine.get(), &TimelineCommandEngine::revisionChanged, m_aiWidget, &AiAssistantDock::setTimelineRevision);
 }
 
@@ -170,7 +222,53 @@ void BangOnProIntegration::setupPresetBrowser()
     m_mainWindow->addDockWidget(Qt::LeftDockWidgetArea, m_presetDock);
     connect(m_presetWidget, &PremierePresetBrowser::importArchiveRequested, this, &BangOnProIntegration::importPresetArchive);
     connect(m_presetWidget, &PremierePresetBrowser::applyPresetRequested, this, &BangOnProIntegration::applyPreset);
+    connect(m_presetWidget, &PremierePresetBrowser::customStackApplied, this, &BangOnProIntegration::applyCustomStack);
     loadPresetReportIfPresent();
+}
+
+void BangOnProIntegration::setupMenu()
+{
+    if (!m_mainWindow || !m_mainWindow->menuBar()) {
+        return;
+    }
+    QMenu *menu = m_mainWindow->menuBar()->addMenu(QStringLiteral("&Bang On Pro"));
+
+    if (m_aiDock) {
+        QAction *toggleAi = m_aiDock->toggleViewAction();
+        toggleAi->setText(QStringLiteral("AI Assistant Panel"));
+        menu->addAction(toggleAi);
+    }
+    if (m_presetDock) {
+        QAction *togglePresets = m_presetDock->toggleViewAction();
+        togglePresets->setText(QStringLiteral("Premiere Presets Browser"));
+        menu->addAction(togglePresets);
+    }
+
+    menu->addSeparator();
+
+    QAction *premiereLayout = menu->addAction(QStringLiteral("Apply Premiere-Style Workspace Layout"));
+    connect(premiereLayout, &QAction::triggered, this, [this]() {
+        WorkspaceDocks docks;
+        docks.aiAssistant = m_aiDock;
+        docks.premiereBrowser = m_presetDock;
+        applyPremiereWorkspaceLayout(m_mainWindow, docks);
+        if (m_aiWidget) {
+            m_aiWidget->appendActivityLog(QStringLiteral("workspace"), QStringLiteral("Applied Premiere-style workspace layout"));
+        }
+    });
+
+    QAction *importPresets = menu->addAction(QStringLiteral("Import Premiere Preset Pack (.zip / .prfpset)..."));
+    connect(importPresets, &QAction::triggered, this, [this]() {
+        const QString file = QFileDialog::getOpenFileName(m_mainWindow, QStringLiteral("Import Premiere Pro Preset Pack"), QString(),
+                                                          QStringLiteral("Premiere Presets (*.zip *.prfpset *.xml);;All Files (*)"));
+        if (!file.isEmpty()) {
+            importPresetArchive(file);
+        }
+    });
+
+    m_openGeneratedProjectAction = menu->addAction(QStringLiteral("Open Last AI First-Cut Project (.kdenlive)"));
+    m_openGeneratedProjectAction->setEnabled(false);
+    connect(m_openGeneratedProjectAction, &QAction::triggered, this, &BangOnProIntegration::openLastGeneratedProject);
 }
 
 void BangOnProIntegration::loadPresetReportIfPresent()
@@ -232,7 +330,7 @@ void BangOnProIntegration::startProposal(const QString &instruction, const QStri
     }
     m_aiProcess = proc;
     m_aiWidget->setBusy(true, QStringLiteral("Analysing, syncing and assembling first cut…"), -1);
-    m_aiWidget->appendActivityLog(QStringLiteral("orchestrator"), QStringLiteral("Started pipeline on %1 file(s) → %2").arg(inputs.size()).arg(m_aiOutputDir));
+    m_aiWidget->appendActivityLog(QStringLiteral("orchestrator"), QStringLiteral("Started pipeline on %1 file(s) -> %2").arg(inputs.size()).arg(m_aiOutputDir));
     connect(proc, &QProcess::finished, this, [this](int code, QProcess::ExitStatus) { handleProposalFinished(code); });
     connect(proc, &QProcess::errorOccurred, this, [this](QProcess::ProcessError) {
         if (m_aiProcess && m_aiProcess->state() == QProcess::NotRunning) {
@@ -262,6 +360,11 @@ void BangOnProIntegration::handleProposalFinished(int exitCode)
     const QJsonObject summary = QJsonDocument::fromJson(out).object();
     const QJsonObject artifacts = summary.value(QStringLiteral("artifacts")).toObject();
     const QString cmdsPath = artifacts.value(QStringLiteral("timeline_commands_json")).toString();
+    m_lastKdenliveProjectPath = artifacts.value(QStringLiteral("kdenlive_project")).toString();
+    if (m_openGeneratedProjectAction) {
+        m_openGeneratedProjectAction->setEnabled(!m_lastKdenliveProjectPath.isEmpty() && QFileInfo::exists(m_lastKdenliveProjectPath));
+    }
+
     QString err;
     const QJsonObject cmds = readJsonFile(cmdsPath, &err);
     if (cmds.isEmpty()) {
@@ -303,6 +406,9 @@ void BangOnProIntegration::handleProposalFinished(int exitCode)
 
 void BangOnProIntegration::approveBatch(const TimelineCommandBatch &batch)
 {
+    m_compareUndidBatch = false;
+    m_aiWidget->setCompareModeActive(false);
+
     TimelineCommandBatch b = batch;
     b.requiresApproval = false; // the user just approved it in the dock
     b.expectedRevision = m_engine->currentRevision();
@@ -311,12 +417,13 @@ void BangOnProIntegration::approveBatch(const TimelineCommandBatch &batch)
     m_aiWidget->setCanUndo(m_engine->canUndo());
     m_aiWidget->appendActivityLog(
         QStringLiteral("timeline-writer"),
-        QStringLiteral("%1 → revision %2 %3").arg(commandStatusToString(resp.status)).arg(resp.currentRevision).arg(resp.errorMessage),
+        QStringLiteral("%1 -> revision %2 %3").arg(commandStatusToString(resp.status)).arg(resp.currentRevision).arg(resp.errorMessage),
         resp.status == CommandStatus::Ok ? QStringLiteral("INFO") : QStringLiteral("ERROR"));
-    if (resp.status != CommandStatus::Ok && !m_aiOutputDir.isEmpty()) {
+    if (resp.status != CommandStatus::Ok && !m_lastKdenliveProjectPath.isEmpty()) {
         m_aiWidget->appendActivityLog(
             QStringLiteral("timeline-writer"),
-            QStringLiteral("Live timeline unchanged. The complete editable first cut is available as a project in %1").arg(m_aiOutputDir),
+            QStringLiteral("Live timeline unchanged. Open the complete editable first cut via Bang On Pro -> Open Last AI First-Cut Project (%1)")
+                .arg(m_lastKdenliveProjectPath),
             QStringLiteral("WARN"));
     }
 }
@@ -328,8 +435,36 @@ void BangOnProIntegration::rejectBatch(const QString &requestId)
     m_aiWidget->appendActivityLog(QStringLiteral("integration"), QStringLiteral("Proposal %1 rejected; timeline untouched").arg(requestId));
 }
 
+void BangOnProIntegration::toggleCompareMode(bool previewBefore)
+{
+    if (previewBefore) {
+        if (!m_compareUndidBatch && m_engine->canUndo()) {
+            const TimelineCommandResponse resp = m_engine->undoLastTransaction(QStringLiteral("compare-before"));
+            if (resp.status == CommandStatus::Ok) {
+                m_compareUndidBatch = true;
+                m_aiWidget->appendActivityLog(QStringLiteral("compare"),
+                                              QStringLiteral("Showing BEFORE (A) timeline state (revision %1)").arg(resp.currentRevision));
+                return;
+            }
+        }
+        m_aiWidget->appendActivityLog(QStringLiteral("compare"),
+                                      QStringLiteral("Compare active: proposal not yet applied; programme monitor shows current (A) timeline"));
+    } else if (m_compareUndidBatch && m_engine->canRedo()) {
+        const TimelineCommandResponse resp = m_engine->redoLastTransaction(QStringLiteral("compare-after"));
+        m_compareUndidBatch = false;
+        m_aiWidget->setCanUndo(m_engine->canUndo());
+        m_aiWidget->appendActivityLog(QStringLiteral("compare"),
+                                      QStringLiteral("Restored AFTER (B) AI timeline state (revision %1)").arg(resp.currentRevision));
+    } else {
+        m_compareUndidBatch = false;
+        m_aiWidget->appendActivityLog(QStringLiteral("compare"), QStringLiteral("Compare mode off"));
+    }
+}
+
 void BangOnProIntegration::undoLast()
 {
+    m_compareUndidBatch = false;
+    m_aiWidget->setCompareModeActive(false);
     const TimelineCommandResponse resp = m_engine->undoLastTransaction(QStringLiteral("user"));
     m_aiWidget->setCanUndo(m_engine->canUndo());
     m_aiWidget->appendActivityLog(
@@ -342,6 +477,19 @@ void BangOnProIntegration::cancelTask()
     if (m_aiProcess) {
         m_aiProcess->kill();
         m_aiWidget->appendActivityLog(QStringLiteral("integration"), QStringLiteral("AI task cancelled by user"), QStringLiteral("WARN"));
+    }
+}
+
+void BangOnProIntegration::openLastGeneratedProject()
+{
+    if (m_lastKdenliveProjectPath.isEmpty() || !QFileInfo::exists(m_lastKdenliveProjectPath)) {
+        return;
+    }
+    if (pCore && pCore->projectManager()) {
+        pCore->projectManager()->openFile(QUrl::fromLocalFile(m_lastKdenliveProjectPath));
+        if (m_aiWidget) {
+            m_aiWidget->appendActivityLog(QStringLiteral("integration"), QStringLiteral("Opened editable project: %1").arg(m_lastKdenliveProjectPath));
+        }
     }
 }
 
@@ -363,20 +511,56 @@ void BangOnProIntegration::importPresetArchive(const QString &zipPath)
         qWarning("Bang On Pro: cannot import presets, bangonpro package not found");
         return;
     }
+    if (m_aiWidget) {
+        m_aiWidget->appendActivityLog(QStringLiteral("premiere-compat"), QStringLiteral("Importing Premiere preset archive: %1").arg(zipPath));
+    }
     connect(proc, &QProcess::finished, this, [this, proc](int code, QProcess::ExitStatus) {
         proc->deleteLater();
         if (code == 0) {
             loadPresetReportIfPresent();
+            if (m_presetDock) {
+                m_presetDock->show();
+                m_presetDock->raise();
+            }
+            if (m_aiWidget) {
+                m_aiWidget->appendActivityLog(QStringLiteral("premiere-compat"), QStringLiteral("Premiere preset import complete; browser refreshed"));
+            }
         } else {
-            qWarning("Bang On Pro: preset import failed: %s", proc->readAllStandardError().right(800).constData());
+            const QString errText = QString::fromUtf8(proc->readAllStandardError().right(800));
+            qWarning("Bang On Pro: preset import failed: %s", qPrintable(errText));
+            if (m_aiWidget) {
+                m_aiWidget->appendActivityLog(QStringLiteral("premiere-compat"), QStringLiteral("Preset import failed: %1").arg(errText),
+                                              QStringLiteral("ERROR"));
+            }
         }
     });
 }
 
+void BangOnProIntegration::installAndApplyEffectXml(const QString &fileSlug, const QString &effectDisplayName, const QString &xml)
+{
+    if (xml.isEmpty()) {
+        return;
+    }
+    const QString effDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + QStringLiteral("/effects/");
+    QDir().mkpath(effDir);
+    const QString path = effDir + QStringLiteral("bangonpro_") + sanitizeFileSlug(fileSlug) + QStringLiteral(".xml");
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        return;
+    }
+    f.write(xml.toUtf8());
+    f.close();
+    if (m_effectList) {
+        m_effectList->reloadCustomEffect(path);
+    }
+    auto *mw = qobject_cast<MainWindow *>(m_mainWindow);
+    if (mw && mw->getCurrentTimeline() && mw->getCurrentTimeline()->controller()) {
+        mw->getCurrentTimeline()->controller()->addEffectToClip(effectDisplayName);
+    }
+}
+
 void BangOnProIntegration::applyPreset(const QString &presetId, const QJsonArray &mltFilters)
 {
-    Q_UNUSED(mltFilters)
-    // Install the converted preset as a native Kdenlive custom effect, then apply it to the selected clip.
     QString err;
     const QJsonObject report = readJsonFile(dataDir() + QStringLiteral("/presets/compatibility_report.json"), &err);
     const QJsonArray presets = report.value(QStringLiteral("presets")).toArray();
@@ -391,23 +575,23 @@ void BangOnProIntegration::applyPreset(const QString &presetId, const QJsonArray
                      qPrintable(p.value(QStringLiteral("compatibility_status")).toString()));
             return;
         }
-        const QString effDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + QStringLiteral("/effects/");
-        QDir().mkpath(effDir);
-        const QString path = effDir + QStringLiteral("bangonpro_") + presetId + QStringLiteral(".xml");
-        QFile f(path);
-        if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-            return;
-        }
-        f.write(xml.toUtf8());
-        f.close();
-        if (m_effectList) {
-            m_effectList->reloadCustomEffect(path);
-        }
-        auto *mw = qobject_cast<MainWindow *>(m_mainWindow);
-        if (mw && mw->getCurrentTimeline() && mw->getCurrentTimeline()->controller()) {
-            mw->getCurrentTimeline()->controller()->addEffectToClip(p.value(QStringLiteral("name")).toString());
-        }
+        installAndApplyEffectXml(presetId, p.value(QStringLiteral("name")).toString(), xml);
         return;
+    }
+    // Fallback: synthesize Kdenlive XML directly from the provided MLT filter specs
+    if (!mltFilters.isEmpty()) {
+        const QString xml = buildEffectGroupXml(presetId, mltFilters);
+        installAndApplyEffectXml(presetId, presetId, xml);
+    }
+}
+
+void BangOnProIntegration::applyCustomStack(const QString &stackName, const QJsonArray &combinedMltFilters)
+{
+    const QString xml = buildEffectGroupXml(stackName, combinedMltFilters);
+    installAndApplyEffectXml(QStringLiteral("stack_") + stackName, stackName, xml);
+    if (m_aiWidget) {
+        m_aiWidget->appendActivityLog(QStringLiteral("effects"),
+                                      QStringLiteral("Applied custom effect stack '%1' (%2 filters)").arg(stackName).arg(combinedMltFilters.size()));
     }
 }
 

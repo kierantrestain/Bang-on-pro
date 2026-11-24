@@ -305,6 +305,8 @@ def render_with_melt(project_path: Path, output_mp4: Path) -> subprocess.Complet
     env = os.environ.copy()
     env.setdefault("SDL_AUDIODRIVER", "dummy")
     env.setdefault("QT_QPA_PLATFORM", "offscreen")
+    if os.name == "posix" and not env.get("DISPLAY") and not env.get("WAYLAND_DISPLAY"):
+        env["DISPLAY"] = ":99"
     cmd = [
         MELT_BIN,
         str(project_path),

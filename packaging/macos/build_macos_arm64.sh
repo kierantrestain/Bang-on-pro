@@ -5,7 +5,7 @@
 # Reproducible Apple Silicon (arm64) macOS build, .app bundle, code signing,
 # .dmg packaging, and launch smoke-test verification script for Bang On Pro.
 #
-# Must be executed natively on Apple Silicon macOS (arm64, macOS 13.0+ / CI macos-14).
+# Must be executed natively on Apple Silicon macOS (arm64, macOS 13.0+ / CI macos-15).
 # Cross-compiling Mach-O arm64 KDE/Qt6/MLT bundles from Linux is NOT supported.
 
 set -euo pipefail
@@ -117,7 +117,7 @@ verify_host_platform() {
     host_arch="$(uname -m)"
 
     if [[ "${host_os}" != "Darwin" ]]; then
-        die "This script must run on macOS (detected OS: ${host_os}). For CI builds, use GitHub Actions workflow .github/workflows/build-macos-arm64.yml on macos-14."
+        die "This script must run on macOS (detected OS: ${host_os}). For CI builds, use GitHub Actions workflow .github/workflows/build-macos-arm64.yml on macos-15."
     fi
 
     if [[ "${host_arch}" != "arm64" ]]; then

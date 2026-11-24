@@ -7,7 +7,7 @@ This guide covers installing **Bang On Pro** on Apple Silicon Macs (M1, M2, M3, 
 ## 1. System Requirements
 
 - **Hardware:** Apple Silicon Mac (`arm64` — M1 / M2 / M3 / M4 family). Intel `x86_64` Macs are not the primary target of the `arm64` packaging scripts.
-- **Operating System:** macOS **13.0 Ventura** or newer (CI builds and tests natively on **macOS 14 Sonoma `macos-14`**).
+- **Operating System:** macOS **13.0 Ventura** or newer (CI builds and tests natively on **macOS 15 Sequoia `macos-15`**).
 - **Disk Space:**
   - Installing the prebuilt `.dmg`: ~500 MB free.
   - Building locally from source with KDE Craft Qt6/KF6: ~10–15 GB free (can be placed on an external APFS SSD via `CRAFT_ROOT`).
@@ -18,7 +18,7 @@ This guide covers installing **Bang On Pro** on Apple Silicon Macs (M1, M2, M3, 
 
 ## 2. Option A: Install Prebuilt `.dmg` from GitHub Actions
 
-Every push to `main`, `bangonpro/**`, release tags (`v*`), or manual dispatch triggers [`.github/workflows/build-macos-arm64.yml`](../.github/workflows/build-macos-arm64.yml) on GitHub's native Apple Silicon **`macos-14`** runner.
+Every push to `main`, `bangonpro/**`, release tags (`v*`), or manual dispatch triggers [`.github/workflows/build-macos-arm64.yml`](../.github/workflows/build-macos-arm64.yml) on GitHub's native Apple Silicon **`macos-15`** runner.
 
 1. Open the repository's **Actions** tab → select **Build macOS Apple Silicon (arm64)** → open the latest green run.
 2. Download the artifact **`BangOnPro-macos-arm64-<version>`**, which contains:
@@ -152,5 +152,5 @@ After verifying `shasum -a 256 -c SHA256SUMS.txt` and copying `Bang On Pro.app` 
 >
 > Accordingly:
 > - Linux CI (`.github/workflows/ci-linux.yml`) compiles and tests the C++/Qt5/KF5/MLT binary, CTest suite, Python AI/preset/integrity suites, shell syntax (`bash -n packaging/macos/build_macos_arm64.sh`), plist XML validity, and workflow YAML syntax.
-> - Real Apple Silicon `.app` and `.dmg` deliverables **must** be built and smoke-tested on native Apple Silicon hardware — either via GitHub Actions' `macos-14` (`arm64`) runner (`.github/workflows/build-macos-arm64.yml`) or locally on an M-series Mac using `packaging/macos/build_macos_arm64.sh`.
+> - Real Apple Silicon `.app` and `.dmg` deliverables **must** be built and smoke-tested on native Apple Silicon hardware — either via GitHub Actions' `macos-15` (`arm64`) runner (`.github/workflows/build-macos-arm64.yml`) or locally on an M-series Mac using `packaging/macos/build_macos_arm64.sh`.
 > - No Linux-built artifact is ever represented as a verified macOS binary.

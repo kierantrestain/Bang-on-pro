@@ -322,8 +322,11 @@ int main(int argc, char *argv[])
         break;
     }
 
-    KAboutData aboutData(QByteArray("kdenlive"), i18n("Kdenlive"), KDENLIVE_VERSION, i18n("An open source video editor."), KAboutLicense::GPL_V3,
-                         i18n("Copyright © 2007–2024 Kdenlive authors"), otherText, QStringLiteral("https://kdenlive.org"));
+    KAboutData aboutData(QByteArray("kdenlive"), i18n("Bang On Pro"), KDENLIVE_VERSION, i18n("AI-Native Professional Video Editor built on Kdenlive & MLT."),
+                         KAboutLicense::GPL_V3, i18n("Copyright © 2026 Bang On Pro Contributors; Built on Kdenlive (Copyright © 2007–2024 Kdenlive authors)"),
+                         otherText, QStringLiteral("https://github.com/kierantrestain/Bang-on-pro"));
+    aboutData.addAuthor(i18n("Bang On Pro Contributors"), i18n("AI Timeline API, Premiere Compatibility Engine, Autonomous Workflows & macOS Optimization"),
+                        QString(), QStringLiteral("https://github.com/kierantrestain/Bang-on-pro"));
     // main developers (alphabetical)
     aboutData.addAuthor(i18n("Jean-Baptiste Mardelle"), i18n("MLT and KDE SC 4 / KF5 port, main developer and maintainer"), QStringLiteral("jb@kdenlive.org"));
     // active developers with major involvement

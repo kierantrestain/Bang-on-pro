@@ -35,8 +35,8 @@ concurrency:
 
 jobs:
   build-macos-arm64:
-    name: Build & Package BangOnPro-arm64.dmg (macos-14)
-    runs-on: macos-14
+    name: Build & Package BangOnPro-arm64.dmg (macos-15)
+    runs-on: macos-15
     timeout-minutes: 90
     env:
       CRAFT_ROOT: ${{ github.workspace }}/CraftRoot
@@ -90,9 +90,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.CRAFT_ROOT }}
-          key: craft-qt6-macos14-arm64-${{ hashFiles('packaging/macos/craft_blueprint.py', 'CMakeLists.txt') }}
+          key: craft-qt6-macos15-arm64-${{ hashFiles('packaging/macos/craft_blueprint.py', 'CMakeLists.txt') }}
           restore-keys: |
-            craft-qt6-macos14-arm64-
+            craft-qt6-macos15-arm64-
 
       - name: Bootstrap KDE Craft Qt6 + KF6 + MLT 7 + FFmpeg dependencies (arm64)
         if: ${{ (inputs.build_mode || 'craft') != 'homebrew' }}
@@ -112,7 +112,7 @@ jobs:
 
           # Install prebuilt binary-cached Qt6/KF6/MLT/FFmpeg dependencies on arm64
           source "${CRAFT_ROOT}/craft/craftenv.sh"
-          craft --no-cache --install-deps bangonpro || craft --install-deps kdenlive
+          craft --install-deps bangonpro || craft --install-deps kdenlive
 
       - name: Configure optional Developer ID signing & notarization
         id: signing
