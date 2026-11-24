@@ -21,14 +21,56 @@ from .models import (
     MappedEffectResult,
     MappedPreset,
     MissingDependency,
+    MissingSourceInput,
     MltFilterSpec,
     ParsedPreset,
+    SourceArchiveInfo,
 )
 from .parser import ParsedSourceBundle
 
 DEFAULT_SCHEMA_PATH = (
     Path(__file__).resolve().parent.parent / "schemas" / "premiere_preset_report_v1.schema.json"
 )
+
+
+def _infer_category_and_tags(
+    parsed: ParsedPreset,
+    mlt_filters: Sequence[MltFilterSpec],
+) -> tuple[str, List[str]]:
+    """Infer a high-level browser category and tags from effects and folder path."""
+    tags: List[str] = []
+    for folder in parsed.folder_path:
+        cleaned = folder.strip().lower()
+        if cleaned and cleaned not in tags:
+            tags.append(cleaned)
+
+    match_names = " ".join(
+        f"{c.match_name} {c.display_name}".lower() for c in parsed.effects
+    )
+    media_types = {c.media_type for c in parsed.effects} | {f.media_type for f in mlt_filters}
+
+    if media_types == {"audio"} or ("audio" in media_types and "video" not in media_types):
+        category = "Broadcast Audio"
+    elif any(k in match_names for k in ("dissolve", "dip to", "push", "slide", "wipe", "whip pan")):
+        category = "Transitions"
+    elif any(k in match_names for k in ("key", "matte", "mask", "alpha")):
+        category = "Keying & Matte"
+    elif any(k in match_names for k in ("lumetri", "color", "curves", "tint", "black & white", "levels", "vibrance", "procamp", "brightness")):
+        category = "Colour & Film Looks"
+    elif any(k in match_names for k in ("blur", "glow", "shadow", "sharpen", "unsharp", "mosaic", "noise", "grain", "vignette", "strobe", "chromatic", "posterize", "echo", "stroke", "wave", "turbulent")):
+        category = "Blur & Stylize"
+    elif any(k in match_names for k in ("motion", "geometry", "transform", "opacity", "crop", "mirror", "offset", "corner pin", "basic 3d", "stabiliz", "timewarp")):
+        category = "Motion & Transforms"
+    elif parsed.folder_path:
+        category = parsed.folder_path[0]
+    else:
+        category = "Effects"
+
+    for flt in mlt_filters:
+        svc = flt.service.split(".")[-1].lower()
+        if svc and svc not in tags:
+            tags.append(svc)
+    return category, tags
 
 
 def _aggregate_status(
@@ -213,6 +255,7 @@ def map_preset(parsed: ParsedPreset, ctx: Optional[MappingContext] = None) -> Ma
                 notes.append(n)
 
     preset_status = _aggregate_status(effect_results, all_missing_deps)
+    category, tags = _infer_category_and_tags(parsed, all_mlt_filters)
 
     kdenlive_xml = generate_kdenlive_effect_xml(
         preset_name=parsed.name,
@@ -239,6 +282,8 @@ def map_preset(parsed: ParsedPreset, ctx: Optional[MappingContext] = None) -> Ma
         original_xml_preserved=parsed.original_xml_preserved,
         original_xml=parsed.original_xml,
         description=parsed.description,
+        category=category,
+        tags=tags,
     )
 
 
@@ -268,6 +313,7 @@ def build_compatibility_report(
     height: int = 1080,
     asset_search_dirs: Optional[List[Path]] = None,
     platform_name: str = "linux",
+    missing_source_inputs: Optional[Sequence[MissingSourceInput]] = None,
 ) -> CompatibilityReport:
     """Map all presets in a ParsedSourceBundle and produce a CompatibilityReport."""
     ctx = MappingContext(
@@ -291,6 +337,30 @@ def build_compatibility_report(
         source_archive=bundle.archive_info,
         presets=mapped,
         audit_reconciliation=audit_rec,
+        missing_source_inputs=list(missing_source_inputs or []),
+    )
+
+
+def build_missing_inputs_report(
+    missing_inputs: Sequence[MissingSourceInput],
+    source_name: str = "missing_source_inputs",
+) -> CompatibilityReport:
+    """Construct an honest zero-preset blocker report when required proprietary archives are absent.
+
+    Never fabricates synthetic or fake preset entries.
+    """
+    generated_at = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
+    return CompatibilityReport(
+        schema_version=SCHEMA_VERSION,
+        generated_at=generated_at,
+        source_archive=SourceArchiveInfo(
+            name=source_name,
+            sha256="0" * 64,
+            file_count=0,
+            redistribution_restricted=True,
+        ),
+        presets=[],
+        missing_source_inputs=list(missing_inputs),
     )
 
 
@@ -335,6 +405,21 @@ def render_markdown_report(report: CompatibilityReport) -> str:
         f"- **Distinct Premiere Effects Encountered:** `{summary['distinct_effects']}`",
         "",
     ]
+
+    if report.missing_source_inputs:
+        lines.extend(
+            [
+                "## Missing Source Inputs (Audit Blocker)",
+                "",
+                "| Input | Expected Path | Reason | Remediation |",
+                "| --- | --- | --- | --- |",
+            ]
+        )
+        for m in report.missing_source_inputs:
+            lines.append(
+                f"| `{m.input_name}` | `{m.expected_path}` | {m.reason} | {m.remediation} |"
+            )
+        lines.append("")
 
     if report.audit_reconciliation:
         rec = report.audit_reconciliation

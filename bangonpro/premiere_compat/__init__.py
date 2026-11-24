@@ -1,11 +1,24 @@
 """Bang On Pro Premiere Pro Preset Compatibility Engine.
 
+SPDX-FileCopyrightText: 2026 Bang On Pro Contributors
 SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
 """
 
-from .catalog import MappingContext, map_effect_component
+from .builtin_library import (
+    BUILTIN_STARTER_DEFINITIONS,
+    build_builtin_starter_report,
+    export_builtin_starter_library,
+    get_builtin_starter_presets,
+)
+from .catalog import (
+    PREMIERE_EFFECT_FAMILIES,
+    MappingContext,
+    list_supported_effect_families,
+    map_effect_component,
+)
 from .mapper import (
     build_compatibility_report,
+    build_missing_inputs_report,
     export_report_bundle,
     generate_kdenlive_effect_xml,
     generate_mlt_filter_xml,
@@ -22,6 +35,7 @@ from .models import (
     Keyframe,
     MappedPreset,
     MissingDependency,
+    MissingSourceInput,
     MltFilterSpec,
     Parameter,
     ParsedPreset,
@@ -35,6 +49,12 @@ from .parser import (
     parse_prfpset_bytes,
     ticks_to_frame,
     ticks_to_seconds,
+)
+from .preview_generator import (
+    PreviewPaths,
+    attach_previews_to_report,
+    compose_before_after_split_png,
+    generate_preset_previews,
 )
 from .security import (
     MAX_COMPRESSION_RATIO,
@@ -64,6 +84,7 @@ __all__ = [
     "ArchiveLimitError",
     "ArchiveSecurityLimits",
     "AudioMetrics",
+    "BUILTIN_STARTER_DEFINITIONS",
     "CompatibilityReport",
     "CompatibilityStatus",
     "EffectComponent",
@@ -76,12 +97,15 @@ __all__ = [
     "MappedPreset",
     "MappingContext",
     "MissingDependency",
+    "MissingSourceInput",
     "MltFilterSpec",
+    "PREMIERE_EFFECT_FAMILIES",
     "PR_TICKS_PER_SECOND",
     "Parameter",
     "ParsedPreset",
     "ParsedSourceBundle",
     "PresetVerificationResult",
+    "PreviewPaths",
     "SecurityViolationError",
     "SourceArchiveInfo",
     "SymlinkError",
@@ -89,11 +113,19 @@ __all__ = [
     "XmlSecurityError",
     "ZipBombError",
     "ZipSlipError",
+    "attach_previews_to_report",
+    "build_builtin_starter_report",
     "build_compatibility_report",
+    "build_missing_inputs_report",
+    "compose_before_after_split_png",
+    "export_builtin_starter_library",
     "export_report_bundle",
     "generate_kdenlive_effect_xml",
     "generate_mlt_filter_xml",
+    "generate_preset_previews",
     "generate_reference_clip",
+    "get_builtin_starter_presets",
+    "list_supported_effect_families",
     "load_audit_json",
     "map_effect_component",
     "map_preset",

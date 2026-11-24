@@ -234,6 +234,11 @@ class MappedPreset:
     original_xml_preserved: bool = True
     original_xml: str = ""
     description: str = ""
+    category: str = ""
+    tags: List[str] = field(default_factory=list)
+    preview_before_path: Optional[str] = None
+    preview_after_path: Optional[str] = None
+    preview_split_path: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         data: Dict[str, Any] = {
@@ -256,6 +261,16 @@ class MappedPreset:
             data["original_xml"] = self.original_xml
         if self.description:
             data["description"] = self.description
+        if self.category:
+            data["category"] = self.category
+        if self.tags:
+            data["tags"] = list(self.tags)
+        if self.preview_before_path is not None:
+            data["preview_before_path"] = self.preview_before_path
+        if self.preview_after_path is not None:
+            data["preview_after_path"] = self.preview_after_path
+        if self.preview_split_path is not None:
+            data["preview_split_path"] = self.preview_split_path
         return data
 
 
@@ -278,6 +293,24 @@ class SourceArchiveInfo:
 
 
 @dataclass
+class MissingSourceInput:
+    """Structured blocker record emitted when proprietary source inputs are absent."""
+
+    input_name: str
+    expected_path: str
+    reason: str
+    remediation: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "input_name": self.input_name,
+            "expected_path": self.expected_path,
+            "reason": self.reason,
+            "remediation": self.remediation,
+        }
+
+
+@dataclass
 class CompatibilityReport:
     """Complete compatibility report matching premiere_preset_report_v1.schema.json."""
 
@@ -286,6 +319,7 @@ class CompatibilityReport:
     source_archive: SourceArchiveInfo
     presets: List[MappedPreset]
     audit_reconciliation: Optional[Dict[str, Any]] = None
+    missing_source_inputs: List[MissingSourceInput] = field(default_factory=list)
 
     def summary(self) -> Dict[str, int]:
         distinct_effects = set()
@@ -320,4 +354,6 @@ class CompatibilityReport:
         }
         if self.audit_reconciliation is not None:
             data["audit_reconciliation"] = self.audit_reconciliation
+        if self.missing_source_inputs:
+            data["missing_source_inputs"] = [m.to_dict() for m in self.missing_source_inputs]
         return data

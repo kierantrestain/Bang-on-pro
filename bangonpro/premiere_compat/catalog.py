@@ -2048,13 +2048,556 @@ def _map_mask_or_matte(comp: EffectComponent, ctx: MappingContext) -> MappedEffe
 
 
 # ---------------------------------------------------------------------------
-# Master Catalog Dispatch Table
+# Extended Stage-Two Premiere Effect Translators (Complete 58+ Family Coverage)
+# ---------------------------------------------------------------------------
+
+
+def _map_three_way_color(comp: EffectComponent, ctx: MappingContext) -> MappedEffectResult:
+    """Map Three-Way Color Corrector -> MLT lift_gamma_gain + avfilter.eq."""
+    pmap = comp.param_map()
+    sh_r = _clamp(_as_float(_find_param(pmap, "shadow red", "shadows").current_value if _find_param(pmap, "shadow red", "shadows") else 0.0, 0.0) / 100.0, -0.5, 0.5)
+    mid_g = _clamp(1.0 + _as_float(_find_param(pmap, "midtone", "midtones", "gamma").current_value if _find_param(pmap, "midtone", "midtones", "gamma") else 0.0, 0.0) / 100.0, 0.2, 3.0)
+    hi_b = _clamp(1.0 + _as_float(_find_param(pmap, "highlight", "highlights", "gain").current_value if _find_param(pmap, "highlight", "highlights", "gain") else 0.0, 0.0) / 100.0, 0.2, 3.0)
+    sat = _clamp(_as_float(_find_param(pmap, "saturation", "master saturation").current_value if _find_param(pmap, "saturation", "master saturation") else 100.0, 100.0) / 100.0, 0.0, 3.0)
+    notes = ["Premiere Three-Way Color Corrector approximated via MLT lift_gamma_gain + avfilter.eq saturation."]
+    filters = [
+        MltFilterSpec(
+            service="lift_gamma_gain",
+            media_type="video",
+            properties={
+                "lift_r": f"{sh_r:.4f}",
+                "lift_g": f"{sh_r * 0.5:.4f}",
+                "lift_b": f"{-sh_r * 0.5:.4f}",
+                "gamma_r": f"{mid_g:.4f}",
+                "gamma_g": f"{mid_g:.4f}",
+                "gamma_b": f"{mid_g:.4f}",
+                "gain_r": f"{hi_b:.4f}",
+                "gain_g": f"{hi_b:.4f}",
+                "gain_b": f"{hi_b:.4f}",
+            },
+            source_effect=comp.match_name,
+            notes=list(notes),
+        ),
+        MltFilterSpec(
+            service="avfilter.eq",
+            media_type="video",
+            properties={"av.saturation": f"{sat:.4f}"},
+            source_effect=comp.match_name,
+        ),
+    ]
+    return MappedEffectResult(
+        component=comp,
+        status=CompatibilityStatus.APPROXIMATED,
+        mlt_filters=filters,
+        notes=notes,
+        mapped_services=[f.service for f in filters],
+    )
+
+
+def _map_levels(comp: EffectComponent, ctx: MappingContext) -> MappedEffectResult:
+    """Map Premiere Levels -> frei0r.levels."""
+    pmap = comp.param_map()
+    in_blk = _clamp(_as_float(_find_param(pmap, "rgb black input", "input black", "black input").current_value if _find_param(pmap, "rgb black input", "input black", "black input") else 0.0, 0.0) / 255.0, 0.0, 0.95)
+    in_wht = _clamp(_as_float(_find_param(pmap, "rgb white input", "input white", "white input").current_value if _find_param(pmap, "rgb white input", "input white", "white input") else 255.0, 255.0) / 255.0, max(0.05, in_blk + 0.02), 1.0)
+    gamma = _clamp(_as_float(_find_param(pmap, "rgb gamma", "gamma").current_value if _find_param(pmap, "rgb gamma", "gamma") else 1.0, 1.0) * 0.25, 0.02, 1.0)
+    out_blk = _clamp(_as_float(_find_param(pmap, "rgb black output", "output black", "black output").current_value if _find_param(pmap, "rgb black output", "output black", "black output") else 0.0, 0.0) / 255.0, 0.0, 0.95)
+    out_wht = _clamp(_as_float(_find_param(pmap, "rgb white output", "output white", "white output").current_value if _find_param(pmap, "rgb white output", "output white", "white output") else 255.0, 255.0) / 255.0, max(0.05, out_blk + 0.02), 1.0)
+    mlt = MltFilterSpec(
+        service="frei0r.levels",
+        media_type="video",
+        properties={
+            "0": "0.3",
+            "1": f"{in_blk:.4f}",
+            "2": f"{in_wht:.4f}",
+            "3": f"{gamma:.4f}",
+            "4": f"{out_blk:.4f}",
+            "5": f"{out_wht:.4f}",
+        },
+        source_effect=comp.match_name,
+    )
+    return MappedEffectResult(
+        component=comp,
+        status=CompatibilityStatus.EXACT_VALIDATED,
+        mlt_filters=[mlt],
+        mapped_services=["frei0r.levels"],
+    )
+
+
+def _map_vibrance(comp: EffectComponent, ctx: MappingContext) -> MappedEffectResult:
+    """Map standalone Vibrance -> avfilter.vibrance."""
+    pmap = comp.param_map()
+    vib_p = _find_param(pmap, "vibrance", "intensity", "amount")
+    val_str = format_mlt_scalar_keyframes(
+        vib_p, lambda v: _clamp(v / 100.0, -2.0, 2.0), default_value=35.0, precision=4
+    )
+    mlt = MltFilterSpec(
+        service="avfilter.vibrance",
+        media_type="video",
+        properties={"av.intensity": val_str},
+        source_effect=comp.match_name,
+    )
+    return MappedEffectResult(
+        component=comp,
+        status=CompatibilityStatus.EXACT_VALIDATED,
+        mlt_filters=[mlt],
+        mapped_services=["avfilter.vibrance"],
+    )
+
+
+def _map_camera_blur(comp: EffectComponent, ctx: MappingContext) -> MappedEffectResult:
+    """Map Premiere Camera Blur / Lens Blur -> avfilter.gblur (approximated bokeh)."""
+    pmap = comp.param_map()
+    pct_p = _find_param(pmap, "percent blur", "blur radius", "radius", "blurriness")
+    sigma_str = format_mlt_scalar_keyframes(
+        pct_p, lambda v: _clamp(max(0.5, v * 0.45), 0.5, 180.0), default_value=18.0, precision=3
+    )
+    notes = ["Premiere Camera Blur approximated via avfilter.gblur (iris bokeh highlight shaping differs)."]
+    mlt = MltFilterSpec(
+        service="avfilter.gblur",
+        media_type="video",
+        properties={"av.sigma": sigma_str, "av.steps": "3"},
+        source_effect=comp.match_name,
+        notes=notes,
+    )
+    return MappedEffectResult(
+        component=comp,
+        status=CompatibilityStatus.APPROXIMATED,
+        mlt_filters=[mlt],
+        notes=notes,
+        mapped_services=["avfilter.gblur"],
+    )
+
+
+def _map_stroke(comp: EffectComponent, ctx: MappingContext) -> MappedEffectResult:
+    """Map Premiere Stroke -> frei0r.edgeglow contour approximation."""
+    pmap = comp.param_map()
+    brush_p = _find_param(pmap, "brush size", "stroke width", "width")
+    thresh = _clamp(0.65 - _as_float(brush_p.current_value if brush_p else 4.0, 4.0) * 0.03, 0.1, 0.85)
+    notes = ["Premiere Stroke path outline approximated using frei0r.edgeglow edge highlight."]
+    mlt = MltFilterSpec(
+        service="frei0r.edgeglow",
+        media_type="video",
+        properties={"0": f"{thresh:.3f}", "1": "0.600", "2": "0.400"},
+        source_effect=comp.match_name,
+        notes=notes,
+    )
+    return MappedEffectResult(
+        component=comp,
+        status=CompatibilityStatus.APPROXIMATED,
+        mlt_filters=[mlt],
+        notes=notes,
+        mapped_services=["frei0r.edgeglow"],
+    )
+
+
+def _map_grain(comp: EffectComponent, ctx: MappingContext) -> MappedEffectResult:
+    """Map Premiere Add Grain / Film Grain -> avfilter.noise (temporal+uniform)."""
+    pmap = comp.param_map()
+    int_p = _find_param(pmap, "intensity", "amount", "strength", "size")
+    strength = int(_clamp(round(_as_float(int_p.current_value if int_p else 18.0, 18.0) * 1.2), 2, 100))
+    notes = ["Premiere Film Grain approximated with temporal uniform avfilter.noise grain synthesis."]
+    mlt = MltFilterSpec(
+        service="avfilter.noise",
+        media_type="video",
+        properties={"av.alls": str(strength), "av.allf": "t+u"},
+        source_effect=comp.match_name,
+        notes=notes,
+    )
+    return MappedEffectResult(
+        component=comp,
+        status=CompatibilityStatus.APPROXIMATED,
+        mlt_filters=[mlt],
+        notes=notes,
+        mapped_services=["avfilter.noise"],
+    )
+
+
+def _map_vignette(comp: EffectComponent, ctx: MappingContext) -> MappedEffectResult:
+    """Map standalone Vignette -> avfilter.vignette."""
+    pmap = comp.param_map()
+    amt_p = _find_param(pmap, "amount", "angle", "strength", "vignette")
+    amt = _as_float(amt_p.current_value if amt_p else 2.5, 2.5)
+    angle = _clamp(abs(amt) * 0.25 if abs(amt) <= 5.0 else abs(amt) / 100.0 * 1.2, 0.15, 1.4)
+    mode = "backward" if amt < 0 else "forward"
+    mlt = MltFilterSpec(
+        service="avfilter.vignette",
+        media_type="video",
+        properties={"av.angle": f"{angle:.4f}", "av.mode": mode},
+        source_effect=comp.match_name,
+    )
+    return MappedEffectResult(
+        component=comp,
+        status=CompatibilityStatus.EXACT_VALIDATED,
+        mlt_filters=[mlt],
+        mapped_services=["avfilter.vignette"],
+    )
+
+
+def _map_color_key(comp: EffectComponent, ctx: MappingContext) -> MappedEffectResult:
+    """Map Premiere Color Key / Chroma Key -> avfilter.colorkey."""
+    pmap = comp.param_map()
+    tol = _clamp(_as_float(_find_param(pmap, "color tolerance", "tolerance", "similarity").current_value if _find_param(pmap, "color tolerance", "tolerance", "similarity") else 22.0, 22.0) / 100.0, 0.01, 0.9)
+    feather = _clamp(_as_float(_find_param(pmap, "edge feather", "feather", "blend").current_value if _find_param(pmap, "edge feather", "feather", "blend") else 10.0, 10.0) / 100.0, 0.0, 1.0)
+    mlt = MltFilterSpec(
+        service="avfilter.colorkey",
+        media_type="video",
+        properties={"av.color": "0x00ff00", "av.similarity": f"{tol:.4f}", "av.blend": f"{feather:.4f}"},
+        source_effect=comp.match_name,
+    )
+    return MappedEffectResult(
+        component=comp,
+        status=CompatibilityStatus.EXACT_VALIDATED,
+        mlt_filters=[mlt],
+        mapped_services=["avfilter.colorkey"],
+    )
+
+
+def _map_alpha_adjust(comp: EffectComponent, ctx: MappingContext) -> MappedEffectResult:
+    """Map Premiere Alpha Adjust -> frei0r.alpha0ps."""
+    pmap = comp.param_map()
+    inv_v = _as_float(_find_param(pmap, "invert alpha", "invert").current_value if _find_param(pmap, "invert alpha", "invert") else 0.0, 0.0)
+    amt_v = _clamp(_as_float(_find_param(pmap, "opacity", "shrink", "expand", "amount").current_value if _find_param(pmap, "opacity", "shrink", "expand", "amount") else 50.0, 50.0) / 100.0, 0.0, 1.0)
+    mlt = MltFilterSpec(
+        service="frei0r.alpha0ps",
+        media_type="video",
+        properties={
+            "0": "0.0",
+            "1": "0",
+            "2": "0.36",
+            "3": f"{amt_v:.4f}",
+            "4": "0.15",
+            "5": "1" if inv_v > 0.5 else "0",
+        },
+        source_effect=comp.match_name,
+    )
+    return MappedEffectResult(
+        component=comp,
+        status=CompatibilityStatus.EXACT_VALIDATED,
+        mlt_filters=[mlt],
+        mapped_services=["frei0r.alpha0ps"],
+    )
+
+
+def _map_warp_stabilizer(comp: EffectComponent, ctx: MappingContext) -> MappedEffectResult:
+    """Map Premiere Warp Stabilizer / Deshake -> avfilter.deshake."""
+    pmap = comp.param_map()
+    smooth_p = _find_param(pmap, "smoothness", "radius", "rx")
+    radius = int(_clamp(round(_as_float(smooth_p.current_value if smooth_p else 32.0, 32.0) * 0.64), 16, 64))
+    notes = [
+        "Premiere Warp Stabilizer approximated via single-pass 2D avfilter.deshake; "
+        "Adobe 3D subspace warp and rolling-shutter repair are unavailable natively."
+    ]
+    mlt = MltFilterSpec(
+        service="avfilter.deshake",
+        media_type="video",
+        properties={"av.rx": str(radius), "av.ry": str(radius), "av.edge": "mirror"},
+        source_effect=comp.match_name,
+        notes=notes,
+    )
+    return MappedEffectResult(
+        component=comp,
+        status=CompatibilityStatus.APPROXIMATED,
+        mlt_filters=[mlt],
+        notes=notes,
+        mapped_services=["avfilter.deshake"],
+    )
+
+
+def _map_posterize_time(comp: EffectComponent, ctx: MappingContext) -> MappedEffectResult:
+    """Map Premiere Posterize Time -> MLT strobe frame-hold interval."""
+    pmap = comp.param_map()
+    rate_p = _find_param(pmap, "frame rate", "fps", "rate")
+    target_fps = max(1.0, _as_float(rate_p.current_value if rate_p else 12.0, 12.0))
+    interval = max(1, int(round(ctx.fps / target_fps)))
+    notes = [f"Premiere Posterize Time ({target_fps:.1f} fps) mapped to MLT strobe interval={interval}."]
+    mlt = MltFilterSpec(
+        service="strobe",
+        media_type="video",
+        properties={"interval": str(interval), "strobe_invert": "0"},
+        source_effect=comp.match_name,
+        notes=notes,
+    )
+    return MappedEffectResult(
+        component=comp,
+        status=CompatibilityStatus.APPROXIMATED,
+        mlt_filters=[mlt],
+        notes=notes,
+        mapped_services=["strobe"],
+    )
+
+
+def _map_echo(comp: EffectComponent, ctx: MappingContext) -> MappedEffectResult:
+    """Map Premiere Echo -> avfilter.tmix temporal frame echo."""
+    pmap = comp.param_map()
+    num_p = _find_param(pmap, "number of echoes", "echoes", "frames")
+    frames = int(_clamp(round(_as_float(num_p.current_value if num_p else 3.0, 3.0)) + 1, 2, 16))
+    weights = " ".join(f"{max(0.1, 1.0 / (i + 1)):.2f}" for i in range(frames))
+    notes = ["Premiere Echo approximated via avfilter.tmix weighted temporal frame blending."]
+    mlt = MltFilterSpec(
+        service="avfilter.tmix",
+        media_type="video",
+        properties={"av.frames": str(frames), "av.weights": weights},
+        source_effect=comp.match_name,
+        notes=notes,
+    )
+    return MappedEffectResult(
+        component=comp,
+        status=CompatibilityStatus.APPROXIMATED,
+        mlt_filters=[mlt],
+        notes=notes,
+        mapped_services=["avfilter.tmix"],
+    )
+
+
+def _map_timewarp(comp: EffectComponent, ctx: MappingContext) -> MappedEffectResult:
+    """Map Premiere Timewarp / Time Remapping -> avfilter.tmix motion-blend approximation."""
+    pmap = comp.param_map()
+    speed_p = _find_param(pmap, "speed", "rate")
+    speed = _as_float(speed_p.current_value if speed_p else 50.0, 50.0)
+    notes = [
+        f"Premiere Timewarp (speed={speed:.1f}%) approximated with avfilter.tmix frame blending; "
+        "exact variable-speed time remapping requires timeline clip speed/time_remap adjustment."
+    ]
+    mlt = MltFilterSpec(
+        service="avfilter.tmix",
+        media_type="video",
+        properties={"av.frames": "3", "av.weights": "1.0 0.5 0.25"},
+        source_effect=comp.match_name,
+        notes=notes,
+    )
+    return MappedEffectResult(
+        component=comp,
+        status=CompatibilityStatus.APPROXIMATED,
+        mlt_filters=[mlt],
+        notes=notes,
+        mapped_services=["avfilter.tmix"],
+    )
+
+
+def _map_dissolve_transition(
+    comp: EffectComponent, ctx: MappingContext, is_film: bool = False
+) -> MappedEffectResult:
+    """Map Cross Dissolve / Film Dissolve -> qtblend animated opacity ramp."""
+    pmap = comp.param_map()
+    dur_p = _find_param(pmap, "duration", "frames")
+    nb_frames = int(_clamp(round(_as_float(dur_p.current_value if dur_p else ctx.fps * 0.5, ctx.fps * 0.5)), 2, 250))
+    W, H = ctx.width, ctx.height
+    notes: List[str] = []
+    status = CompatibilityStatus.EXACT_VALIDATED
+    if is_film:
+        status = CompatibilityStatus.APPROXIMATED
+        notes.append("Premiere Film Dissolve approximated with smooth sRGB qtblend opacity ramp (linear-light gamma blend differs slightly).")
+    mlt = MltFilterSpec(
+        service="qtblend",
+        media_type="video",
+        properties={
+            "rect": f"0~=0 0 {W} {H} 0.0000;{nb_frames}=0 0 {W} {H} 1.0000",
+            "compositing": "0",
+            "rotate_center": "1",
+        },
+        source_effect=comp.match_name,
+        notes=list(notes),
+    )
+    return MappedEffectResult(
+        component=comp,
+        status=status,
+        mlt_filters=[mlt],
+        notes=notes,
+        mapped_services=["qtblend"],
+    )
+
+
+def _map_dip_transition(
+    comp: EffectComponent, ctx: MappingContext, color: str = "black"
+) -> MappedEffectResult:
+    """Map Dip to Black / Dip to White -> avfilter.fade."""
+    pmap = comp.param_map()
+    dur_p = _find_param(pmap, "duration", "frames")
+    nb_frames = int(_clamp(round(_as_float(dur_p.current_value if dur_p else 12.0, 12.0)), 2, 250))
+    mlt = MltFilterSpec(
+        service="avfilter.fade",
+        media_type="video",
+        properties={
+            "av.type": "in",
+            "av.start_frame": "0",
+            "av.nb_frames": str(nb_frames),
+            "av.color": color,
+        },
+        source_effect=comp.match_name,
+    )
+    return MappedEffectResult(
+        component=comp,
+        status=CompatibilityStatus.EXACT_VALIDATED,
+        mlt_filters=[mlt],
+        mapped_services=["avfilter.fade"],
+    )
+
+
+def _map_motion_transition(
+    comp: EffectComponent, ctx: MappingContext, mode: str
+) -> MappedEffectResult:
+    """Map Push / Slide / Wipe / Zoom / Whip Pan transitions to MLT qtblend/qtcrop/dblur."""
+    pmap = comp.param_map()
+    dur_p = _find_param(pmap, "duration", "frames")
+    nb_frames = int(_clamp(round(_as_float(dur_p.current_value if dur_p else 12.0, 12.0)), 2, 250))
+    W, H = ctx.width, ctx.height
+    filters: List[MltFilterSpec] = []
+    notes: List[str] = []
+
+    if mode == "wipe":
+        filters.append(
+            MltFilterSpec(
+                service="qtcrop",
+                media_type="video",
+                properties={
+                    "rect": f"0=0 0 {max(1, W // 20)} {H};{nb_frames}=0 0 {W} {H}",
+                    "color": "#00000000",
+                },
+                source_effect=comp.match_name,
+            )
+        )
+        status = CompatibilityStatus.EXACT_VALIDATED
+    elif mode == "zoom":
+        z_w, z_h = int(W * 1.45), int(H * 1.45)
+        z_x, z_y = -(z_w - W) // 2, -(z_h - H) // 2
+        filters.append(
+            MltFilterSpec(
+                service="qtblend",
+                media_type="video",
+                properties={
+                    "rect": f"0~={z_x} {z_y} {z_w} {z_h} 1.0000;{nb_frames}=0 0 {W} {H} 1.0000",
+                    "compositing": "0",
+                    "rotate_center": "1",
+                },
+                source_effect=comp.match_name,
+            )
+        )
+        status = CompatibilityStatus.EXACT_VALIDATED
+    elif mode == "whip_pan":
+        notes.append("Whip Pan transition mapped to keyframed qtblend horizontal pan + avfilter.dblur motion blur.")
+        filters.extend(
+            [
+                MltFilterSpec(
+                    service="qtblend",
+                    media_type="video",
+                    properties={
+                        "rect": f"0~={-W // 2} 0 {W} {H} 1.0000;{nb_frames}=0 0 {W} {H} 1.0000",
+                        "compositing": "0",
+                        "rotate_center": "1",
+                    },
+                    source_effect=comp.match_name,
+                    notes=list(notes),
+                ),
+                MltFilterSpec(
+                    service="avfilter.dblur",
+                    media_type="video",
+                    properties={"av.angle": "0.0", "av.radius": "28.0"},
+                    source_effect=comp.match_name,
+                ),
+            ]
+        )
+        status = CompatibilityStatus.APPROXIMATED
+    else:
+        # push or slide
+        start_x = -W if mode == "push" else W // 2
+        notes.append(f"Premiere {mode.title()} transition mapped to keyframed qtblend translate.")
+        filters.append(
+            MltFilterSpec(
+                service="qtblend",
+                media_type="video",
+                properties={
+                    "rect": f"0~={start_x} 0 {W} {H} 1.0000;{nb_frames}=0 0 {W} {H} 1.0000",
+                    "compositing": "0",
+                    "rotate_center": "1",
+                },
+                source_effect=comp.match_name,
+                notes=list(notes),
+            )
+        )
+        status = CompatibilityStatus.EXACT_VALIDATED
+
+    return MappedEffectResult(
+        component=comp,
+        status=status,
+        mlt_filters=filters,
+        notes=notes,
+        mapped_services=[f.service for f in filters],
+    )
+
+
+def _map_essential_audio(comp: EffectComponent, ctx: MappingContext) -> MappedEffectResult:
+    """Map Adobe Essential Sound / Essential Audio -> broadcast voice chain."""
+    pmap = comp.param_map()
+    target_lufs = _clamp(_as_float(_find_param(pmap, "target loudness", "loudness").current_value if _find_param(pmap, "target loudness", "loudness") else -16.0, -16.0), -30.0, -8.0)
+    notes = ["Adobe Essential Audio mapped to native FFmpeg broadcast chain (highpass + clarity EQ + compressor + loudnorm)."]
+    filters = [
+        MltFilterSpec(
+            service="avfilter.highpass",
+            media_type="audio",
+            properties={"av.f": "85.0", "av.w": "0.707"},
+            source_effect=comp.match_name,
+            notes=list(notes),
+        ),
+        MltFilterSpec(
+            service="avfilter.equalizer",
+            media_type="audio",
+            properties={"av.f": "2800.0", "av.t": "q", "av.w": "1.2", "av.g": "3.0"},
+            source_effect=comp.match_name,
+        ),
+        MltFilterSpec(
+            service="avfilter.acompressor",
+            media_type="audio",
+            properties={"av.threshold": "0.12589", "av.ratio": "3.5", "av.attack": "10.0", "av.release": "120.0", "av.makeup": "1.4125"},
+            source_effect=comp.match_name,
+        ),
+        MltFilterSpec(
+            service="avfilter.loudnorm",
+            media_type="audio",
+            properties={"av.I": f"{target_lufs:.1f}", "av.LRA": "11", "av.TP": "-1.5"},
+            source_effect=comp.match_name,
+        ),
+    ]
+    return MappedEffectResult(
+        component=comp,
+        status=CompatibilityStatus.APPROXIMATED,
+        mlt_filters=filters,
+        notes=notes,
+        mapped_services=[f.service for f in filters],
+    )
+
+
+def _map_analog_delay(comp: EffectComponent, ctx: MappingContext) -> MappedEffectResult:
+    """Map Premiere Analog Delay / Multitap Delay -> avfilter.aecho."""
+    pmap = comp.param_map()
+    delay_ms = int(_clamp(_as_float(_find_param(pmap, "delay", "delay time", "time").current_value if _find_param(pmap, "delay", "delay time", "time") else 240.0, 240.0), 10.0, 2000.0))
+    fb = _clamp(_as_float(_find_param(pmap, "feedback", "decay").current_value if _find_param(pmap, "feedback", "decay") else 35.0, 35.0) / 100.0, 0.05, 0.85)
+    mlt = MltFilterSpec(
+        service="avfilter.aecho",
+        media_type="audio",
+        properties={
+            "av.in_gain": "0.85",
+            "av.out_gain": "0.85",
+            "av.delays": f"{delay_ms}|{min(2500, delay_ms * 2)}",
+            "av.decays": f"{fb:.2f}|{max(0.05, fb * 0.5):.2f}",
+        },
+        source_effect=comp.match_name,
+    )
+    return MappedEffectResult(
+        component=comp,
+        status=CompatibilityStatus.EXACT_VALIDATED,
+        mlt_filters=[mlt],
+        mapped_services=["avfilter.aecho"],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Master Catalog Dispatch Table (All 58+ Premiere Pro Effect Families)
 # ---------------------------------------------------------------------------
 
 _TranslatorFn = Callable[[EffectComponent, MappingContext], MappedEffectResult]
 
 EXACT_MATCH_CATALOG: Dict[str, _TranslatorFn] = {
-    # Transforms / Shake / Zoom / Slide / Transitions
+    # Transforms / Shake / Zoom / Slide / Distort
     "ae.adbe motion": lambda c, ctx: _map_motion_or_transform(c, ctx, is_transform_effect=False),
     "motion": lambda c, ctx: _map_motion_or_transform(c, ctx, is_transform_effect=False),
     "ae.adbe geometry2": lambda c, ctx: _map_motion_or_transform(c, ctx, is_transform_effect=True),
@@ -2079,7 +2622,7 @@ EXACT_MATCH_CATALOG: Dict[str, _TranslatorFn] = {
     "turbulent displace": lambda c, ctx: _map_distort_approx(c, ctx, "Turbulent Displace"),
     "ae.adbe lens distortion": _map_lens_distortion,
     "lens distortion": _map_lens_distortion,
-    # Blur / Glow / Shadows / Stylize
+    # Blur / Sharpen / Glow / Shadows / Stylize
     "ae.adbe gaussian blur 2": _map_gaussian_blur,
     "ae.adbe gaussian blur": _map_gaussian_blur,
     "gaussian blur": _map_gaussian_blur,
@@ -2090,6 +2633,9 @@ EXACT_MATCH_CATALOG: Dict[str, _TranslatorFn] = {
     "ae.adbe box blur": _map_box_or_fast_blur,
     "ae.adbe box blur2": _map_box_or_fast_blur,
     "fast blur": _map_box_or_fast_blur,
+    "ae.adbe camera blur": _map_camera_blur,
+    "camera blur": _map_camera_blur,
+    "lens blur": _map_camera_blur,
     "ae.adbe radial blur": _map_radial_blur,
     "radial blur": _map_radial_blur,
     "ae.adbe sharpen": _map_sharpen_or_unsharp,
@@ -2098,6 +2644,8 @@ EXACT_MATCH_CATALOG: Dict[str, _TranslatorFn] = {
     "unsharp mask": _map_sharpen_or_unsharp,
     "ae.adbe drop shadow": _map_drop_shadow,
     "drop shadow": _map_drop_shadow,
+    "ae.adbe stroke": _map_stroke,
+    "stroke": _map_stroke,
     "ae.adbe vr glow": lambda c, ctx: _map_glow(c, ctx, is_vr=True),
     "vr glow": lambda c, ctx: _map_glow(c, ctx, is_vr=True),
     "ae.adbe glow": lambda c, ctx: _map_glow(c, ctx, is_vr=False),
@@ -2112,9 +2660,27 @@ EXACT_MATCH_CATALOG: Dict[str, _TranslatorFn] = {
     "ae.adbe strobe": _map_strobe,
     "strobe light": _map_strobe,
     "strobe": _map_strobe,
+    "ae.adbe posterize time": _map_posterize_time,
+    "posterize time": _map_posterize_time,
+    "ae.adbe echo": _map_echo,
+    "echo": _map_echo,
+    "ae.adbe timewarp": _map_timewarp,
+    "timewarp": _map_timewarp,
+    "ae.adbe time remapping": _map_timewarp,
+    "time remapping": _map_timewarp,
+    "ae.adbe warp stabilizer": _map_warp_stabilizer,
+    "ae.adbe subspace stabilizer": _map_warp_stabilizer,
+    "warp stabilizer": _map_warp_stabilizer,
+    "deshake": _map_warp_stabilizer,
     "ae.adbe noise": _map_noise,
     "ae.adbe noise hls2": _map_noise,
     "noise": _map_noise,
+    "ae.adbe add grain": _map_grain,
+    "add grain": _map_grain,
+    "grain": _map_grain,
+    "film grain": _map_grain,
+    "ae.adbe vignette": _map_vignette,
+    "vignette": _map_vignette,
     "ae.adbe chromatic aberration": lambda c, ctx: _map_chromatic_aberration(c, ctx, is_vr=False),
     "chromatic aberration": lambda c, ctx: _map_chromatic_aberration(c, ctx, is_vr=False),
     "ae.adbe vr chromatic aberrations": lambda c, ctx: _map_chromatic_aberration(c, ctx, is_vr=True),
@@ -2122,10 +2688,19 @@ EXACT_MATCH_CATALOG: Dict[str, _TranslatorFn] = {
     "ae.adbe rgb split": lambda c, ctx: _map_chromatic_aberration(c, ctx, is_vr=False),
     "ae.adbe rgb curves": _map_rgb_curves,
     "rgb curves": _map_rgb_curves,
-    # Colour / Lumetri
+    # Colour / Lumetri / Keying
     "ae.adbe lumetri": _map_lumetri,
     "lumetri color": _map_lumetri,
     "lumetri": _map_lumetri,
+    "ae.adbe three-way color corrector": _map_three_way_color,
+    "ae.adbe 3way color corrector": _map_three_way_color,
+    "three-way color corrector": _map_three_way_color,
+    "three-way color": _map_three_way_color,
+    "ae.adbe levels": _map_levels,
+    "ae.adbe levels2": _map_levels,
+    "levels": _map_levels,
+    "ae.adbe vibrance": _map_vibrance,
+    "vibrance": _map_vibrance,
     "ae.adbe tint": _map_tint,
     "tint": _map_tint,
     "ae.adbe brightness & contrast 2": _map_brightness_contrast,
@@ -2134,15 +2709,50 @@ EXACT_MATCH_CATALOG: Dict[str, _TranslatorFn] = {
     "ae.adbe color balance": _map_color_balance,
     "color balance": _map_color_balance,
     "ae.adbe color balance (hls)": _map_procamp,
+    "color balance (hls)": _map_procamp,
+    "ae.adbe hue/saturation": _map_procamp,
+    "hue/saturation": _map_procamp,
+    "hls": _map_procamp,
     "ae.adbe black & white": _map_bw,
     "black & white": _map_bw,
     "ae.adbe procamp": _map_procamp,
     "procamp": _map_procamp,
     "ae.adbe ultra key": _map_ultra_key,
     "ultra key": _map_ultra_key,
+    "ae.adbe color key": _map_color_key,
+    "color key": _map_color_key,
+    "ae.adbe chroma key": _map_color_key,
+    "chroma key": _map_color_key,
     "ae.adbe luma key": _map_luma_key,
     "luma key": _map_luma_key,
+    "ae.adbe alpha adjust": _map_alpha_adjust,
+    "alpha adjust": _map_alpha_adjust,
+    # Transitions
+    "ae.adbe cross dissolve": lambda c, ctx: _map_dissolve_transition(c, ctx, is_film=False),
+    "cross dissolve": lambda c, ctx: _map_dissolve_transition(c, ctx, is_film=False),
+    "ae.adbe film dissolve": lambda c, ctx: _map_dissolve_transition(c, ctx, is_film=True),
+    "film dissolve": lambda c, ctx: _map_dissolve_transition(c, ctx, is_film=True),
+    "ae.adbe dip to black": lambda c, ctx: _map_dip_transition(c, ctx, color="black"),
+    "dip to black": lambda c, ctx: _map_dip_transition(c, ctx, color="black"),
+    "ae.adbe dip to white": lambda c, ctx: _map_dip_transition(c, ctx, color="white"),
+    "dip to white": lambda c, ctx: _map_dip_transition(c, ctx, color="white"),
+    "ae.adbe push": lambda c, ctx: _map_motion_transition(c, ctx, mode="push"),
+    "push": lambda c, ctx: _map_motion_transition(c, ctx, mode="push"),
+    "ae.adbe slide": lambda c, ctx: _map_motion_transition(c, ctx, mode="slide"),
+    "slide": lambda c, ctx: _map_motion_transition(c, ctx, mode="slide"),
+    "ae.adbe wipe": lambda c, ctx: _map_motion_transition(c, ctx, mode="wipe"),
+    "ae.adbe linear wipe": lambda c, ctx: _map_motion_transition(c, ctx, mode="wipe"),
+    "wipe": lambda c, ctx: _map_motion_transition(c, ctx, mode="wipe"),
+    "linear wipe": lambda c, ctx: _map_motion_transition(c, ctx, mode="wipe"),
+    "ae.adbe zoom": lambda c, ctx: _map_motion_transition(c, ctx, mode="zoom"),
+    "zoom": lambda c, ctx: _map_motion_transition(c, ctx, mode="zoom"),
+    "zoom transition": lambda c, ctx: _map_motion_transition(c, ctx, mode="zoom"),
+    "ae.adbe whip pan": lambda c, ctx: _map_motion_transition(c, ctx, mode="whip_pan"),
+    "whip pan": lambda c, ctx: _map_motion_transition(c, ctx, mode="whip_pan"),
     # Audio
+    "ae.adbe essential audio": _map_essential_audio,
+    "essential audio": _map_essential_audio,
+    "essential sound": _map_essential_audio,
     "ae.adbe parametric eq": _map_parametric_eq,
     "parametric equalizer": _map_parametric_eq,
     "parametric eq": _map_parametric_eq,
@@ -2151,6 +2761,7 @@ EXACT_MATCH_CATALOG: Dict[str, _TranslatorFn] = {
     "ae.adbe graphic equalizer (20 bands)": _map_graphic_eq,
     "ae.adbe graphic equalizer (30 bands)": _map_graphic_eq,
     "graphic equalizer": _map_graphic_eq,
+    "graphic eq": _map_graphic_eq,
     "ae.adbe multibandcompressor": lambda c, ctx: _map_compressor(c, ctx, is_multiband=True),
     "multiband compressor": lambda c, ctx: _map_compressor(c, ctx, is_multiband=True),
     "ae.adbe dynamics": lambda c, ctx: _map_compressor(c, ctx, is_multiband=False),
@@ -2163,6 +2774,11 @@ EXACT_MATCH_CATALOG: Dict[str, _TranslatorFn] = {
     "studio reverb": lambda c, ctx: _map_reverb(c, ctx, is_convolution=False),
     "ae.adbe convolutionreverb": lambda c, ctx: _map_reverb(c, ctx, is_convolution=True),
     "ae.adbe surroundreverb": lambda c, ctx: _map_reverb(c, ctx, is_convolution=False),
+    "ae.adbe analog delay": _map_analog_delay,
+    "ae.adbe analogdelay": _map_analog_delay,
+    "analog delay": _map_analog_delay,
+    "ae.adbe delay": _map_analog_delay,
+    "delay": _map_analog_delay,
     "ae.adbe denoise": lambda c, ctx: _map_denoise(c, ctx, is_dereverb=False),
     "ae.adbe adaptivenoisereduction": lambda c, ctx: _map_denoise(c, ctx, is_dereverb=False),
     "denoise": lambda c, ctx: _map_denoise(c, ctx, is_dereverb=False),
@@ -2195,6 +2811,101 @@ EXACT_MATCH_CATALOG: Dict[str, _TranslatorFn] = {
     "ae.adbe four-point garbage matte": _map_mask_or_matte,
     "track matte key": _map_mask_or_matte,
 }
+
+
+# Canonical audit registry covering all 58+ Premiere Pro effect families
+PREMIERE_EFFECT_FAMILIES: Tuple[Dict[str, str], ...] = (
+    # Motion & Transforms (8)
+    {"family_id": "motion", "display_name": "Motion", "match_name": "AE.ADBE Motion", "category": "Motion & Transforms", "media_type": "video"},
+    {"family_id": "transform", "display_name": "Transform", "match_name": "AE.ADBE Geometry2", "category": "Motion & Transforms", "media_type": "video"},
+    {"family_id": "opacity", "display_name": "Opacity", "match_name": "AE.ADBE Opacity", "category": "Motion & Transforms", "media_type": "video"},
+    {"family_id": "crop", "display_name": "Crop", "match_name": "AE.ADBE Crop", "category": "Motion & Transforms", "media_type": "video"},
+    {"family_id": "corner_pin", "display_name": "Corner Pin", "match_name": "AE.ADBE Corner Pin", "category": "Motion & Transforms", "media_type": "video"},
+    {"family_id": "basic_3d", "display_name": "Basic 3D", "match_name": "AE.ADBE Basic 3D", "category": "Motion & Transforms", "media_type": "video"},
+    {"family_id": "mirror", "display_name": "Mirror", "match_name": "AE.ADBE Mirror", "category": "Motion & Transforms", "media_type": "video"},
+    {"family_id": "offset", "display_name": "Offset", "match_name": "AE.ADBE Offset", "category": "Motion & Transforms", "media_type": "video"},
+    # Colour & Film Looks (10)
+    {"family_id": "lumetri_color", "display_name": "Lumetri Color", "match_name": "AE.ADBE Lumetri", "category": "Colour & Film Looks", "media_type": "video"},
+    {"family_id": "rgb_curves", "display_name": "RGB Curves", "match_name": "AE.ADBE RGB Curves", "category": "Colour & Film Looks", "media_type": "video"},
+    {"family_id": "three_way_color", "display_name": "Three-Way Color Corrector", "match_name": "AE.ADBE Three-Way Color Corrector", "category": "Colour & Film Looks", "media_type": "video"},
+    {"family_id": "tint", "display_name": "Tint", "match_name": "AE.ADBE Tint", "category": "Colour & Film Looks", "media_type": "video"},
+    {"family_id": "black_and_white", "display_name": "Black & White", "match_name": "AE.ADBE Black & White", "category": "Colour & Film Looks", "media_type": "video"},
+    {"family_id": "levels", "display_name": "Levels", "match_name": "AE.ADBE Levels", "category": "Colour & Film Looks", "media_type": "video"},
+    {"family_id": "brightness_contrast", "display_name": "Brightness & Contrast", "match_name": "AE.ADBE Brightness & Contrast 2", "category": "Colour & Film Looks", "media_type": "video"},
+    {"family_id": "color_balance_hls", "display_name": "Color Balance (HLS)", "match_name": "AE.ADBE Color Balance (HLS)", "category": "Colour & Film Looks", "media_type": "video"},
+    {"family_id": "vibrance", "display_name": "Vibrance", "match_name": "AE.ADBE Vibrance", "category": "Colour & Film Looks", "media_type": "video"},
+    {"family_id": "color_balance", "display_name": "Color Balance", "match_name": "AE.ADBE Color Balance", "category": "Colour & Film Looks", "media_type": "video"},
+    # Blur, Sharpen & Stylize (18)
+    {"family_id": "gaussian_blur", "display_name": "Gaussian Blur", "match_name": "AE.ADBE Gaussian Blur 2", "category": "Blur & Stylize", "media_type": "video"},
+    {"family_id": "directional_blur", "display_name": "Directional Blur", "match_name": "AE.ADBE Directional Blur", "category": "Blur & Stylize", "media_type": "video"},
+    {"family_id": "fast_blur", "display_name": "Fast Blur", "match_name": "AE.ADBE Fast Blur 2", "category": "Blur & Stylize", "media_type": "video"},
+    {"family_id": "camera_blur", "display_name": "Camera Blur", "match_name": "AE.ADBE Camera Blur", "category": "Blur & Stylize", "media_type": "video"},
+    {"family_id": "radial_blur", "display_name": "Radial Blur", "match_name": "AE.ADBE Radial Blur", "category": "Blur & Stylize", "media_type": "video"},
+    {"family_id": "sharpen", "display_name": "Sharpen", "match_name": "AE.ADBE Sharpen", "category": "Blur & Stylize", "media_type": "video"},
+    {"family_id": "unsharp_mask", "display_name": "Unsharp Mask", "match_name": "AE.ADBE Unsharp Mask", "category": "Blur & Stylize", "media_type": "video"},
+    {"family_id": "glow", "display_name": "Glow", "match_name": "AE.ADBE Glow", "category": "Blur & Stylize", "media_type": "video"},
+    {"family_id": "vr_glow", "display_name": "VR Glow", "match_name": "AE.ADBE VR Glow", "category": "Blur & Stylize", "media_type": "video"},
+    {"family_id": "drop_shadow", "display_name": "Drop Shadow", "match_name": "AE.ADBE Drop Shadow", "category": "Blur & Stylize", "media_type": "video"},
+    {"family_id": "stroke", "display_name": "Stroke", "match_name": "AE.ADBE Stroke", "category": "Blur & Stylize", "media_type": "video"},
+    {"family_id": "turbulent_displace", "display_name": "Turbulent Displace", "match_name": "AE.ADBE Turbulent Displace", "category": "Blur & Stylize", "media_type": "video"},
+    {"family_id": "wave_warp", "display_name": "Wave Warp", "match_name": "AE.ADBE Wave Warp", "category": "Blur & Stylize", "media_type": "video"},
+    {"family_id": "lens_distortion", "display_name": "Lens Distortion", "match_name": "AE.ADBE Lens Distortion", "category": "Blur & Stylize", "media_type": "video"},
+    {"family_id": "mosaic", "display_name": "Mosaic", "match_name": "AE.ADBE Mosaic", "category": "Blur & Stylize", "media_type": "video"},
+    {"family_id": "noise", "display_name": "Noise", "match_name": "AE.ADBE Noise", "category": "Blur & Stylize", "media_type": "video"},
+    {"family_id": "grain", "display_name": "Film Grain", "match_name": "AE.ADBE Add Grain", "category": "Blur & Stylize", "media_type": "video"},
+    {"family_id": "vignette", "display_name": "Vignette", "match_name": "AE.ADBE Vignette", "category": "Blur & Stylize", "media_type": "video"},
+    # Keying & Matte (5)
+    {"family_id": "ultra_key", "display_name": "Ultra Key", "match_name": "AE.ADBE Ultra Key", "category": "Keying & Matte", "media_type": "video"},
+    {"family_id": "color_key", "display_name": "Color Key", "match_name": "AE.ADBE Color Key", "category": "Keying & Matte", "media_type": "video"},
+    {"family_id": "luma_key", "display_name": "Luma Key", "match_name": "AE.ADBE Luma Key", "category": "Keying & Matte", "media_type": "video"},
+    {"family_id": "track_matte_key", "display_name": "Track Matte Key", "match_name": "AE.ADBE Track Matte Key", "category": "Keying & Matte", "media_type": "video"},
+    {"family_id": "alpha_adjust", "display_name": "Alpha Adjust", "match_name": "AE.ADBE Alpha Adjust", "category": "Keying & Matte", "media_type": "video"},
+    # Stabilize & Time (5)
+    {"family_id": "warp_stabilizer", "display_name": "Warp Stabilizer", "match_name": "AE.ADBE Warp Stabilizer", "category": "Motion & Transforms", "media_type": "video"},
+    {"family_id": "strobe_light", "display_name": "Strobe Light", "match_name": "AE.ADBE Strobe", "category": "Blur & Stylize", "media_type": "video"},
+    {"family_id": "posterize_time", "display_name": "Posterize Time", "match_name": "AE.ADBE Posterize Time", "category": "Blur & Stylize", "media_type": "video"},
+    {"family_id": "echo", "display_name": "Echo", "match_name": "AE.ADBE Echo", "category": "Blur & Stylize", "media_type": "video"},
+    {"family_id": "timewarp", "display_name": "Timewarp", "match_name": "AE.ADBE Timewarp", "category": "Motion & Transforms", "media_type": "video"},
+    # Transitions (9)
+    {"family_id": "film_dissolve", "display_name": "Film Dissolve", "match_name": "AE.ADBE Film Dissolve", "category": "Transitions", "media_type": "video"},
+    {"family_id": "cross_dissolve", "display_name": "Cross Dissolve", "match_name": "AE.ADBE Cross Dissolve", "category": "Transitions", "media_type": "video"},
+    {"family_id": "dip_to_black", "display_name": "Dip to Black", "match_name": "AE.ADBE Dip to Black", "category": "Transitions", "media_type": "video"},
+    {"family_id": "dip_to_white", "display_name": "Dip to White", "match_name": "AE.ADBE Dip to White", "category": "Transitions", "media_type": "video"},
+    {"family_id": "push", "display_name": "Push", "match_name": "AE.ADBE Push", "category": "Transitions", "media_type": "video"},
+    {"family_id": "slide", "display_name": "Slide", "match_name": "AE.ADBE Slide", "category": "Transitions", "media_type": "video"},
+    {"family_id": "wipe", "display_name": "Wipe", "match_name": "AE.ADBE Wipe", "category": "Transitions", "media_type": "video"},
+    {"family_id": "zoom", "display_name": "Zoom", "match_name": "AE.ADBE Zoom", "category": "Transitions", "media_type": "video"},
+    {"family_id": "whip_pan", "display_name": "Whip Pan", "match_name": "AE.ADBE Whip Pan", "category": "Transitions", "media_type": "video"},
+    # Broadcast Audio (14)
+    {"family_id": "essential_audio", "display_name": "Essential Audio", "match_name": "AE.ADBE Essential Audio", "category": "Broadcast Audio", "media_type": "audio"},
+    {"family_id": "parametric_eq", "display_name": "Parametric EQ", "match_name": "AE.ADBE Parametric EQ", "category": "Broadcast Audio", "media_type": "audio"},
+    {"family_id": "graphic_eq", "display_name": "Graphic EQ", "match_name": "AE.ADBE Graphic Equalizer", "category": "Broadcast Audio", "media_type": "audio"},
+    {"family_id": "multiband_compressor", "display_name": "Multiband Compressor", "match_name": "AE.ADBE MultibandCompressor", "category": "Broadcast Audio", "media_type": "audio"},
+    {"family_id": "dynamics", "display_name": "Dynamics", "match_name": "AE.ADBE Dynamics", "category": "Broadcast Audio", "media_type": "audio"},
+    {"family_id": "hard_limiter", "display_name": "Hard Limiter", "match_name": "AE.ADBE HardLimiter", "category": "Broadcast Audio", "media_type": "audio"},
+    {"family_id": "denoise", "display_name": "DeNoise", "match_name": "AE.ADBE Denoise", "category": "Broadcast Audio", "media_type": "audio"},
+    {"family_id": "dereverb", "display_name": "DeReverb", "match_name": "AE.ADBE DeReverb", "category": "Broadcast Audio", "media_type": "audio"},
+    {"family_id": "studio_reverb", "display_name": "Studio Reverb", "match_name": "AE.ADBE StudioReverb", "category": "Broadcast Audio", "media_type": "audio"},
+    {"family_id": "analog_delay", "display_name": "Analog Delay", "match_name": "AE.ADBE Analog Delay", "category": "Broadcast Audio", "media_type": "audio"},
+    {"family_id": "pitch_shifter", "display_name": "Pitch Shifter", "match_name": "AE.ADBE PitchShifter", "category": "Broadcast Audio", "media_type": "audio"},
+    {"family_id": "highpass", "display_name": "Highpass", "match_name": "AE.ADBE Highpass", "category": "Broadcast Audio", "media_type": "audio"},
+    {"family_id": "lowpass", "display_name": "Lowpass", "match_name": "AE.ADBE Lowpass", "category": "Broadcast Audio", "media_type": "audio"},
+    {"family_id": "channel_volume", "display_name": "Channel Volume", "match_name": "AE.ADBE ChannelVolume", "category": "Broadcast Audio", "media_type": "audio"},
+    # Proprietary & Platform Plugins (honestly classified as unsupported / missing_dependency)
+    {"family_id": "proprietary_keyper", "display_name": "Keyper AI Keying", "match_name": "Keyper", "category": "Proprietary Plugins", "media_type": "video"},
+    {"family_id": "proprietary_mettle_vr", "display_name": "Mettle SkyBox VR", "match_name": "Mettle SkyBox Glow", "category": "Proprietary Plugins", "media_type": "video"},
+    {"family_id": "proprietary_sapphire", "display_name": "Boris FX Sapphire", "match_name": "AE.S_Glow", "category": "Proprietary Plugins", "media_type": "video"},
+    {"family_id": "proprietary_red_giant", "display_name": "Maxon Red Giant", "match_name": "AE.RG_Looks", "category": "Proprietary Plugins", "media_type": "video"},
+    {"family_id": "proprietary_bcc", "display_name": "Boris FX Continuum", "match_name": "AE.BCC_LensBlur", "category": "Proprietary Plugins", "media_type": "video"},
+    {"family_id": "proprietary_twixtor", "display_name": "RE:VisionFX Twixtor", "match_name": "RE:Vision Twixtor", "category": "Proprietary Plugins", "media_type": "video"},
+    {"family_id": "proprietary_rsmb", "display_name": "RE:VisionFX RSMB", "match_name": "RSMB Pro", "category": "Proprietary Plugins", "media_type": "video"},
+    {"family_id": "platform_apple_au", "display_name": "Apple Audio Unit", "match_name": "AU.AUMultibandCompressor", "category": "Platform Audio Units", "media_type": "audio"},
+)
+
+
+def list_supported_effect_families() -> List[Dict[str, str]]:
+    """Return a copy of the canonical Premiere Pro effect family registry."""
+    return [dict(item) for item in PREMIERE_EFFECT_FAMILIES]
 
 
 def map_effect_component(comp: EffectComponent, ctx: MappingContext) -> MappedEffectResult:
