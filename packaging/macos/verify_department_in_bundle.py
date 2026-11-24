@@ -154,17 +154,20 @@ def install_models(model_dir: Path) -> dict[str, dict]:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--output-dir", required=True)
+    ap.add_argument("--output-dir", required=True, help="Small evidence files (JSON, summary) only")
+    ap.add_argument("--work-dir", default=None, help="Media, models, jobs and renders (default: <output-dir>/../department_work)")
     ap.add_argument("--skip-model-install", action="store_true")
     a = ap.parse_args()
     out = Path(a.output_dir).resolve()
     out.mkdir(parents=True, exist_ok=True)
-    model_dir = out / "models"
+    work = Path(a.work_dir).resolve() if a.work_dir else out.parent / "department_work"
+    work.mkdir(parents=True, exist_ok=True)
+    model_dir = work / "models"
     t0 = time.perf_counter()
-    cams, speech_ok = synthesise_interview(out / "media")
+    cams, speech_ok = synthesise_interview(work / "media")
     models = {} if a.skip_model_install else install_models(model_dir)
     job = ProductionJob.create(
-        job_root=out / "jobs",
+        job_root=work / "jobs",
         brief="Full episode: match the camera colours, captions, blur the background behind the host, lower thirds and social clips",
         inputs=[f"{k}={v}" for k, v in cams.items()],
         profile_ref="interview_two_camera",
@@ -182,7 +185,7 @@ def main() -> int:
     ei, vfx = agents["editorial_intelligence"], agents["vfx"]
     melt_ok = None
     if d["artifacts"].get("kdenlive_project") and shutil.which("melt"):
-        render = out / "draft_melt_render.mp4"
+        render = work / "draft_melt_render.mp4"
         res = _run(["melt", d["artifacts"]["kdenlive_project"], "-consumer", f"avformat:{render}", "vcodec=libx264", "acodec=aac"])
         melt_ok = res.returncode == 0 and render.exists() and render.stat().st_size > 10_000
     result = {

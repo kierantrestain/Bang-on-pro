@@ -116,3 +116,17 @@ export HF_HOME="/Volumes/StudioSSD/BangOnPro/huggingface"
 - **Selective Integration Scope:** Only clean open-source architectural concepts and GPL-3.0-compatible code patterns (such as interactive rotoscoping studio workflows, matte/mask layering, and node/timeline ergonomics) are selectively integrated or adapted under Bang On Pro's GPL-3.0 licence with attribution preserved.
 - **Strict Third-Party Asset Exclusion Policy:** Non-code third-party ArtCraft media asset folders — specifically **`sound/`**, **`memes/`**, **`skybox/`**, **`pose/`**, and **`characters_gif/`** — carry separate third-party attributions/licences and are **strictly excluded** from Bang On Pro. Automated compliance checks in `tests/bangonpro/test_security_and_compliance.py` and `packaging/macos/build_macos_arm64.sh` continuously verify that zero files from those excluded ArtCraft asset directories exist anywhere in the Bang On Pro repository or packaged `.app`/`.dmg` bundles.
 
+
+## V1.2 Managed AI Runtime (bundled in the macOS DMG)
+
+| Component | Licence | Use |
+|---|---|---|
+| faster-whisper | MIT | Local Whisper transcription (CTranslate2) |
+| CTranslate2 | MIT | Inference engine for faster-whisper |
+| onnxruntime | MIT | Silero VAD (faster-whisper) and MobileSAM ONNX segmentation |
+| tokenizers, huggingface_hub | Apache-2.0 | Whisper tokenizer / model metadata |
+| PyAV | BSD-3-Clause | faster-whisper dependency |
+
+Model weights are **not** bundled; they are downloaded on demand through the Model Manager over HTTPS with
+SHA-256 recorded: Whisper (MIT) and MobileSAM (Apache-2.0). Set `BANGONPRO_BUNDLE_AI_TIER=none` to build without
+the runtime.

@@ -247,7 +247,8 @@ jobs:
           BANGONPRO_CACHE_DIR="${RUNNER_TEMP}/bop_cache" \
           BANGONPRO_PREFS_DIR="${RUNNER_TEMP}/bop_prefs" \
             "${BUNDLED_PY}" packaging/macos/verify_department_in_bundle.py \
-            --output-dir dist/macos-arm64/department_evidence
+            --output-dir dist/macos-arm64/department_evidence \
+            --work-dir "${RUNNER_TEMP}/bop_department_work"
           test -s dist/macos-arm64/department_evidence/department_verification.json
           cat dist/macos-arm64/department_evidence/department_verification.json
 
