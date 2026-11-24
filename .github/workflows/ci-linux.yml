@@ -26,12 +26,12 @@ jobs:
   qa-security-compliance:
     name: QA, Security, Licence & Project Integrity (Python + MLT)
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 30
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install MLT, FFmpeg, frei0r & YAML tooling
+      - name: Install MLT, FFmpeg, frei0r, Imaging & YAML tooling
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -39,7 +39,9 @@ jobs:
             ffmpeg \
             frei0r-plugins \
             xvfb \
-            python3-yaml
+            python3-yaml \
+            python3-pil \
+            python3-opencv
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
@@ -51,14 +53,20 @@ jobs:
       - name: Install pinned Bang On Pro Python dependencies
         run: |
           python3 -m pip install --upgrade pip
-          python3 -m pip install -r requirements-bangonpro.txt PyYAML
+          python3 -m pip install -r requirements-bangonpro.txt PyYAML Pillow opencv-python-headless
 
-      - name: Validate packaging scripts & workflow YAML syntax
+      - name: Validate packaging scripts, CraftConfig.ini & workflow YAML syntax
         run: |
           bash -n packaging/macos/build_macos_arm64.sh
+          bash -n packaging/macos/bootstrap_ai_runtime.sh
           python3 -m py_compile packaging/macos/craft_blueprint.py
           python3 -c '
-          import glob, yaml
+          import configparser, glob, yaml
+          cp = configparser.ConfigParser()
+          cp.optionxform = str
+          read_ok = cp.read("packaging/macos/CraftConfig.ini", encoding="utf-8")
+          assert read_ok and "macos-arm-clang" in cp, "Invalid CraftConfig.ini"
+          assert cp["General"]["Branch"] == "master"
           for path in sorted(glob.glob(".github/workflows/*.yml")):
               with open(path, "r", encoding="utf-8") as fh:
                   doc = yaml.safe_load(fh)
@@ -66,9 +74,11 @@ jobs:
               print(f"YAML OK: {path}")
           '
 
-      - name: Run full Bang On Pro QA, Security & Project Integrity suite
+      - name: Run full Bang On Pro QA, Security, Compliance & E2E suite
         run: |
           mkdir -p reports/qa
+          SDL_AUDIODRIVER=dummy \
+          QT_QPA_PLATFORM=offscreen \
           xvfb-run -a python3 tests/bangonpro/run_all_checks.py \
             --report-dir reports/qa \
             --verbose
@@ -150,7 +160,9 @@ jobs:
             frei0r-plugins \
             libavcodec-dev \
             libavformat-dev \
-            libswscale-dev
+            libswscale-dev \
+            python3-pil \
+            python3-opencv
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
@@ -162,13 +174,13 @@ jobs:
       - name: Install pinned Bang On Pro Python dependencies
         run: |
           python3 -m pip install --upgrade pip
-          python3 -m pip install -r requirements-bangonpro.txt PyYAML
+          python3 -m pip install -r requirements-bangonpro.txt PyYAML Pillow opencv-python-headless
 
       - name: Restore ccache
         uses: actions/cache@v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ccache-ubuntu2404-qt5-${{ github.ref_name }}-${{ hashFiles('CMakeLists.txt', 'src/CMakeLists.txt', 'tests/CMakeLists.txt') }}
+          key: ccache-ubuntu2404-qt5-${{ github.ref_name }}-${{ hashFiles('CMakeLists.txt', 'src/CMakeLists.txt', 'tests/CMakeLists.txt', 'src/bangonpro/tests/CMakeLists.txt') }}
           restore-keys: |
             ccache-ubuntu2404-qt5-${{ github.ref_name }}-
             ccache-ubuntu2404-qt5-
@@ -200,7 +212,20 @@ jobs:
           QT_QPA_PLATFORM=offscreen \
           "${PWD}/install-prefix/bin/kdenlive" --version | tee reports/cpp/binary-version.txt
 
-      - name: Run CTest C++ unit tests
+      - name: Run Bang On Pro C++ CTest suites (including workspace & roto studio)
+        run: |
+          mkdir -p reports/cpp
+          XDG_DATA_DIRS="${PWD}/install-prefix/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}" \
+          SDL_AUDIODRIVER=dummy \
+          QT_QPA_PLATFORM=offscreen \
+          xvfb-run -a ctest \
+            --test-dir build \
+            -R "^bangonpro_" \
+            --output-on-failure \
+            --timeout 120 \
+            --output-junit "${PWD}/reports/cpp/ctest-bangonpro-junit.xml"
+
+      - name: Run full CTest C++ unit tests
         run: |
           mkdir -p reports/cpp
           XDG_DATA_DIRS="${PWD}/install-prefix/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}" \
@@ -212,9 +237,13 @@ jobs:
             --timeout 120 \
             --output-junit "${PWD}/reports/cpp/ctest-junit.xml"
 
-      - name: Run full Bang On Pro pytest & compliance verification
+      - name: Run full Bang On Pro pytest, E2E & compliance verification
         run: |
           mkdir -p reports/cpp/pytest
+          BANGONPRO_BINARY="${PWD}/install-prefix/bin/kdenlive" \
+          XDG_DATA_DIRS="${PWD}/install-prefix/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}" \
+          SDL_AUDIODRIVER=dummy \
+          QT_QPA_PLATFORM=offscreen \
           xvfb-run -a python3 tests/bangonpro/run_all_checks.py \
             --report-dir reports/cpp/pytest \
             --verbose

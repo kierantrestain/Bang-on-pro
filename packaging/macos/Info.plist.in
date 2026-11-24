@@ -61,6 +61,15 @@
     <array>
         <string>https</string>
     </array>
+    <key>LSEnvironment</key>
+    <dict>
+        <key>BANGONPRO_PACKAGED_MACOS</key>
+        <string>1</string>
+        <key>QT_MAC_WANTS_LAYER</key>
+        <string>1</string>
+        <key>QT_AUTO_SCREEN_SCALE_FACTOR</key>
+        <string>1</string>
+    </dict>
     <key>CFBundleDocumentTypes</key>
     <array>
         <dict>

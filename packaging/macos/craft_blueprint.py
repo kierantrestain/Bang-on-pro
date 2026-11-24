@@ -3,25 +3,38 @@
 # SPDX-License-Identifier: BSD-2-Clause
 """KDE Craft blueprint override for building Bang On Pro on Apple Silicon (arm64).
 
-Usage inside an Apple Silicon KDE Craft (Qt6 / macos-arm64-clang) environment:
+Usage inside an Apple Silicon KDE Craft (master / Qt 6 / macos-arm-clang) environment:
 
-    1. Bootstrap KDE Craft Qt6 for Apple Silicon:
-       curl https://raw.githubusercontent.com/KDE/craft/master/setup/CraftBootstrap.py -o setup.py
-       python3 setup.py --prefix "$HOME/CraftRoot" --branch qt6
+    1. Bootstrap KDE Craft via CraftMaster + packaging/macos/CraftConfig.ini:
+       git clone --depth=1 https://invent.kde.org/packaging/craftmaster.git --branch=master /tmp/craftmaster
+       python3 /tmp/craftmaster/CraftMaster.py \
+           --config packaging/macos/CraftConfig.ini \
+           --variables "Root=$HOME/CraftRoot" \
+           --targets macos-arm-clang \
+           --setup
+       python3 /tmp/craftmaster/CraftMaster.py \
+           --config packaging/macos/CraftConfig.ini \
+           --variables "Root=$HOME/CraftRoot" \
+           --targets macos-arm-clang \
+           -c -i --options virtual.ignored=True --update craft
 
     2. Overlay this blueprint into Craft's blueprint tree:
-       mkdir -p "$HOME/CraftRoot/etc/blueprints/locations/craft-blueprints-kde/kde/kdemultimedia/bangonpro"
-       cp packaging/macos/craft_blueprint.py \
-          "$HOME/CraftRoot/etc/blueprints/locations/craft-blueprints-kde/kde/kdemultimedia/bangonpro/bangonpro.py"
+       BLUEPRINT_DIR="$HOME/CraftRoot/macos-arm-clang/etc/blueprints/locations/craft-blueprints-kde/kde/kdemultimedia/bangonpro"
+       mkdir -p "$BLUEPRINT_DIR"
+       cp packaging/macos/craft_blueprint.py "$BLUEPRINT_DIR/bangonpro.py"
 
-    3. Build and package Bang On Pro natively for macOS arm64:
-       source "$HOME/CraftRoot/craft/craftenv.sh"
-       craft --option bangonpro.srcDir="$PWD" bangonpro
-       craft --package bangonpro
+    3. Install binary-cached Qt6/KF6/MLT/FFmpeg dependencies and build:
+       python3 /tmp/craftmaster/CraftMaster.py \
+           --config packaging/macos/CraftConfig.ini \
+           --variables "Root=$HOME/CraftRoot" \
+           --targets macos-arm-clang \
+           -c --install-deps kdenlive
 
 Notes:
+    - Uses Craft `master` blueprint paths (`libs/qt/qtbase`, etc.) compatible with
+      KDE's official Qt 6 binary caches at https://files.kde.org/craft/Qt6/.
     - Targets Qt 6, KDE Frameworks 6 (KF6), MLT >= 7.22.0, FFmpeg (with Apple
-      VideoToolbox hardware decode/encode), and frei0r plugins on arm64.
+      VideoToolbox hardware decode/encode), frei0r plugins, and Breeze icons on arm64.
     - DBus is disabled (-DUSE_DBUS=OFF) on macOS to avoid background dbus-daemon
       dependencies inside the standalone .app bundle.
     - This module degrades cleanly when imported outside KDE Craft (e.g. during
@@ -82,7 +95,7 @@ except ImportError:
     MacDMGPackager = None
 
 
-BANGONPRO_VERSION = "0.1.0-alpha"
+BANGONPRO_VERSION = "1.0.0"
 MACOS_DEPLOYMENT_TARGET = "13.0"
 MIN_MLT_VERSION = "7.22.0"
 
@@ -105,28 +118,32 @@ class subinfo(info.infoclass):  # noqa: N801 - Craft requires lowercase `subinfo
         self.defaultTarget = "main"
 
     def setDependencies(self):
+        self.runtimeDependencies["virtual/base"] = None
         self.buildDependencies["kde/frameworks/extra-cmake-modules"] = None
         self.buildDependencies["dev-utils/ninja"] = None
         self.buildDependencies["dev-utils/pkg-config"] = None
 
-        # Qt 6 core stack
-        self.runtimeDependencies["libs/qt6/qtbase"] = None
-        self.runtimeDependencies["libs/qt6/qtdeclarative"] = None
-        self.runtimeDependencies["libs/qt6/qtmultimedia"] = None
-        self.runtimeDependencies["libs/qt6/qtnetworkauth"] = None
-        self.runtimeDependencies["libs/qt6/qtsvg"] = None
-        self.runtimeDependencies["libs/qt6/qtimageformats"] = None
+        # Qt 6 core stack (Craft `master` unified libs/qt/* layout)
+        self.runtimeDependencies["libs/qt/qtbase"] = None
+        self.runtimeDependencies["libs/qt/qtdeclarative"] = None
+        self.runtimeDependencies["libs/qt/qtmultimedia"] = None
+        self.runtimeDependencies["libs/qt/qtnetworkauth"] = None
+        self.runtimeDependencies["libs/qt/qtsvg"] = None
+        self.runtimeDependencies["libs/qt/qtimageformats"] = None
 
-        # KDE Frameworks 6 required by CMakeLists.txt
+        # KDE Frameworks 6 & Breeze theme matching KDE's official kdenlive.py blueprint
         kf6_modules = [
             "kde/frameworks/tier1/breeze-icons",
             "kde/frameworks/tier1/karchive",
             "kde/frameworks/tier1/kcodecs",
+            "kde/frameworks/tier1/kcolorscheme",
             "kde/frameworks/tier1/kconfig",
             "kde/frameworks/tier1/kcoreaddons",
             "kde/frameworks/tier1/kguiaddons",
             "kde/frameworks/tier1/ki18n",
+            "kde/frameworks/tier1/kimageformats",
             "kde/frameworks/tier1/kitemviews",
+            "kde/frameworks/tier1/kplotting",
             "kde/frameworks/tier1/solid",
             "kde/frameworks/tier1/kwidgetsaddons",
             "kde/frameworks/tier2/kcompletion",
@@ -137,6 +154,7 @@ class subinfo(info.infoclass):  # noqa: N801 - Craft requires lowercase `subinfo
             "kde/frameworks/tier2/kpackage",
             "kde/frameworks/tier3/kbookmarks",
             "kde/frameworks/tier3/kconfigwidgets",
+            "kde/frameworks/tier3/kdeclarative",
             "kde/frameworks/tier3/kiconthemes",
             "kde/frameworks/tier3/kio",
             "kde/frameworks/tier3/knewstuff",
@@ -145,6 +163,8 @@ class subinfo(info.infoclass):  # noqa: N801 - Craft requires lowercase `subinfo
             "kde/frameworks/tier3/ktextwidgets",
             "kde/frameworks/tier3/kxmlgui",
             "kde/frameworks/tier3/purpose",
+            "kde/frameworks/tier4/frameworkintegration",
+            "kde/plasma/breeze",
         ]
         for mod in kf6_modules:
             self.runtimeDependencies[mod] = None

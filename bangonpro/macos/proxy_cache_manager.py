@@ -686,3 +686,400 @@ def generate_proxy(
         proxy_bytes=proxy_path.stat().st_size,
         proxy_probe=proxy_probe,
     )
+
+
+@dataclass
+class StorageSummary:
+    """Detailed disk usage breakdown across managed Bang On Pro cache & model directories."""
+
+    root_dir: str
+    proxies_bytes: int
+    thumbnails_bytes: int
+    temp_bytes: int
+    render_cache_bytes: int
+    models_bytes: int
+    total_cache_bytes: int
+    total_managed_bytes: int
+    max_cache_bytes: int
+    max_models_bytes: int
+    cache_utilization_pct: float
+    models_utilization_pct: float
+    disk_free_bytes: int
+    disk_total_bytes: int
+    installed_model_count: int
+    protected_dirs: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class ClearCacheReport:
+    """Audit result returned by StorageAndModelManager.clear_caches()."""
+
+    categories_requested: List[str]
+    deleted_files: List[str] = field(default_factory=list)
+    freed_bytes: int = 0
+    skipped_protected: List[str] = field(default_factory=list)
+    skipped_pinned: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class DuplicateMediaAuditReport:
+    """Result verifying source media files are referenced in-place and never duplicated into cache."""
+
+    checked_source_count: int
+    duplicates_found: List[Dict[str, str]] = field(default_factory=list)
+    verified_clean: bool = True
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+def _sha256_file_bytes(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+class StorageAndModelManager(CacheBudgetManager):
+    """Full storage, cache-category, and AI model lifecycle manager for low-storage Macs.
+
+    Extends ``CacheBudgetManager`` with ``thumbnails/`` and ``temp/`` managed
+    subdirectories, safe category-level cache clearing, model registration/removal,
+    and duplicate-media auditing while preserving strict source-media immutability.
+    """
+
+    _VALID_CACHE_CATEGORIES = ("proxies", "thumbnails", "temp", "render_cache")
+
+    def __init__(self, root_dir: str | Path, config: Optional[StorageBudgetConfig] = None) -> None:
+        super().__init__(root_dir, config=config)
+        self.thumbnails_dir = self.root_dir / "thumbnails"
+        self.temp_dir = self.root_dir / "temp"
+        self.thumbnails_dir.mkdir(parents=True, exist_ok=True)
+        self.temp_dir.mkdir(parents=True, exist_ok=True)
+
+    def _category_dir(self, category: str) -> Path:
+        mapping = {
+            "proxies": self.proxies_dir,
+            "thumbnails": self.thumbnails_dir,
+            "temp": self.temp_dir,
+            "render_cache": self.render_cache_dir,
+        }
+        if category not in mapping:
+            raise ValueError(
+                f"Unsupported cache category '{category}'; expected one of {', '.join(self._VALID_CACHE_CATEGORIES)}"
+            )
+        return mapping[category]
+
+    def is_protected_path(self, candidate: Path) -> bool:
+        """Protect project files, symlinks, protected source dirs, models/, and anything outside cache dirs."""
+        name_lower = candidate.name.lower()
+        if any(name_lower.endswith(ext) for ext in _PROTECTED_PROJECT_SUFFIXES):
+            return True
+        if candidate.is_symlink():
+            return True
+
+        resolved = candidate.resolve()
+        for protected_dir in self._protected_dirs:
+            if self._is_within_dir(resolved, protected_dir):
+                return True
+
+        managed_cache_dirs = (
+            self.proxies_dir,
+            self.thumbnails_dir,
+            self.temp_dir,
+            self.render_cache_dir,
+        )
+        if not any(self._is_within_dir(resolved, d) for d in managed_cache_dirs):
+            return True
+        return False
+
+    def register_cache_entry(
+        self,
+        file_path: str | Path,
+        *,
+        category: str = "proxies",
+        pinned: bool = False,
+        last_access_ts: Optional[float] = None,
+    ) -> None:
+        """Record a managed temporary proxy, thumbnail, temp, or render cache file."""
+        if category not in self._VALID_CACHE_CATEGORIES:
+            raise ValueError(
+                f"Unsupported cache category '{category}'; expected one of {', '.join(self._VALID_CACHE_CATEGORIES)}"
+            )
+        path = Path(file_path)
+        if self.is_protected_path(path):
+            raise ValueError(f"Refusing to register protected or out-of-bounds path as evictable cache: {path}")
+        if not path.is_file():
+            raise FileNotFoundError(f"Cache file does not exist: {path}")
+
+        resolved = path.resolve()
+        ts = float(last_access_ts) if last_access_ts is not None else time.time()
+        self._manifest["entries"][str(resolved)] = {
+            "category": category,
+            "pinned": bool(pinned),
+            "last_access_ts": ts,
+            "size_bytes": resolved.stat().st_size,
+        }
+        self._save_manifest()
+
+    def _scan_evictable_cache_files(self) -> Tuple[List[Path], List[str]]:
+        evictable: List[Path] = []
+        skipped: List[str] = []
+        for managed_dir in (self.proxies_dir, self.thumbnails_dir, self.temp_dir, self.render_cache_dir):
+            if not managed_dir.exists():
+                continue
+            for item in managed_dir.rglob("*"):
+                if item.is_dir():
+                    continue
+                if self.is_protected_path(item):
+                    skipped.append(str(item))
+                    continue
+                evictable.append(item)
+        return evictable, skipped
+
+    def get_storage_summary(self) -> StorageSummary:
+        """Return a complete breakdown of cache, temp, thumbnail, and AI model disk usage."""
+        proxies_bytes = self._path_size_bytes(self.proxies_dir)
+        thumbnails_bytes = self._path_size_bytes(self.thumbnails_dir)
+        temp_bytes = self._path_size_bytes(self.temp_dir)
+        render_cache_bytes = self._path_size_bytes(self.render_cache_dir)
+        models_bytes = self._path_size_bytes(self.models_dir)
+        total_cache = proxies_bytes + thumbnails_bytes + temp_bytes + render_cache_bytes
+        total_managed = total_cache + models_bytes
+
+        max_cache = self.config.max_cache_bytes
+        max_models = self.config.max_models_bytes
+        cache_pct = round((total_cache / max_cache) * 100.0, 2) if max_cache > 0 else 0.0
+        models_pct = round((models_bytes / max_models) * 100.0, 2) if max_models > 0 else 0.0
+
+        disk = shutil.disk_usage(self.root_dir)
+        installed_models = [m for m in self.list_installed_models() if m["exists"]]
+
+        return StorageSummary(
+            root_dir=str(self.root_dir),
+            proxies_bytes=proxies_bytes,
+            thumbnails_bytes=thumbnails_bytes,
+            temp_bytes=temp_bytes,
+            render_cache_bytes=render_cache_bytes,
+            models_bytes=models_bytes,
+            total_cache_bytes=total_cache,
+            total_managed_bytes=total_managed,
+            max_cache_bytes=max_cache,
+            max_models_bytes=max_models,
+            cache_utilization_pct=cache_pct,
+            models_utilization_pct=models_pct,
+            disk_free_bytes=disk.free,
+            disk_total_bytes=disk.total,
+            installed_model_count=len(installed_models),
+            protected_dirs=[str(p) for p in self._protected_dirs],
+        )
+
+    def clear_caches(
+        self,
+        categories: Iterable[str] = ("proxies", "temp", "thumbnails"),
+        *,
+        include_pinned: bool = False,
+    ) -> ClearCacheReport:
+        """Safely clear managed cache categories without ever touching source media, projects, or models."""
+        cat_list = list(categories)
+        for cat in cat_list:
+            self._category_dir(cat)  # validate all category names up front
+
+        report = ClearCacheReport(categories_requested=cat_list)
+        entries = self._manifest.get("entries", {})
+
+        for cat in cat_list:
+            cat_dir = self._category_dir(cat)
+            if not cat_dir.exists():
+                continue
+            for item in sorted(cat_dir.rglob("*")):
+                if item.is_dir():
+                    continue
+                if self.is_protected_path(item):
+                    report.skipped_protected.append(str(item))
+                    continue
+                resolved_str = str(item.resolve())
+                meta = entries.get(resolved_str, {})
+                if meta.get("pinned", False) and not include_pinned:
+                    report.skipped_pinned.append(resolved_str)
+                    continue
+                try:
+                    size = item.stat().st_size
+                    item.unlink()
+                    report.deleted_files.append(resolved_str)
+                    report.freed_bytes += size
+                    entries.pop(resolved_str, None)
+                except OSError:
+                    report.skipped_protected.append(resolved_str)
+
+        # Prune stale manifest entries
+        for key in list(entries.keys()):
+            if not Path(key).exists():
+                entries.pop(key, None)
+        self._save_manifest()
+        return report
+
+    def register_model(
+        self,
+        model_id: str,
+        model_path: str | Path,
+        *,
+        quantization: str = "int8",
+        backend: str = "cpu",
+        pinned: bool = False,
+        last_access_ts: Optional[float] = None,
+        verify_sha256: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Register a local AI model artifact under models/ with quantization and optional SHA-256 verification."""
+        if not model_id or not model_id.strip():
+            raise ValueError("model_id must be a non-empty string")
+        path = Path(model_path)
+        if path.is_symlink():
+            raise ValueError(f"Refusing symlink model artifact: {path}")
+        resolved = path.resolve()
+        if not self._is_within_dir(resolved, self.models_dir):
+            raise ValueError(f"Model artifact must reside under {self.models_dir}: {resolved}")
+        if not resolved.exists():
+            raise FileNotFoundError(f"Model artifact does not exist: {resolved}")
+
+        computed_sha256: Optional[str] = None
+        if resolved.is_file():
+            computed_sha256 = _sha256_file_bytes(resolved)
+            if verify_sha256 is not None and computed_sha256.lower() != verify_sha256.lower():
+                raise ValueError(
+                    f"Model SHA-256 mismatch for '{model_id}': expected {verify_sha256}, got {computed_sha256}"
+                )
+
+        size_bytes = self._path_size_bytes(resolved)
+        record = {
+            "model_id": model_id,
+            "path": str(resolved),
+            "size_bytes": size_bytes,
+            "quantization": quantization,
+            "backend": backend,
+            "pinned": bool(pinned),
+            "sha256": computed_sha256,
+            "last_access_ts": float(last_access_ts) if last_access_ts is not None else time.time(),
+        }
+        self._manifest["models"][model_id] = record
+        self._save_manifest()
+        return dict(record)
+
+    def list_installed_models(self) -> List[Dict[str, Any]]:
+        """List all registered AI models with live on-disk status and byte sizes."""
+        models: List[Dict[str, Any]] = []
+        for model_id, info in sorted(self._manifest.get("models", {}).items()):
+            mpath = Path(str(info.get("path", "")))
+            exists = mpath.exists() and not mpath.is_symlink() and self._is_within_dir(mpath.resolve(), self.models_dir)
+            size_bytes = self._path_size_bytes(mpath) if exists else 0
+            models.append(
+                {
+                    "model_id": model_id,
+                    "path": str(mpath),
+                    "exists": exists,
+                    "size_bytes": size_bytes,
+                    "quantization": info.get("quantization", "unknown"),
+                    "backend": info.get("backend", "cpu"),
+                    "pinned": bool(info.get("pinned", False)),
+                    "sha256": info.get("sha256"),
+                    "last_access_ts": float(info.get("last_access_ts", 0.0)),
+                }
+            )
+        return models
+
+    def remove_model(
+        self,
+        model_id: str,
+        *,
+        delete_files: bool = True,
+        force: bool = False,
+    ) -> Dict[str, Any]:
+        """Safely unregister and optionally delete an AI model strictly within models/."""
+        models_map = self._manifest.get("models", {})
+        if model_id not in models_map:
+            raise KeyError(f"Model '{model_id}' is not registered")
+
+        info = models_map[model_id]
+        if info.get("pinned", False) and not force:
+            raise ValueError(f"Model '{model_id}' is pinned; pass force=True to remove")
+
+        mpath = Path(str(info.get("path", "")))
+        freed_bytes = 0
+        deleted = False
+        if delete_files and mpath.exists():
+            if mpath.is_symlink():
+                raise ValueError(f"Refusing to delete symlink model path: {mpath}")
+            resolved = mpath.resolve()
+            if not self._is_within_dir(resolved, self.models_dir) or resolved == self.models_dir:
+                raise ValueError(f"Refusing to delete path outside models_dir: {resolved}")
+            freed_bytes = self._path_size_bytes(resolved)
+            if resolved.is_dir():
+                shutil.rmtree(resolved)
+            else:
+                resolved.unlink()
+            deleted = True
+
+        models_map.pop(model_id, None)
+        self._save_manifest()
+        return {
+            "model_id": model_id,
+            "removed": True,
+            "deleted_from_disk": deleted,
+            "freed_bytes": freed_bytes,
+        }
+
+    def verify_no_duplicate_media(self, media_paths: Iterable[str | Path]) -> DuplicateMediaAuditReport:
+        """Verify that no byte-identical copies of user source media exist inside managed cache/model dirs."""
+        source_hashes: Dict[str, str] = {}
+        checked_sources = 0
+        for raw in media_paths:
+            p = Path(raw).resolve()
+            if not p.is_file():
+                continue
+            checked_sources += 1
+            source_hashes[_sha256_file_bytes(p)] = str(p)
+
+        duplicates: List[Dict[str, str]] = []
+        if source_hashes:
+            source_sizes = {Path(src).stat().st_size for src in source_hashes.values()}
+            scan_dirs = (
+                self.proxies_dir,
+                self.thumbnails_dir,
+                self.temp_dir,
+                self.render_cache_dir,
+                self.models_dir,
+            )
+            for sdir in scan_dirs:
+                if not sdir.exists():
+                    continue
+                for candidate in sdir.rglob("*"):
+                    if not candidate.is_file() or candidate.is_symlink():
+                        continue
+                    c_resolved = candidate.resolve()
+                    if str(c_resolved) in source_hashes.values():
+                        continue
+                    if c_resolved.stat().st_size not in source_sizes:
+                        continue
+                    cand_hash = _sha256_file_bytes(c_resolved)
+                    if cand_hash in source_hashes:
+                        duplicates.append(
+                            {
+                                "source_path": source_hashes[cand_hash],
+                                "duplicate_path": str(c_resolved),
+                                "sha256": cand_hash,
+                            }
+                        )
+
+        return DuplicateMediaAuditReport(
+            checked_source_count=checked_sources,
+            duplicates_found=duplicates,
+            verified_clean=len(duplicates) == 0,
+        )
+

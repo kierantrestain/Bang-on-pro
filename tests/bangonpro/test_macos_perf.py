@@ -567,3 +567,221 @@ def test_real_ffmpeg_and_melt_benchmark_execution(tmp_path: Path) -> None:
     assert "measurement_disclaimer" in env
     if not env["is_apple_silicon"]:
         assert "NOT Apple Silicon" in env["measurement_disclaimer"]
+
+
+# ---------------------------------------------------------------------------
+# 6. Apple Silicon RAM-Tier Model Quantization & MPS->CPU Fallback
+# ---------------------------------------------------------------------------
+
+
+def test_recommend_model_quantization_across_apple_silicon_tiers() -> None:
+    # 8 GB base Apple Silicon Mac -> strict INT8 CPU quantization to prevent swap pressure
+    rec_8 = recommend_model_quantization(ram_gb=8.0, has_mps=True, disk_free_gb=60.0)
+    assert rec_8.memory_tier == "8gb"
+    assert rec_8.whisper_quantization == "int8"
+    assert rec_8.whisper_model in ("tiny", "small")
+    assert rec_8.sam2_precision == "onnx_int8"
+    assert rec_8.sam2_device == "cpu"
+    assert rec_8.max_concurrent_ai_workers == 1
+    assert rec_8.recommend_proxies is True
+
+    # 16 GB Apple Silicon Mac -> Whisper INT8 + SAM2 small FP16 on MPS
+    rec_16 = recommend_model_quantization(ram_gb=16.0, has_mps=True, disk_free_gb=120.0)
+    assert rec_16.memory_tier == "16gb"
+    assert rec_16.whisper_quantization == "int8"
+    assert rec_16.whisper_model == "medium"
+    assert rec_16.sam2_model == "sam2.1_hiera_small"
+    assert rec_16.sam2_device == "mps"
+    assert rec_16.sam2_precision == "fp16"
+    assert rec_16.mps_fallback_device == "cpu"
+    assert rec_16.mps_fallback_precision == "onnx_int8"
+
+    # 24 GB Apple Silicon Mac
+    rec_24 = recommend_model_quantization(ram_gb=24.0, has_mps=True, disk_free_gb=200.0)
+    assert rec_24.memory_tier == "24gb"
+    assert rec_24.sam2_device == "mps"
+    assert rec_24.recommend_proxies is False
+
+    # 32 GB+ Apple Silicon Pro/Max -> Whisper large-v3 FP16 + SAM2 base+ MPS
+    rec_32 = recommend_model_quantization(ram_gb=36.0, has_mps=True, disk_free_gb=250.0)
+    assert rec_32.memory_tier == "32gb_plus"
+    assert rec_32.whisper_model == "large-v3"
+    assert rec_32.whisper_quantization == "fp16"
+    assert rec_32.whisper_device == "mps"
+    assert rec_32.sam2_model == "sam2.1_hiera_base_plus"
+    assert rec_32.sam2_device == "mps"
+    assert rec_32.max_concurrent_ai_workers >= 3
+
+    # Non-MPS fallback on 32 GB Linux/CPU host -> deterministic INT8/ONNX CPU fallback
+    rec_cpu = recommend_model_quantization(ram_gb=32.0, has_mps=False, disk_free_gb=250.0)
+    assert rec_cpu.whisper_device == "cpu"
+    assert rec_cpu.whisper_quantization == "int8"
+    assert rec_cpu.sam2_device == "cpu"
+    assert rec_cpu.sam2_precision == "onnx_int8"
+    assert rec_cpu.fallback_active is True
+    assert any("MPS" in w for w in rec_cpu.warnings)
+
+    # Low free disk space (< 10 GB) -> forces tiny/MobileSAM & recommends external SSD
+    rec_low_disk = recommend_model_quantization(ram_gb=32.0, has_mps=True, disk_free_gb=4.5)
+    assert rec_low_disk.whisper_model == "tiny"
+    assert rec_low_disk.sam2_model == "mobilesam"
+    assert rec_low_disk.recommend_external_ssd is True
+    assert any("external SSD" in w for w in rec_low_disk.warnings)
+
+
+# ---------------------------------------------------------------------------
+# 7. StorageAndModelManager (Summary, Clear Caches, Models, No-Duplicate Media)
+# ---------------------------------------------------------------------------
+
+
+def test_storage_and_model_manager_lifecycle_and_safety(tmp_path: Path) -> None:
+    source_dir = tmp_path / "camera_cards"
+    source_dir.mkdir()
+    raw_clip = source_dir / "A001_C001.mp4"
+    raw_clip.write_bytes(b"ORIGINAL_CAMERA_MEDIA_PAYLOAD" * 2048)
+
+    mgr = StorageAndModelManager(
+        tmp_path / "bop_storage",
+        config=StorageBudgetConfig(max_cache_gb=1.0, max_models_gb=1.0, protected_dirs=(source_dir,)),
+    )
+
+    # Populate managed cache categories
+    proxy_f = mgr.proxies_dir / "clip_proxy.mp4"
+    pinned_proxy = mgr.proxies_dir / "active_pinned_proxy.mp4"
+    thumb_f = mgr.thumbnails_dir / "frame_001.jpg"
+    temp_f = mgr.temp_dir / "render_scratch.tmp"
+    project_inside_temp = mgr.temp_dir / "never_delete_me.kdenlive"
+
+    proxy_f.write_bytes(b"P" * 4096)
+    pinned_proxy.write_bytes(b"A" * 2048)
+    thumb_f.write_bytes(b"T" * 1024)
+    temp_f.write_bytes(b"S" * 3072)
+    project_inside_temp.write_text("<mlt/>", encoding="utf-8")
+
+    mgr.register_cache_entry(proxy_f, category="proxies", pinned=False)
+    mgr.register_cache_entry(pinned_proxy, category="proxies", pinned=True)
+    mgr.register_cache_entry(thumb_f, category="thumbnails", pinned=False)
+    mgr.register_cache_entry(temp_f, category="temp", pinned=False)
+
+    # Register & list AI models
+    model_file = mgr.models_dir / "whisper_small_int8.bin"
+    model_file.write_bytes(b"WEIGHTS" * 1500)
+    rec = mgr.register_model("whisper-small-int8", model_file, quantization="int8", backend="cpu")
+    assert rec["sha256"] is not None
+    assert len(rec["sha256"]) == 64
+
+    # SHA-256 mismatch must raise ValueError
+    with pytest.raises(ValueError, match="SHA-256 mismatch"):
+        mgr.register_model("bad-hash", model_file, verify_sha256="0" * 64)
+
+    models = mgr.list_installed_models()
+    assert len(models) == 1
+    assert models[0]["model_id"] == "whisper-small-int8"
+    assert models[0]["exists"] is True
+
+    # Storage summary accuracy
+    summary = mgr.get_storage_summary()
+    assert summary.proxies_bytes == 4096 + 2048
+    assert summary.thumbnails_bytes == 1024
+    assert summary.temp_bytes >= 3072
+    assert summary.models_bytes == model_file.stat().st_size
+    assert summary.installed_model_count == 1
+    assert summary.disk_free_bytes > 0
+
+    # Verify zero duplicate source media inside cache root
+    clean_audit = mgr.verify_no_duplicate_media([raw_clip])
+    assert clean_audit.verified_clean is True
+    assert clean_audit.checked_source_count == 1
+    assert clean_audit.duplicates_found == []
+
+    # Plant an accidental duplicate of raw_clip in temp/ and verify detector catches it
+    dup_copy = mgr.temp_dir / "accidental_copy.mp4"
+    dup_copy.write_bytes(raw_clip.read_bytes())
+    dirty_audit = mgr.verify_no_duplicate_media([raw_clip])
+    assert dirty_audit.verified_clean is False
+    assert len(dirty_audit.duplicates_found) == 1
+
+    # Refuses invalid category (such as 'models') in clear_caches
+    with pytest.raises(ValueError, match="Unsupported cache category"):
+        mgr.clear_caches(categories=("models",))
+
+    # Clear caches: deletes unpinned proxies/temp/thumbnails, keeps pinned proxy, .kdenlive, models, source media
+    clear_rep = mgr.clear_caches(categories=("proxies", "temp", "thumbnails"))
+    assert not proxy_f.exists()
+    assert not thumb_f.exists()
+    assert not temp_f.exists()
+    assert not dup_copy.exists()
+    assert pinned_proxy.exists()
+    assert project_inside_temp.exists()
+    assert model_file.exists()
+    assert raw_clip.exists()
+    assert clear_rep.freed_bytes > 0
+
+    # Clean audit restored after clearing temp duplicate
+    assert mgr.verify_no_duplicate_media([raw_clip]).verified_clean is True
+
+    # Remove model safely
+    rm_res = mgr.remove_model("whisper-small-int8", delete_files=True)
+    assert rm_res["removed"] is True
+    assert rm_res["deleted_from_disk"] is True
+    assert not model_file.exists()
+    assert mgr.list_installed_models() == []
+
+
+# ---------------------------------------------------------------------------
+# 8. Comprehensive Workload Benchmarks (1080p, 4K, Multicam, AI VAD, Roto, RSS)
+# ---------------------------------------------------------------------------
+
+
+def test_comprehensive_benchmarks_with_4k_and_report_artifacts(tmp_path: Path) -> None:
+    out_dir = tmp_path / "comprehensive_bench"
+    report = run_comprehensive_benchmarks(
+        out_dir,
+        include_4k=True,
+        duration_sec=1.0,
+        duration_4k_sec=0.5,
+    )
+
+    assert report.summary["all_workloads_succeeded"] is True
+    assert report.peak_rss_mb > 0.0
+    assert get_peak_rss_mb() > 0.0
+
+    expected_workloads = [
+        "decode_1080p",
+        "export_1080p",
+        "decode_4k",
+        "proxy_4k_to_720p",
+        "export_4k",
+        "multicam_4cam_sync_and_mlt_render",
+        "ai_vad_transcription",
+        "roto_optical_flow",
+    ]
+    for name in expected_workloads:
+        assert name in report.workloads, f"Missing workload '{name}'"
+        wl = report.workloads[name]
+        if not wl.skipped:
+            assert wl.succeeded is True, f"Workload '{name}' failed: {wl.error}"
+            assert wl.elapsed_sec > 0.0
+            assert wl.realtime_factor > 0.0
+
+    # Verify JSON and Markdown artifacts written on disk
+    json_path = out_dir / "benchmark_results.json"
+    md_path = out_dir / "benchmark_report.md"
+    assert json_path.is_file()
+    assert md_path.is_file()
+
+    parsed = json.loads(json_path.read_text(encoding="utf-8"))
+    assert parsed["schema_version"] == "2.0"
+    assert "host_environment" in parsed
+    assert "model_recommendation" in parsed
+    assert parsed["peak_rss_mb"] > 0.0
+    if not parsed["host_environment"]["is_apple_silicon"]:
+        assert "NOT Apple Silicon" in parsed["host_environment"]["measurement_disclaimer"]
+
+    md_text = md_path.read_text(encoding="utf-8")
+    assert "# Bang On Pro — Performance Benchmark Report" in md_text
+    assert "decode_1080p" in md_text
+    assert "proxy_4k_to_720p" in md_text
+    assert "multicam_4cam_sync_and_mlt_render" in md_text
+    assert "ai_vad_transcription" in md_text
+
