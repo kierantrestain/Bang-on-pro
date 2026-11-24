@@ -14,6 +14,7 @@
 #include <QMutex>
 #include <QObject>
 #include <QRecursiveMutex>
+#include <QSet>
 #include <QString>
 #include <QStringList>
 #include <QVector>
@@ -143,6 +144,8 @@ struct TimelineClip
     QString name;
     FrameRange frameRange;
     QString cameraId;
+    double speedPercent = 100.0;
+    bool pitchCompensate = true;
     double audioGainDb = 0.0;
     QVector<AudioLevelPoint> audioAutomation;
     QVector<EffectInstance> effects;
@@ -150,6 +153,53 @@ struct TimelineClip
     QJsonObject metadata;
 
     int duration() const { return qMax(0, frameRange.outFrame - frameRange.inFrame); }
+};
+
+struct TimelineMask
+{
+    QString maskId;
+    QString sequenceId;
+    QString clipId;
+    QString trackId;
+    QString maskType = QStringLiteral("spline");
+    QString mltService = QStringLiteral("rotoscoping");
+    QString splinesJson;
+    QString mattePath;
+    double feather = 0.0;
+    double expand = 0.0;
+    bool invert = false;
+    QString operation = QStringLiteral("write_on_clear");
+    QJsonArray keyframes;
+    QString effectInstanceId;
+};
+
+struct TimelineTransition
+{
+    QString transitionInstanceId;
+    QString transitionId;
+    QString sequenceId;
+    QString aTrackId;
+    QString bTrackId;
+    int inFrame = 0;
+    int outFrame = 0;
+    QJsonObject properties;
+
+    int duration() const { return qMax(0, outFrame - inFrame); }
+};
+
+struct TimelineLowerThird
+{
+    QString lowerThirdId;
+    QString sequenceId;
+    QString trackId;
+    QString clipId;
+    FrameRange frameRange;
+    QString speakerName;
+    QString subtitle;
+    QString templateName = QStringLiteral("modern_clean");
+    QString position = QStringLiteral("bottom_left");
+    QString titleXml;
+    QJsonObject style;
 };
 
 struct TimelineTrack
@@ -264,11 +314,19 @@ public:
     bool hasMedia(const QString &mediaRef) const;
     bool hasTrack(const QString &trackId) const;
     bool hasClip(const QString &clipId) const;
+    bool hasCaption(const QString &captionId) const;
+    bool hasMask(const QString &maskId) const;
+    bool hasTransition(const QString &transitionInstanceId) const;
+    bool hasLowerThird(const QString &lowerThirdId) const;
 
     std::optional<SequenceRecord> sequence(const QString &sequenceId) const;
     std::optional<MediaAsset> media(const QString &mediaRef) const;
     std::optional<TimelineTrack> track(const QString &trackId) const;
     std::optional<TimelineClip> clip(const QString &clipId) const;
+    std::optional<TimelineCaption> caption(const QString &captionId) const;
+    std::optional<TimelineMask> mask(const QString &maskId) const;
+    std::optional<TimelineTransition> transition(const QString &transitionInstanceId) const;
+    std::optional<TimelineLowerThird> lowerThird(const QString &lowerThirdId) const;
 
     QVector<SequenceRecord> sequences() const;
     QVector<MediaAsset> mediaAssets() const;
@@ -276,6 +334,9 @@ public:
     QVector<TimelineClip> clips() const;
     QVector<TimelineCaption> captions() const;
     QVector<TimelineMarker> markers() const;
+    QVector<TimelineMask> masks() const;
+    QVector<TimelineTransition> transitions() const;
+    QVector<TimelineLowerThird> lowerThirds() const;
     QVector<CameraSelection> cameraSelections() const;
     QVector<SyncGroup> syncGroups() const;
     QVector<ExportRequestRecord> exportRequests() const;
@@ -292,6 +353,9 @@ private:
         QMap<QString, TimelineClip> clips;
         QMap<QString, TimelineCaption> captions;
         QMap<QString, TimelineMarker> markers;
+        QMap<QString, TimelineMask> masks;
+        QMap<QString, TimelineTransition> transitions;
+        QMap<QString, TimelineLowerThird> lowerThirds;
         QMap<QString, CameraSelection> cameraSelections;
         QMap<QString, SyncGroup> syncGroups;
         QMap<QString, ExportRequestRecord> exportRequests;
@@ -303,6 +367,9 @@ private:
         qint64 nextEffectId = 1;
         qint64 nextCaptionId = 1;
         qint64 nextMarkerId = 1;
+        qint64 nextMaskId = 1;
+        qint64 nextTransitionId = 1;
+        qint64 nextLowerThirdId = 1;
         qint64 nextCameraSelectionId = 1;
         qint64 nextSyncGroupId = 1;
         qint64 nextExportId = 1;
@@ -324,7 +391,13 @@ private:
     TimelineOperationResult handleSetKeyframe(const TimelineOperation &op, const QString &sequenceId);
     TimelineOperationResult handleSetAudioLevel(const TimelineOperation &op, const QString &sequenceId);
     TimelineOperationResult handleAddCaption(const TimelineOperation &op, const QString &sequenceId);
+    TimelineOperationResult handleUpdateCaption(const TimelineOperation &op, const QString &sequenceId);
+    TimelineOperationResult handleDeleteCaption(const TimelineOperation &op);
     TimelineOperationResult handleAddMarker(const TimelineOperation &op, const QString &sequenceId);
+    TimelineOperationResult handleApplyMask(const TimelineOperation &op, const QString &sequenceId);
+    TimelineOperationResult handleAddTransition(const TimelineOperation &op, const QString &sequenceId);
+    TimelineOperationResult handleAddLowerThird(const TimelineOperation &op, const QString &sequenceId);
+    TimelineOperationResult handleSetClipSpeed(const TimelineOperation &op);
     TimelineOperationResult handleExportSequence(const TimelineOperation &op, const QString &sequenceId);
 
     static QJsonObject serializeState(const State &state);
@@ -403,6 +476,8 @@ public:
     QVector<PendingProposal> pendingProposals() const;
     QJsonArray pendingProposalsJson() const;
     TimelineCommandResponse approveProposal(const QString &requestId, bool rebaseToCurrentRevision = false);
+    TimelineCommandResponse approveBatchWithSelection(const QString &requestId, const QSet<QString> &acceptedOpIds,
+                                                      const QString &approvedBy = QStringLiteral("user"), bool rebaseToCurrentRevision = false);
     bool rejectProposal(const QString &requestId, const QString &reason = QString());
 
     // Revision-tracked undo / redo.

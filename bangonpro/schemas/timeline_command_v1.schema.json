@@ -77,7 +77,13 @@
               "set_audio_level",
               "add_audio_filter",
               "add_caption",
+              "update_caption",
+              "delete_caption",
               "add_marker",
+              "apply_mask",
+              "add_transition",
+              "add_lower_third",
+              "set_clip_speed",
               "undo",
               "redo",
               "export_sequence"
@@ -108,7 +114,161 @@
           "rationale": {
             "type": "string"
           }
-        }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": { "type": { "const": "apply_mask" } },
+              "required": ["type"]
+            },
+            "then": {
+              "properties": {
+                "params": {
+                  "type": "object",
+                  "properties": {
+                    "mask_id": { "type": "string", "minLength": 1 },
+                    "mask_type": {
+                      "type": "string",
+                      "enum": ["spline", "polygon", "bezier", "matte_file", "ai_sam"]
+                    },
+                    "splines_json": {
+                      "type": ["string", "object", "array"]
+                    },
+                    "matte_path": { "type": "string", "minLength": 1 },
+                    "feather": { "type": "number", "minimum": 0.0, "maximum": 100.0 },
+                    "expand": { "type": "number", "minimum": -50.0, "maximum": 50.0 },
+                    "invert": { "type": "boolean" },
+                    "operation": {
+                      "type": "string",
+                      "enum": ["write_on_clear", "add", "subtract", "intersect"]
+                    },
+                    "keyframes": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": ["frame", "points"],
+                        "properties": {
+                          "frame": { "type": "integer", "minimum": 0 },
+                          "points": { "type": "array" }
+                        },
+                        "additionalProperties": true
+                      }
+                    }
+                  },
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": { "type": { "const": "add_transition" } },
+              "required": ["type"]
+            },
+            "then": {
+              "properties": {
+                "params": {
+                  "type": "object",
+                  "properties": {
+                    "transition_id": { "type": "string", "minLength": 1 },
+                    "a_track": { "type": ["string", "integer"] },
+                    "b_track": { "type": ["string", "integer"] },
+                    "in_frame": { "type": "integer", "minimum": 0 },
+                    "out_frame": { "type": "integer", "minimum": 0 },
+                    "properties": { "type": "object", "additionalProperties": true }
+                  },
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": { "type": { "const": "update_caption" } },
+              "required": ["type"]
+            },
+            "then": {
+              "properties": {
+                "params": {
+                  "type": "object",
+                  "properties": {
+                    "caption_id": { "type": "string", "minLength": 1 },
+                    "text": { "type": "string", "minLength": 1 },
+                    "speaker": { "type": "string" },
+                    "language": { "type": "string" },
+                    "start_frame": { "type": "integer", "minimum": 0 },
+                    "end_frame": { "type": "integer", "minimum": 0 },
+                    "duration_frames": { "type": "integer", "minimum": 1 }
+                  },
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": { "type": { "const": "delete_caption" } },
+              "required": ["type"]
+            },
+            "then": {
+              "properties": {
+                "params": {
+                  "type": "object",
+                  "properties": {
+                    "caption_id": { "type": "string", "minLength": 1 },
+                    "start_frame": { "type": "integer", "minimum": 0 }
+                  },
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": { "type": { "const": "add_lower_third" } },
+              "required": ["type"]
+            },
+            "then": {
+              "properties": {
+                "params": {
+                  "type": "object",
+                  "properties": {
+                    "speaker_name": { "type": "string", "minLength": 1 },
+                    "subtitle": { "type": "string" },
+                    "template": { "type": "string", "minLength": 1 },
+                    "position": { "type": ["string", "object"] },
+                    "duration_frames": { "type": "integer", "minimum": 1 }
+                  },
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": { "type": { "const": "set_clip_speed" } },
+              "required": ["type"]
+            },
+            "then": {
+              "properties": {
+                "params": {
+                  "type": "object",
+                  "properties": {
+                    "speed_percent": {
+                      "type": "number",
+                      "minimum": -10000.0,
+                      "maximum": 10000.0,
+                      "not": { "const": 0 }
+                    },
+                    "pitch_compensate": { "type": "boolean" },
+                    "change_duration": { "type": "boolean" }
+                  },
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        ]
       }
     }
   }

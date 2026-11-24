@@ -8,6 +8,7 @@
 #include <QDateTime>
 #include <QJsonDocument>
 #include <QSet>
+#include <QXmlStreamWriter>
 
 #include <algorithm>
 #include <cmath>
@@ -288,6 +289,285 @@ bool commandStatusFromString(const QString &s, CommandStatus *statusOut)
     return false;
 }
 
+QString extractTrackParamString(const QJsonObject &params, const QString &key)
+{
+    if (!params.contains(key)) {
+        return {};
+    }
+    const QJsonValue v = params.value(key);
+    if (v.isString()) {
+        return v.toString().trimmed();
+    }
+    int numeric = 0;
+    if (jsonValueIsStrictInt(v, &numeric)) {
+        return QString::number(numeric);
+    }
+    return {};
+}
+
+bool isValidMaskType(const QString &maskType)
+{
+    return maskType == QStringLiteral("spline") || maskType == QStringLiteral("polygon") || maskType == QStringLiteral("bezier") ||
+           maskType == QStringLiteral("matte_file") || maskType == QStringLiteral("ai_sam");
+}
+
+bool isValidMaskOperation(const QString &operation)
+{
+    return operation == QStringLiteral("write_on_clear") || operation == QStringLiteral("add") || operation == QStringLiteral("subtract") ||
+           operation == QStringLiteral("intersect");
+}
+
+bool extractSpeedPercent(const QJsonObject &params, double *speedPercentOut, QString *errorOut)
+{
+    if (params.contains(QStringLiteral("speed_percent"))) {
+        const QJsonValue v = params.value(QStringLiteral("speed_percent"));
+        if (!v.isDouble()) {
+            if (errorOut != nullptr) {
+                *errorOut = QStringLiteral("set_clip_speed params.speed_percent must be numeric");
+            }
+            return false;
+        }
+        const double sp = v.toDouble();
+        if (!std::isfinite(sp) || std::abs(sp) < 1.0 || std::abs(sp) > 10000.0) {
+            if (errorOut != nullptr) {
+                *errorOut = QStringLiteral("set_clip_speed speed_percent (%1) must have magnitude within [1.0, 10000.0]").arg(sp);
+            }
+            return false;
+        }
+        if (speedPercentOut != nullptr) {
+            *speedPercentOut = sp;
+        }
+        return true;
+    }
+
+    if (params.contains(QStringLiteral("speed"))) {
+        const QJsonValue v = params.value(QStringLiteral("speed"));
+        if (!v.isDouble()) {
+            if (errorOut != nullptr) {
+                *errorOut = QStringLiteral("set_clip_speed params.speed must be numeric");
+            }
+            return false;
+        }
+        const double ratio = v.toDouble();
+        const double sp = ratio * 100.0;
+        if (!std::isfinite(sp) || std::abs(sp) < 1.0 || std::abs(sp) > 10000.0) {
+            if (errorOut != nullptr) {
+                *errorOut = QStringLiteral("set_clip_speed speed ratio (%1) out of valid range").arg(ratio);
+            }
+            return false;
+        }
+        if (speedPercentOut != nullptr) {
+            *speedPercentOut = sp;
+        }
+        return true;
+    }
+
+    if (errorOut != nullptr) {
+        *errorOut = QStringLiteral("set_clip_speed requires params.speed_percent or params.speed");
+    }
+    return false;
+}
+
+QString synthesizeRotoscopingSplineJson(const QJsonObject &params)
+{
+    if (params.contains(QStringLiteral("splines_json"))) {
+        const QJsonValue sj = params.value(QStringLiteral("splines_json"));
+        if (sj.isString()) {
+            const QString s = sj.toString().trimmed();
+            if (!s.isEmpty()) {
+                return s;
+            }
+        } else if (sj.isObject()) {
+            return QString::fromUtf8(QJsonDocument(sj.toObject()).toJson(QJsonDocument::Compact));
+        } else if (sj.isArray()) {
+            QJsonObject wrapped;
+            wrapped.insert(QStringLiteral("0"), sj.toArray());
+            return QString::fromUtf8(QJsonDocument(wrapped).toJson(QJsonDocument::Compact));
+        }
+    }
+
+    const QJsonArray keyframes = params.value(QStringLiteral("keyframes")).toArray();
+    if (keyframes.isEmpty()) {
+        return {};
+    }
+
+    QJsonObject splineObj;
+    for (const QJsonValue &kfVal : keyframes) {
+        const QJsonObject kf = kfVal.toObject();
+        const int frame = qMax(0, kf.value(QStringLiteral("frame")).toInt(0));
+        const QJsonArray rawPoints = kf.value(QStringLiteral("points")).toArray();
+        QJsonArray bpoints;
+        for (const QJsonValue &ptVal : rawPoints) {
+            if (ptVal.isArray()) {
+                const QJsonArray arr = ptVal.toArray();
+                if (arr.size() == 3 && arr.at(0).isArray() && arr.at(1).isArray() && arr.at(2).isArray()) {
+                    bpoints.append(arr);
+                } else if (arr.size() >= 2 && arr.at(0).isDouble() && arr.at(1).isDouble()) {
+                    QJsonArray xy;
+                    xy.append(arr.at(0).toDouble());
+                    xy.append(arr.at(1).toDouble());
+                    QJsonArray bp;
+                    bp.append(xy);
+                    bp.append(xy);
+                    bp.append(xy);
+                    bpoints.append(bp);
+                }
+            } else if (ptVal.isObject()) {
+                const QJsonObject po = ptVal.toObject();
+                const double x = po.value(QStringLiteral("x")).toDouble(0.5);
+                const double y = po.value(QStringLiteral("y")).toDouble(0.5);
+                QJsonArray h1;
+                h1.append(po.value(QStringLiteral("h1x")).toDouble(x));
+                h1.append(po.value(QStringLiteral("h1y")).toDouble(y));
+                QJsonArray p;
+                p.append(x);
+                p.append(y);
+                QJsonArray h2;
+                h2.append(po.value(QStringLiteral("h2x")).toDouble(x));
+                h2.append(po.value(QStringLiteral("h2y")).toDouble(y));
+                QJsonArray bp;
+                bp.append(h1);
+                bp.append(p);
+                bp.append(h2);
+                bpoints.append(bp);
+            }
+        }
+        if (!bpoints.isEmpty()) {
+            splineObj.insert(QString::number(frame), bpoints);
+        }
+    }
+    if (splineObj.isEmpty()) {
+        return {};
+    }
+    return QString::fromUtf8(QJsonDocument(splineObj).toJson(QJsonDocument::Compact));
+}
+
+QString buildLowerThirdTitleXml(const QString &speakerName, const QString &subtitle, const QString &templateName, const QString &position, int width,
+                                int height, int durationFrames, const QJsonObject &style)
+{
+    const int safeW = qMax(320, width);
+    const int safeH = qMax(180, height);
+    const int safeDur = qMax(1, durationFrames);
+
+    const int boxW = qRound(safeW * 0.42);
+    const int boxH = subtitle.trimmed().isEmpty() ? qRound(safeH * 0.085) : qRound(safeH * 0.125);
+    const int marginX = qRound(safeW * 0.05);
+    const int marginY = qRound(safeH * 0.08);
+
+    int posX = marginX;
+    int posY = safeH - marginY - boxH;
+    const QString normPos = position.trimmed().toLower();
+    if (normPos == QStringLiteral("bottom_center")) {
+        posX = (safeW - boxW) / 2;
+        posY = safeH - marginY - boxH;
+    } else if (normPos == QStringLiteral("bottom_right")) {
+        posX = safeW - marginX - boxW;
+        posY = safeH - marginY - boxH;
+    } else if (normPos == QStringLiteral("top_left")) {
+        posX = marginX;
+        posY = marginY;
+    } else if (normPos == QStringLiteral("top_center")) {
+        posX = (safeW - boxW) / 2;
+        posY = marginY;
+    } else if (normPos == QStringLiteral("top_right")) {
+        posX = safeW - marginX - boxW;
+        posY = marginY;
+    }
+
+    const QString accentColor = style.value(QStringLiteral("accent_color")).toString(
+        templateName == QStringLiteral("broadcast_bar") ? QStringLiteral("231,76,60,255") : QStringLiteral("61,174,233,255"));
+    const QString bgColor = style.value(QStringLiteral("bg_color")).toString(
+        templateName == QStringLiteral("minimal") ? QStringLiteral("15,23,42,165") : QStringLiteral("15,23,42,220"));
+    const QString textColor = style.value(QStringLiteral("text_color")).toString(QStringLiteral("255,255,255,255"));
+    const QString subColor = style.value(QStringLiteral("subtitle_color")).toString(QStringLiteral("203,213,225,255"));
+    const QString fontFamily = style.value(QStringLiteral("font")).toString(QStringLiteral("Sans Serif"));
+
+    QString xml;
+    QXmlStreamWriter w(&xml);
+    w.setAutoFormatting(false);
+    w.writeStartElement(QStringLiteral("kdenlivetitle"));
+    w.writeAttribute(QStringLiteral("width"), QString::number(safeW));
+    w.writeAttribute(QStringLiteral("height"), QString::number(safeH));
+    w.writeAttribute(QStringLiteral("duration"), QString::number(safeDur));
+    w.writeAttribute(QStringLiteral("out"), QString::number(safeDur - 1));
+    w.writeAttribute(QStringLiteral("LC_NUMERIC"), QStringLiteral("C"));
+
+    // Backdrop rectangle
+    w.writeStartElement(QStringLiteral("item"));
+    w.writeAttribute(QStringLiteral("type"), QStringLiteral("QGraphicsRectItem"));
+    w.writeAttribute(QStringLiteral("z-index"), QStringLiteral("0"));
+    w.writeStartElement(QStringLiteral("position"));
+    w.writeAttribute(QStringLiteral("x"), QString::number(posX));
+    w.writeAttribute(QStringLiteral("y"), QString::number(posY));
+    w.writeEndElement();
+    w.writeStartElement(QStringLiteral("content"));
+    w.writeAttribute(QStringLiteral("rect"), QStringLiteral("0,0,%1,%2").arg(boxW).arg(boxH));
+    w.writeAttribute(QStringLiteral("brushcolor"), bgColor);
+    w.writeAttribute(QStringLiteral("pencolor"), QStringLiteral("0,0,0,0"));
+    w.writeAttribute(QStringLiteral("penwidth"), QStringLiteral("0"));
+    w.writeEndElement();
+    w.writeEndElement();
+
+    // Accent strip
+    const int accentW = qMax(6, qRound(safeW * 0.005));
+    w.writeStartElement(QStringLiteral("item"));
+    w.writeAttribute(QStringLiteral("type"), QStringLiteral("QGraphicsRectItem"));
+    w.writeAttribute(QStringLiteral("z-index"), QStringLiteral("1"));
+    w.writeStartElement(QStringLiteral("position"));
+    w.writeAttribute(QStringLiteral("x"), QString::number(posX));
+    w.writeAttribute(QStringLiteral("y"), QString::number(posY));
+    w.writeEndElement();
+    w.writeStartElement(QStringLiteral("content"));
+    w.writeAttribute(QStringLiteral("rect"), QStringLiteral("0,0,%1,%2").arg(accentW).arg(boxH));
+    w.writeAttribute(QStringLiteral("brushcolor"), accentColor);
+    w.writeAttribute(QStringLiteral("pencolor"), QStringLiteral("0,0,0,0"));
+    w.writeAttribute(QStringLiteral("penwidth"), QStringLiteral("0"));
+    w.writeEndElement();
+    w.writeEndElement();
+
+    // Speaker name text item
+    const int padX = accentW + qRound(safeW * 0.015);
+    const int nameSize = qMax(18, qRound(safeH * 0.038));
+    w.writeStartElement(QStringLiteral("item"));
+    w.writeAttribute(QStringLiteral("type"), QStringLiteral("QGraphicsTextItem"));
+    w.writeAttribute(QStringLiteral("z-index"), QStringLiteral("2"));
+    w.writeStartElement(QStringLiteral("position"));
+    w.writeAttribute(QStringLiteral("x"), QString::number(posX + padX));
+    w.writeAttribute(QStringLiteral("y"), QString::number(posY + qRound(boxH * 0.14)));
+    w.writeEndElement();
+    w.writeStartElement(QStringLiteral("content"));
+    w.writeAttribute(QStringLiteral("font"), fontFamily);
+    w.writeAttribute(QStringLiteral("font-pixel-size"), QString::number(nameSize));
+    w.writeAttribute(QStringLiteral("font-weight"), QStringLiteral("75"));
+    w.writeAttribute(QStringLiteral("font-color"), textColor);
+    w.writeCharacters(speakerName);
+    w.writeEndElement();
+    w.writeEndElement();
+
+    // Optional subtitle text item
+    if (!subtitle.trimmed().isEmpty()) {
+        const int subSize = qMax(14, qRound(safeH * 0.025));
+        w.writeStartElement(QStringLiteral("item"));
+        w.writeAttribute(QStringLiteral("type"), QStringLiteral("QGraphicsTextItem"));
+        w.writeAttribute(QStringLiteral("z-index"), QStringLiteral("3"));
+        w.writeStartElement(QStringLiteral("position"));
+        w.writeAttribute(QStringLiteral("x"), QString::number(posX + padX));
+        w.writeAttribute(QStringLiteral("y"), QString::number(posY + qRound(boxH * 0.56)));
+        w.writeEndElement();
+        w.writeStartElement(QStringLiteral("content"));
+        w.writeAttribute(QStringLiteral("font"), fontFamily);
+        w.writeAttribute(QStringLiteral("font-pixel-size"), QString::number(subSize));
+        w.writeAttribute(QStringLiteral("font-weight"), QStringLiteral("50"));
+        w.writeAttribute(QStringLiteral("font-color"), subColor);
+        w.writeCharacters(subtitle);
+        w.writeEndElement();
+        w.writeEndElement();
+    }
+
+    w.writeEndElement(); // </kdenlivetitle>
+    return xml;
+}
+
 } // namespace
 
 // ============================================================================
@@ -417,8 +697,26 @@ TimelineOperationResult InMemoryTimelineBackend::executeOperation(const Timeline
     if (op.type == QStringLiteral("add_caption")) {
         return handleAddCaption(op, sequenceId);
     }
+    if (op.type == QStringLiteral("update_caption")) {
+        return handleUpdateCaption(op, sequenceId);
+    }
+    if (op.type == QStringLiteral("delete_caption")) {
+        return handleDeleteCaption(op);
+    }
     if (op.type == QStringLiteral("add_marker")) {
         return handleAddMarker(op, sequenceId);
+    }
+    if (op.type == QStringLiteral("apply_mask")) {
+        return handleApplyMask(op, sequenceId);
+    }
+    if (op.type == QStringLiteral("add_transition")) {
+        return handleAddTransition(op, sequenceId);
+    }
+    if (op.type == QStringLiteral("add_lower_third")) {
+        return handleAddLowerThird(op, sequenceId);
+    }
+    if (op.type == QStringLiteral("set_clip_speed")) {
+        return handleSetClipSpeed(op);
     }
     if (op.type == QStringLiteral("export_sequence")) {
         return handleExportSequence(op, sequenceId);
@@ -1026,13 +1324,15 @@ TimelineOperationResult InMemoryTimelineBackend::handleAddEffect(const TimelineO
     res.opId = op.opId;
     ensureSequenceExists(sequenceId);
 
-    const QStringList idKeys =
-        asAudioFilter ? QStringList{QStringLiteral("filter_id"), QStringLiteral("filter"), QStringLiteral("effect_id"), QStringLiteral("mlt_service")}
-                      : QStringList{QStringLiteral("effect_id"), QStringLiteral("effect"), QStringLiteral("mlt_service")};
+    const QStringList idKeys = asAudioFilter
+                                   ? QStringList{QStringLiteral("filter_id"), QStringLiteral("filter"), QStringLiteral("effect_service"),
+                                                 QStringLiteral("mlt_service"), QStringLiteral("service"), QStringLiteral("effect_id"), QStringLiteral("effect")}
+                                   : QStringList{QStringLiteral("effect_id"), QStringLiteral("effect_service"), QStringLiteral("mlt_service"),
+                                                 QStringLiteral("service"), QStringLiteral("effect"), QStringLiteral("filter_id"), QStringLiteral("filter")};
     const QString effectId = firstNonEmptyStringParam(op.params, idKeys);
     if (effectId.isEmpty()) {
-        res.message = asAudioFilter ? QStringLiteral("add_audio_filter requires params.filter_id/filter/mlt_service")
-                                    : QStringLiteral("add_effect requires params.effect_id/effect/mlt_service");
+        res.message = asAudioFilter ? QStringLiteral("add_audio_filter requires params.filter_id/filter/effect_service/mlt_service")
+                                    : QStringLiteral("add_effect requires params.effect_id/effect/effect_service/mlt_service");
         return res;
     }
 
@@ -1371,6 +1671,551 @@ TimelineOperationResult InMemoryTimelineBackend::handleAddMarker(const TimelineO
     res.message = QStringLiteral("Added marker '%1' at frame %2").arg(marker.label).arg(frame);
     res.metadata.insert(QStringLiteral("frame"), frame);
     res.metadata.insert(QStringLiteral("category"), marker.category);
+    return res;
+}
+
+TimelineOperationResult InMemoryTimelineBackend::handleUpdateCaption(const TimelineOperation &op, const QString &sequenceId)
+{
+    TimelineOperationResult res;
+    res.opId = op.opId;
+    ensureSequenceExists(sequenceId);
+
+    QString captionId = firstNonEmptyStringParam(op.params, {QStringLiteral("caption_id"), QStringLiteral("subtitle_id")});
+    if (captionId.isEmpty()) {
+        captionId = op.clipId.trimmed();
+    }
+
+    if (captionId.isEmpty() && (op.params.contains(QStringLiteral("original_start_frame")) || op.params.contains(QStringLiteral("start_frame")))) {
+        int lookupStart = -1;
+        const QString key = op.params.contains(QStringLiteral("original_start_frame")) ? QStringLiteral("original_start_frame") : QStringLiteral("start_frame");
+        if (jsonValueIsStrictInt(op.params.value(key), &lookupStart)) {
+            for (const TimelineCaption &cap : std::as_const(m_state.captions)) {
+                if (cap.frameRange.timelineStart == lookupStart) {
+                    captionId = cap.captionId;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (captionId.isEmpty() || !m_state.captions.contains(captionId)) {
+        res.message = QStringLiteral("Caption '%1' does not exist").arg(captionId);
+        return res;
+    }
+
+    TimelineCaption &cap = m_state.captions[captionId];
+    if (!cap.trackId.isEmpty() && m_state.tracks.contains(cap.trackId) && m_state.tracks.value(cap.trackId).locked) {
+        res.message = QStringLiteral("Caption track '%1' is locked").arg(cap.trackId);
+        return res;
+    }
+
+    bool updatedAny = false;
+    if (op.params.contains(QStringLiteral("text"))) {
+        if (!op.params.value(QStringLiteral("text")).isString()) {
+            res.message = QStringLiteral("update_caption params.text must be a string");
+            return res;
+        }
+        const QString newText = op.params.value(QStringLiteral("text")).toString().trimmed();
+        if (newText.isEmpty()) {
+            res.message = QStringLiteral("update_caption params.text must be non-empty");
+            return res;
+        }
+        cap.text = newText;
+        updatedAny = true;
+    }
+
+    if (op.params.contains(QStringLiteral("speaker"))) {
+        cap.speaker = op.params.value(QStringLiteral("speaker")).toString();
+        updatedAny = true;
+    }
+    if (op.params.contains(QStringLiteral("language"))) {
+        cap.language = op.params.value(QStringLiteral("language")).toString();
+        updatedAny = true;
+    }
+    if (op.params.contains(QStringLiteral("style")) && op.params.value(QStringLiteral("style")).isObject()) {
+        const QJsonObject styleUpdates = op.params.value(QStringLiteral("style")).toObject();
+        for (auto it = styleUpdates.constBegin(); it != styleUpdates.constEnd(); ++it) {
+            cap.style.insert(it.key(), it.value());
+        }
+        updatedAny = true;
+    }
+
+    int newStart = cap.frameRange.timelineStart;
+    bool timingRequested = false;
+    if (op.params.contains(QStringLiteral("start_frame"))) {
+        if (!jsonValueIsStrictInt(op.params.value(QStringLiteral("start_frame")), &newStart) || newStart < 0) {
+            res.message = QStringLiteral("update_caption params.start_frame must be a non-negative integer");
+            return res;
+        }
+        timingRequested = true;
+    } else if (op.frameRange.timelineStart > 0 || op.frameRange.outFrame > op.frameRange.inFrame) {
+        newStart = op.frameRange.timelineStart;
+        timingRequested = true;
+    }
+
+    int newDuration = qMax(1, cap.frameRange.outFrame - cap.frameRange.inFrame);
+    if (op.params.contains(QStringLiteral("end_frame"))) {
+        int endFrame = 0;
+        if (!jsonValueIsStrictInt(op.params.value(QStringLiteral("end_frame")), &endFrame) || endFrame <= newStart) {
+            res.message = QStringLiteral("update_caption params.end_frame must be an integer > start_frame");
+            return res;
+        }
+        newDuration = endFrame - newStart;
+        timingRequested = true;
+    } else if (op.params.contains(QStringLiteral("duration_frames"))) {
+        if (!jsonValueIsStrictInt(op.params.value(QStringLiteral("duration_frames")), &newDuration) || newDuration <= 0) {
+            res.message = QStringLiteral("update_caption params.duration_frames must be a positive integer");
+            return res;
+        }
+        timingRequested = true;
+    } else if (op.frameRange.outFrame > op.frameRange.inFrame) {
+        newDuration = op.frameRange.outFrame - op.frameRange.inFrame;
+        timingRequested = true;
+    }
+
+    if (timingRequested) {
+        cap.frameRange.timelineStart = newStart;
+        cap.frameRange.inFrame = 0;
+        cap.frameRange.outFrame = newDuration;
+        updatedAny = true;
+    }
+
+    if (!updatedAny) {
+        res.message = QStringLiteral("update_caption requires at least one updated field (text, timing, speaker, language, or style)");
+        return res;
+    }
+
+    res.applied = true;
+    res.createdId = captionId;
+    res.message = QStringLiteral("Updated caption '%1'").arg(captionId);
+    res.metadata.insert(QStringLiteral("text"), cap.text);
+    res.metadata.insert(QStringLiteral("timeline_start"), cap.frameRange.timelineStart);
+    res.metadata.insert(QStringLiteral("duration_frames"), cap.frameRange.outFrame - cap.frameRange.inFrame);
+    return res;
+}
+
+TimelineOperationResult InMemoryTimelineBackend::handleDeleteCaption(const TimelineOperation &op)
+{
+    TimelineOperationResult res;
+    res.opId = op.opId;
+
+    QString captionId = firstNonEmptyStringParam(op.params, {QStringLiteral("caption_id"), QStringLiteral("subtitle_id")});
+    if (captionId.isEmpty()) {
+        captionId = op.clipId.trimmed();
+    }
+
+    if (captionId.isEmpty() && op.params.contains(QStringLiteral("start_frame"))) {
+        int lookupStart = -1;
+        if (jsonValueIsStrictInt(op.params.value(QStringLiteral("start_frame")), &lookupStart)) {
+            for (const TimelineCaption &cap : std::as_const(m_state.captions)) {
+                if (cap.frameRange.timelineStart == lookupStart) {
+                    captionId = cap.captionId;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (captionId.isEmpty() || !m_state.captions.contains(captionId)) {
+        res.message = QStringLiteral("Caption '%1' does not exist").arg(captionId);
+        return res;
+    }
+
+    const TimelineCaption existing = m_state.captions.value(captionId);
+    if (!existing.trackId.isEmpty() && m_state.tracks.contains(existing.trackId) && m_state.tracks.value(existing.trackId).locked) {
+        res.message = QStringLiteral("Caption track '%1' is locked").arg(existing.trackId);
+        return res;
+    }
+
+    m_state.captions.remove(captionId);
+
+    res.applied = true;
+    res.createdId = captionId;
+    res.message = QStringLiteral("Deleted caption '%1'").arg(captionId);
+    res.metadata.insert(QStringLiteral("deleted_caption_id"), captionId);
+    return res;
+}
+
+TimelineOperationResult InMemoryTimelineBackend::handleApplyMask(const TimelineOperation &op, const QString &sequenceId)
+{
+    TimelineOperationResult res;
+    res.opId = op.opId;
+    ensureSequenceExists(sequenceId);
+
+    const QString clipId = op.clipId.trimmed();
+    const QString trackId = op.trackId.trimmed();
+    if (clipId.isEmpty() && trackId.isEmpty()) {
+        res.message = QStringLiteral("apply_mask requires non-empty clip_id or track_id");
+        return res;
+    }
+    if (!clipId.isEmpty()) {
+        if (!m_state.clips.contains(clipId)) {
+            res.message = QStringLiteral("Clip '%1' does not exist").arg(clipId);
+            return res;
+        }
+        const QString clipTrackId = m_state.clips.value(clipId).trackId;
+        if (m_state.tracks.contains(clipTrackId) && m_state.tracks.value(clipTrackId).locked) {
+            res.message = QStringLiteral("Track '%1' is locked").arg(clipTrackId);
+            return res;
+        }
+    } else if (!m_state.tracks.contains(trackId)) {
+        res.message = QStringLiteral("Track '%1' does not exist").arg(trackId);
+        return res;
+    } else if (m_state.tracks.value(trackId).locked) {
+        res.message = QStringLiteral("Track '%1' is locked").arg(trackId);
+        return res;
+    }
+
+    const QString maskType = op.params.value(QStringLiteral("mask_type")).toString(QStringLiteral("spline")).trimmed().toLower();
+    if (!isValidMaskType(maskType)) {
+        res.message = QStringLiteral("Invalid mask_type '%1'").arg(maskType);
+        return res;
+    }
+
+    const QString operation = op.params.value(QStringLiteral("operation")).toString(QStringLiteral("write_on_clear")).trimmed().toLower();
+    if (!isValidMaskOperation(operation)) {
+        res.message = QStringLiteral("Invalid mask operation '%1'").arg(operation);
+        return res;
+    }
+
+    const double feather = op.params.value(QStringLiteral("feather")).toDouble(0.0);
+    const double expand = op.params.value(QStringLiteral("expand")).toDouble(0.0);
+    if (!std::isfinite(feather) || feather < 0.0 || feather > 100.0) {
+        res.message = QStringLiteral("apply_mask feather (%1) must be within [0.0, 100.0]").arg(feather);
+        return res;
+    }
+    if (!std::isfinite(expand) || expand < -50.0 || expand > 50.0) {
+        res.message = QStringLiteral("apply_mask expand (%1) must be within [-50.0, 50.0]").arg(expand);
+        return res;
+    }
+    const bool invert = op.params.value(QStringLiteral("invert")).toBool(false);
+
+    const QString mattePath = op.params.value(QStringLiteral("matte_path")).toString().trimmed();
+    if (mattePath.contains(QChar(u'\0'))) {
+        res.message = QStringLiteral("apply_mask matte_path contains invalid null byte");
+        return res;
+    }
+    const QString splinesJson = synthesizeRotoscopingSplineJson(op.params);
+    const QJsonArray keyframes = op.params.value(QStringLiteral("keyframes")).toArray();
+
+    const QString requestedService =
+        firstNonEmptyStringParam(op.params, {QStringLiteral("mlt_service"), QStringLiteral("filter_id"), QStringLiteral("effect_service")});
+    if (maskType == QStringLiteral("matte_file") && mattePath.isEmpty()) {
+        res.message = QStringLiteral("apply_mask with mask_type='matte_file' requires non-empty params.matte_path");
+        return res;
+    }
+    if (mattePath.isEmpty() && splinesJson.isEmpty() && keyframes.isEmpty() && requestedService.isEmpty()) {
+        res.message = QStringLiteral("apply_mask requires splines_json, matte_path, keyframes, or explicit alphaops service");
+        return res;
+    }
+
+    QString mltService = QStringLiteral("rotoscoping");
+    if (!mattePath.isEmpty() || maskType == QStringLiteral("matte_file")) {
+        mltService = QStringLiteral("shape");
+    } else if (requestedService == QStringLiteral("alphaops") || requestedService == QStringLiteral("frei0r.alpha0ps")) {
+        mltService = QStringLiteral("frei0r.alpha0ps");
+    } else if (!requestedService.isEmpty()) {
+        mltService = requestedService;
+    }
+
+    QString maskId = op.params.value(QStringLiteral("mask_id")).toString().trimmed();
+    if (maskId.isEmpty()) {
+        maskId = QStringLiteral("mask-%1").arg(m_state.nextMaskId++);
+    }
+    const bool allowReplace = op.params.value(QStringLiteral("replace")).toBool(false);
+    if (m_state.masks.contains(maskId) && !allowReplace) {
+        res.message = QStringLiteral("Mask '%1' already exists").arg(maskId);
+        return res;
+    }
+
+    EffectInstance fx;
+    fx.instanceId = QStringLiteral("maskfx-%1").arg(m_state.nextEffectId++);
+    fx.effectId = mltService;
+    fx.isAudioFilter = false;
+    fx.enabled = op.params.value(QStringLiteral("enabled")).toBool(true);
+    fx.parameters.insert(QStringLiteral("mask_id"), maskId);
+    fx.parameters.insert(QStringLiteral("mask_type"), maskType);
+    fx.parameters.insert(QStringLiteral("feather"), feather);
+    fx.parameters.insert(QStringLiteral("expand"), expand);
+    fx.parameters.insert(QStringLiteral("invert"), invert);
+    fx.parameters.insert(QStringLiteral("operation"), operation);
+    if (!splinesJson.isEmpty()) {
+        fx.parameters.insert(QStringLiteral("spline"), splinesJson);
+    }
+    if (!mattePath.isEmpty()) {
+        fx.parameters.insert(QStringLiteral("resource"), mattePath);
+    }
+
+    if (!clipId.isEmpty()) {
+        m_state.clips[clipId].effects.append(fx);
+    } else {
+        m_state.tracks[trackId].effects.append(fx);
+    }
+
+    TimelineMask mask;
+    mask.maskId = maskId;
+    mask.sequenceId = sequenceId;
+    mask.clipId = clipId;
+    mask.trackId = trackId;
+    mask.maskType = maskType;
+    mask.mltService = mltService;
+    mask.splinesJson = splinesJson;
+    mask.mattePath = mattePath;
+    mask.feather = feather;
+    mask.expand = expand;
+    mask.invert = invert;
+    mask.operation = operation;
+    mask.keyframes = keyframes;
+    mask.effectInstanceId = fx.instanceId;
+
+    m_state.masks.insert(maskId, mask);
+
+    res.applied = true;
+    res.createdId = maskId;
+    res.message = QStringLiteral("Applied %1 mask '%2' via MLT service '%3'").arg(maskType, maskId, mltService);
+    res.metadata.insert(QStringLiteral("mask_type"), maskType);
+    res.metadata.insert(QStringLiteral("mlt_service"), mltService);
+    res.metadata.insert(QStringLiteral("effect_instance_id"), fx.instanceId);
+    res.metadata.insert(QStringLiteral("feather"), feather);
+    res.metadata.insert(QStringLiteral("expand"), expand);
+    res.metadata.insert(QStringLiteral("invert"), invert);
+    res.metadata.insert(QStringLiteral("operation"), operation);
+    return res;
+}
+
+TimelineOperationResult InMemoryTimelineBackend::handleAddTransition(const TimelineOperation &op, const QString &sequenceId)
+{
+    TimelineOperationResult res;
+    res.opId = op.opId;
+    ensureSequenceExists(sequenceId);
+
+    const QString transitionId =
+        firstNonEmptyStringParam(op.params, {QStringLiteral("transition_id"), QStringLiteral("transition_type"), QStringLiteral("mlt_service"),
+                                             QStringLiteral("service")});
+    if (transitionId.isEmpty()) {
+        res.message = QStringLiteral("add_transition requires params.transition_id");
+        return res;
+    }
+
+    QString bTrackId = extractTrackParamString(op.params, QStringLiteral("b_track"));
+    if (bTrackId.isEmpty()) {
+        bTrackId = op.trackId.trimmed();
+    }
+    const QString aTrackId = extractTrackParamString(op.params, QStringLiteral("a_track"));
+
+    if (bTrackId.isEmpty() || !m_state.tracks.contains(bTrackId)) {
+        res.message = QStringLiteral("Transition b_track '%1' does not exist").arg(bTrackId);
+        return res;
+    }
+    if (m_state.tracks.value(bTrackId).locked) {
+        res.message = QStringLiteral("Transition b_track '%1' is locked").arg(bTrackId);
+        return res;
+    }
+    if (!aTrackId.isEmpty() && aTrackId != QStringLiteral("0") && aTrackId.compare(QStringLiteral("black"), Qt::CaseInsensitive) != 0) {
+        if (!m_state.tracks.contains(aTrackId)) {
+            res.message = QStringLiteral("Transition a_track '%1' does not exist").arg(aTrackId);
+            return res;
+        }
+    }
+
+    int inFrame = op.frameRange.timelineStart;
+    int outFrame = 0;
+    if (op.params.contains(QStringLiteral("in_frame"))) {
+        if (!jsonValueIsStrictInt(op.params.value(QStringLiteral("in_frame")), &inFrame) || inFrame < 0) {
+            res.message = QStringLiteral("add_transition params.in_frame must be a non-negative integer");
+            return res;
+        }
+    } else if (op.frameRange.inFrame > 0 && op.frameRange.timelineStart == 0) {
+        inFrame = op.frameRange.inFrame;
+    }
+
+    if (op.params.contains(QStringLiteral("out_frame"))) {
+        if (!jsonValueIsStrictInt(op.params.value(QStringLiteral("out_frame")), &outFrame) || outFrame <= inFrame) {
+            res.message = QStringLiteral("add_transition params.out_frame must be an integer > in_frame");
+            return res;
+        }
+    } else if (op.params.contains(QStringLiteral("duration_frames"))) {
+        int dur = 0;
+        if (!jsonValueIsStrictInt(op.params.value(QStringLiteral("duration_frames")), &dur) || dur <= 0) {
+            res.message = QStringLiteral("add_transition params.duration_frames must be a positive integer");
+            return res;
+        }
+        outFrame = inFrame + dur;
+    } else if (op.frameRange.outFrame > op.frameRange.inFrame) {
+        outFrame = inFrame + (op.frameRange.outFrame - op.frameRange.inFrame);
+    } else {
+        res.message = QStringLiteral("add_transition requires positive duration (params.in_frame/out_frame, duration_frames, or frame_range)");
+        return res;
+    }
+
+    QString instanceId = op.params.value(QStringLiteral("composition_id")).toString().trimmed();
+    if (instanceId.isEmpty()) {
+        instanceId = QStringLiteral("tr-%1").arg(m_state.nextTransitionId++);
+    }
+    if (m_state.transitions.contains(instanceId)) {
+        res.message = QStringLiteral("Transition '%1' already exists").arg(instanceId);
+        return res;
+    }
+
+    TimelineTransition tr;
+    tr.transitionInstanceId = instanceId;
+    tr.transitionId = transitionId;
+    tr.sequenceId = sequenceId;
+    tr.aTrackId = aTrackId;
+    tr.bTrackId = bTrackId;
+    tr.inFrame = inFrame;
+    tr.outFrame = outFrame;
+    tr.properties = op.params.value(QStringLiteral("properties")).toObject();
+
+    m_state.transitions.insert(instanceId, tr);
+
+    res.applied = true;
+    res.createdId = instanceId;
+    res.message = QStringLiteral("Added transition '%1' (%2) on track '%3' [%4, %5)").arg(transitionId, instanceId, bTrackId).arg(inFrame).arg(outFrame);
+    res.metadata.insert(QStringLiteral("transition_id"), transitionId);
+    res.metadata.insert(QStringLiteral("a_track"), aTrackId);
+    res.metadata.insert(QStringLiteral("b_track"), bTrackId);
+    res.metadata.insert(QStringLiteral("in_frame"), inFrame);
+    res.metadata.insert(QStringLiteral("out_frame"), outFrame);
+    res.metadata.insert(QStringLiteral("duration_frames"), tr.duration());
+    return res;
+}
+
+TimelineOperationResult InMemoryTimelineBackend::handleAddLowerThird(const TimelineOperation &op, const QString &sequenceId)
+{
+    TimelineOperationResult res;
+    res.opId = op.opId;
+    ensureSequenceExists(sequenceId);
+
+    const QString speakerName = firstNonEmptyStringParam(op.params, {QStringLiteral("speaker_name"), QStringLiteral("title"), QStringLiteral("name")});
+    if (speakerName.isEmpty()) {
+        res.message = QStringLiteral("add_lower_third requires non-empty params.speaker_name");
+        return res;
+    }
+
+    const QString trackId = op.trackId.trimmed();
+    if (!trackId.isEmpty()) {
+        if (!m_state.tracks.contains(trackId)) {
+            res.message = QStringLiteral("Lower-third target track '%1' does not exist").arg(trackId);
+            return res;
+        }
+        if (m_state.tracks.value(trackId).locked) {
+            res.message = QStringLiteral("Lower-third target track '%1' is locked").arg(trackId);
+            return res;
+        }
+    }
+
+    FrameRange fr = op.frameRange;
+    if (fr.outFrame == fr.inFrame) {
+        const int dur = op.params.contains(QStringLiteral("duration_frames")) ? op.params.value(QStringLiteral("duration_frames")).toInt(0) : 125;
+        if (dur <= 0) {
+            res.message = QStringLiteral("add_lower_third requires positive duration");
+            return res;
+        }
+        fr.outFrame = fr.inFrame + dur;
+    }
+
+    QString ltId = firstNonEmptyStringParam(op.params, {QStringLiteral("lower_third_id")});
+    if (ltId.isEmpty()) {
+        ltId = op.clipId.trimmed();
+    }
+    if (ltId.isEmpty()) {
+        ltId = QStringLiteral("lt-%1").arg(m_state.nextLowerThirdId++);
+    }
+    if (m_state.lowerThirds.contains(ltId)) {
+        res.message = QStringLiteral("Lower third '%1' already exists").arg(ltId);
+        return res;
+    }
+
+    const QString subtitle = op.params.value(QStringLiteral("subtitle")).toString().trimmed();
+    const QString templateName = op.params.value(QStringLiteral("template")).toString(QStringLiteral("modern_clean")).trimmed();
+    QString position = QStringLiteral("bottom_left");
+    if (op.params.value(QStringLiteral("position")).isString()) {
+        const QString p = op.params.value(QStringLiteral("position")).toString().trimmed();
+        if (!p.isEmpty()) {
+            position = p;
+        }
+    } else if (op.params.value(QStringLiteral("position")).isObject()) {
+        position = QString::fromUtf8(QJsonDocument(op.params.value(QStringLiteral("position")).toObject()).toJson(QJsonDocument::Compact));
+    }
+    const QJsonObject style = op.params.value(QStringLiteral("style")).toObject();
+
+    const SequenceRecord seq = m_state.sequences.value(sequenceId);
+    const int durationFrames = qMax(1, fr.outFrame - fr.inFrame);
+    const QString titleXml = buildLowerThirdTitleXml(speakerName, subtitle, templateName, position, seq.width, seq.height, durationFrames, style);
+
+    TimelineLowerThird lt;
+    lt.lowerThirdId = ltId;
+    lt.sequenceId = sequenceId;
+    lt.trackId = trackId;
+    lt.clipId = op.clipId.trimmed().isEmpty() ? ltId : op.clipId.trimmed();
+    lt.frameRange = fr;
+    lt.speakerName = speakerName;
+    lt.subtitle = subtitle;
+    lt.templateName = templateName;
+    lt.position = position;
+    lt.titleXml = titleXml;
+    lt.style = style;
+
+    m_state.lowerThirds.insert(ltId, lt);
+
+    res.applied = true;
+    res.createdId = ltId;
+    res.message = QStringLiteral("Added lower third '%1' for '%2'").arg(ltId, speakerName);
+    res.metadata.insert(QStringLiteral("speaker_name"), speakerName);
+    res.metadata.insert(QStringLiteral("subtitle"), subtitle);
+    res.metadata.insert(QStringLiteral("template"), templateName);
+    res.metadata.insert(QStringLiteral("position"), position);
+    res.metadata.insert(QStringLiteral("timeline_start"), fr.timelineStart);
+    res.metadata.insert(QStringLiteral("duration_frames"), durationFrames);
+    return res;
+}
+
+TimelineOperationResult InMemoryTimelineBackend::handleSetClipSpeed(const TimelineOperation &op)
+{
+    TimelineOperationResult res;
+    res.opId = op.opId;
+
+    const QString clipId = op.clipId.trimmed();
+    if (!m_state.clips.contains(clipId)) {
+        res.message = QStringLiteral("Clip '%1' does not exist").arg(clipId);
+        return res;
+    }
+
+    TimelineClip &clip = m_state.clips[clipId];
+    if (m_state.tracks.contains(clip.trackId) && m_state.tracks.value(clip.trackId).locked) {
+        res.message = QStringLiteral("Track '%1' is locked").arg(clip.trackId);
+        return res;
+    }
+
+    double newSpeedPercent = 100.0;
+    QString err;
+    if (!extractSpeedPercent(op.params, &newSpeedPercent, &err)) {
+        res.message = err;
+        return res;
+    }
+
+    const bool pitchCompensate = op.params.value(QStringLiteral("pitch_compensate")).toBool(true);
+    const bool changeDuration = op.params.value(QStringLiteral("change_duration")).toBool(true);
+
+    const double oldSpeedPercent = clip.speedPercent;
+    const int oldDuration = qMax(1, clip.duration());
+    clip.speedPercent = newSpeedPercent;
+    clip.pitchCompensate = pitchCompensate;
+
+    if (changeDuration) {
+        const double ratio = std::abs(oldSpeedPercent) / std::abs(newSpeedPercent);
+        const int newDuration = qMax(1, static_cast<int>(std::llround(static_cast<double>(oldDuration) * ratio)));
+        clip.frameRange.outFrame = clip.frameRange.inFrame + newDuration;
+    }
+
+    res.applied = true;
+    res.createdId = clipId;
+    res.message = QStringLiteral("Set clip '%1' speed to %2%").arg(clipId).arg(newSpeedPercent, 0, 'f', 2);
+    res.metadata.insert(QStringLiteral("previous_speed_percent"), oldSpeedPercent);
+    res.metadata.insert(QStringLiteral("speed_percent"), newSpeedPercent);
+    res.metadata.insert(QStringLiteral("pitch_compensate"), pitchCompensate);
+    res.metadata.insert(QStringLiteral("duration_frames"), clip.duration());
     return res;
 }
 
