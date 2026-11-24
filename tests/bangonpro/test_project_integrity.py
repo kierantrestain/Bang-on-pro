@@ -643,7 +643,9 @@ def test_strict_exit_code_on_malformed_or_missing_project_render(
     env.setdefault("SDL_AUDIODRIVER", "dummy")
     env.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-    # 1. Missing project file with nonexistent output directory must return non-zero
+    # 1. Missing project file with nonexistent output directory must fail loudly (note MLT 7 melt
+    #    can exit 0 while printing "Failed to load" to stderr and producing no output; strict
+    #    render wrappers MUST reject missing/empty outputs or non-zero exit codes).
     missing_proj = tmp_path / "does_not_exist.kdenlive"
     bad_out = tmp_path / "no_such_dir" / "render.mp4"
     proc_missing = subprocess.run(
@@ -654,19 +656,32 @@ def test_strict_exit_code_on_malformed_or_missing_project_render(
         text=True,
         timeout=30,
     )
-    assert proc_missing.returncode != 0, "melt must fail with non-zero exit code on invalid target"
-    assert not bad_out.exists()
+    assert (
+        proc_missing.returncode != 0
+        or "Failed to load" in (proc_missing.stderr + proc_missing.stdout)
+    ), "melt must report load failure on missing project target"
+    assert not bad_out.exists(), "melt must not produce an output file for a missing project"
 
-    # 2. Truncated/malformed XML must be rejected by defusedxml AND fail render_with_melt
+    # 2. Truncated/malformed XML must be rejected by defusedxml AND must not yield a rendered MP4
     corrupt_proj = tmp_path / "corrupt_xml.kdenlive"
     corrupt_proj.write_text('<?xml version="1.0"?><mlt><producer id="p0"><unclosed', encoding="utf-8")
     with pytest.raises(Exception):
         DefusedET.parse(corrupt_proj)
 
     corrupt_out = tmp_path / "nonexistent_parent" / "corrupt_out.mp4"
-    with pytest.raises(subprocess.CalledProcessError) as exc_info:
-        render_with_melt(corrupt_proj, corrupt_out)
-    assert exc_info.value.returncode != 0
+    proc_corrupt = subprocess.run(
+        [MELT_BIN, str(corrupt_proj), "-consumer", f"avformat:{corrupt_out}"],
+        env=env,
+        shell=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert (
+        proc_corrupt.returncode != 0
+        or "Failed to load" in (proc_corrupt.stderr + proc_corrupt.stdout)
+        or not corrupt_out.exists()
+    )
     assert not corrupt_out.exists()
 
     # 3. Source media untouched

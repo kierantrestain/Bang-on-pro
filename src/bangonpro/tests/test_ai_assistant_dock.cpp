@@ -140,6 +140,62 @@ private Q_SLOTS:
         QCOMPARE(emittedBatch.operations.size(), 1);
         QCOMPARE(emittedBatch.operations.first().opId, QStringLiteral("op-high"));
     }
+
+    void testV11StaleClarificationAndIsolatedPreview()
+    {
+        AiAssistantDock dock;
+        TimelineCommandBatch batch;
+        batch.requestId = QStringLiteral("req-v11-1");
+        batch.projectId = QStringLiteral("proj-1");
+        batch.sequenceId = QStringLiteral("seq-1");
+        batch.expectedRevision = 2;
+        batch.transactionLabel = QStringLiteral("Scoped Audio Cleanup");
+
+        TimelineOperation op;
+        op.opId = QStringLiteral("op-audio-1");
+        op.type = QStringLiteral("add_audio_filter");
+        op.confidence = 0.92;
+        batch.operations = {op};
+
+        dock.displayProposal(batch);
+        QVERIFY(!dock.isStaleProposalWarningVisible());
+
+        // Stale warning exposes Rebase & Regenerate signals explicitly
+        dock.showStaleProposalWarning(QStringLiteral("Manual edit advanced revision 2 -> 3"), true);
+        QVERIFY(dock.isStaleProposalWarningVisible());
+        QSignalSpy rebaseSpy(&dock, &AiAssistantDock::batchRebaseApproveRequested);
+        QSignalSpy regenSpy(&dock, &AiAssistantDock::regenerateProposalRequested);
+        auto *rebaseBtn = dock.findChild<QPushButton *>(QStringLiteral("rebaseApproveButton"));
+        auto *regenBtn = dock.findChild<QPushButton *>(QStringLiteral("regenerateProposalButton"));
+        QVERIFY(rebaseBtn != nullptr && regenBtn != nullptr);
+        rebaseBtn->click();
+        QCOMPARE(rebaseSpy.count(), 1);
+        QCOMPARE(rebaseSpy.takeFirst().at(0).toString(), QStringLiteral("req-v11-1"));
+        regenBtn->click();
+        QCOMPARE(regenSpy.count(), 1);
+        QCOMPARE(regenSpy.takeFirst().at(0).toString(), QStringLiteral("req-v11-1"));
+
+        // Clarification prompt banner
+        dock.showClarificationPrompt(QStringLiteral("Did you want audio cleanup or captions?"));
+        QVERIFY(dock.clarificationPromptText().contains(QStringLiteral("audio cleanup")));
+        dock.clearClarificationPrompt();
+
+        // Isolated A/B preview summary confirms live timeline unmodified
+        QJsonObject preview;
+        preview.insert(QStringLiteral("live_timeline_mutated"), false);
+        preview.insert(QStringLiteral("freshness"), QJsonObject{{QStringLiteral("status"), QStringLiteral("fresh")}});
+        preview.insert(QStringLiteral("dependencies"), QJsonObject{{QStringLiteral("valid"), true}});
+        preview.insert(QStringLiteral("diff"), QJsonObject{{QStringLiteral("duration_delta"), 125}});
+        dock.setIsolatedPreviewSummary(preview);
+        QVERIFY(dock.isolatedPreviewSummaryText().contains(QStringLiteral("unmodified")));
+
+        // Model manager button emits modelManagerRequested
+        QSignalSpy modelSpy(&dock, &AiAssistantDock::modelManagerRequested);
+        auto *modelsBtn = dock.findChild<QPushButton *>(QStringLiteral("manageModelsButton"));
+        QVERIFY(modelsBtn != nullptr);
+        modelsBtn->click();
+        QCOMPARE(modelSpy.count(), 1);
+    }
 };
 
 QTEST_MAIN(TestAiAssistantDock)

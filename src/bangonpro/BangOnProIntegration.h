@@ -85,13 +85,16 @@ private:
     void openShortcutPresetsDialog();
     void openShowProfileEditor();
     void openExternalProviderSettings();
+    void openModelManager();
     void clearTemporaryCaches();
 
     void startProposal(const QString &instruction, const QString &profileId, const QString &customProfilePath);
-    void handleProposalFinished(int exitCode);
+    void handleProposalFinished(int exitCode, int exitStatus);
     void approveBatch(const TimelineCommandBatch &batch);
+    void approveBatchSelection(const QString &requestId, const QStringList &selectedOpIds, bool rebaseToCurrentRevision);
+    void regenerateProposal(const QString &requestId);
     void rejectBatch(const QString &requestId);
-    void toggleCompareMode(bool previewBefore);
+    void toggleCompareMode(bool previewEnabled);
     void undoLast();
     void cancelTask();
     void openLastGeneratedProject();
@@ -131,7 +134,12 @@ private:
     QString m_lastTranscriptPath;
     QStringList m_lastInputs;
     QString m_lastProfile;
-    bool m_compareUndidBatch{false};
+    QString m_lastInstruction;
+    QString m_lastCustomProfilePath;
+    qint64 m_proposalBaseRevision{0};
+    QString m_proposalBaseProjectId;
+    QString m_proposalBaseSequenceId;
+    QString m_activeProposalRequestId;
 };
 
 } // namespace BangOnPro

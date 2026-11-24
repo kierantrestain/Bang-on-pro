@@ -247,7 +247,8 @@ def run_production_pipeline(
     else:
         derived_inputs = context.extract_existing_media_inputs()
         if derived_inputs:
-            state.input_camera_files = map_inputs_to_profile_cameras(derived_inputs, profile)
+            derived_map: dict[str, str | Path] = dict(derived_inputs)
+            state.input_camera_files = map_inputs_to_profile_cameras(derived_map, profile)
 
     # If operating purely on a context snapshot with no local media files on disk,
     # execute the validated context-aware proposal cleanly without failing on missing --inputs.

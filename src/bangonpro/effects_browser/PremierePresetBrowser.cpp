@@ -70,6 +70,8 @@ protected:
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
     QMimeData *mimeData(const QList<QTreeWidgetItem *> &items) const override
 #else
+    // Qt5 QTreeWidget::mimeData takes QList<QTreeWidgetItem *> by value (ABI virtual override).
+    // cppcheck-suppress passedByValue
     QMimeData *mimeData(const QList<QTreeWidgetItem *> items) const override
 #endif
     {
@@ -329,6 +331,13 @@ bool PremierePresetBrowser::loadReportJson(const QJsonObject &reportObj, QString
         entry.previewBeforePath = obj.value(QStringLiteral("preview_before_path")).toString();
         entry.previewAfterPath = obj.value(QStringLiteral("preview_after_path")).toString();
         entry.previewSplitPath = obj.value(QStringLiteral("preview_split_path")).toString();
+        const QJsonValue evVal = obj.value(QStringLiteral("visual_equivalence_evidence"));
+        if (evVal.isString()) {
+            entry.visualEquivalenceEvidence = evVal.toString();
+        } else if (evVal.isObject()) {
+            const QJsonObject evObj = evVal.toObject();
+            entry.visualEquivalenceEvidence = evObj.value(QStringLiteral("classification")).toString(evObj.value(QStringLiteral("status")).toString());
+        }
 
         const QJsonArray folderArr = obj.value(QStringLiteral("folder_path")).toArray();
         for (const QJsonValue &fv : folderArr) {
@@ -677,6 +686,9 @@ void PremierePresetBrowser::updateInspectorForPreset(const PresetDisplayEntry *e
     }
     if (!entry->description.isEmpty()) {
         html += QStringLiteral("<p><b>Description:</b> %1</p>").arg(htmlEscape(entry->description));
+    }
+    if (!entry->visualEquivalenceEvidence.isEmpty()) {
+        html += QStringLiteral("<p><b>Visual Equivalence Evidence:</b> <code>%1</code></p>").arg(htmlEscape(entry->visualEquivalenceEvidence));
     }
 
     // Mapped MLT Filters

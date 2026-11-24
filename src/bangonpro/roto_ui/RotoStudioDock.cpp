@@ -177,9 +177,16 @@ QWidget *RotoStudioDock::buildRotoTab()
     form->addWidget(m_opacitySlider, 4, 1, 1, 2);
     layout->addLayout(form);
 
+    // Persistent honest neural-vs-fallback segmentation backend status
+    m_backendStatusLabel = new QLabel(QStringLiteral("Backend: OpenCV / Spline [Fallback (non-neural)] — install SAM / MobileSAM ONNX in Model Manager"), tab);
+    m_backendStatusLabel->setObjectName(QStringLiteral("rotoBackendStatusLabel"));
+    m_backendStatusLabel->setWordWrap(true);
+    layout->addWidget(m_backendStatusLabel);
+
     // Commit to Timeline Row
     auto *commitRow = new QHBoxLayout();
-    m_rotoStatusLabel = new QLabel(QStringLiteral("Ready — local SAM/OpenCV/Spline engine"), tab);
+    m_rotoStatusLabel = new QLabel(QStringLiteral("Ready"), tab);
+    m_rotoStatusLabel->setWordWrap(true);
     auto *commitBtn = new QPushButton(QStringLiteral("Commit Mask to Native Timeline"), tab);
     commitBtn->setObjectName(QStringLiteral("rotoCommitTimelineBtn"));
     commitBtn->setProperty("bangOnProPrimary", true);
@@ -428,6 +435,24 @@ void RotoStudioDock::setCurrentFrame(int frame)
     if (m_frameSpin) {
         m_frameSpin->setValue(qMax(0, frame));
     }
+}
+
+void RotoStudioDock::setSegmentationBackendStatus(const QString &backendName, bool isNeuralInference, const QString &details)
+{
+    if (!m_backendStatusLabel) {
+        return;
+    }
+    const QString mode = isNeuralInference ? QStringLiteral("Neural") : QStringLiteral("Fallback (non-neural)");
+    QString text = QStringLiteral("Backend: %1 [%2]").arg(backendName.isEmpty() ? QStringLiteral("opencv_grabcut") : backendName, mode);
+    if (!details.trimmed().isEmpty()) {
+        text += QStringLiteral(" — ") + details.trimmed();
+    }
+    m_backendStatusLabel->setText(text);
+}
+
+QString RotoStudioDock::segmentationBackendStatusText() const
+{
+    return m_backendStatusLabel ? m_backendStatusLabel->text() : QString();
 }
 
 QJsonObject RotoStudioDock::exportRotoSessionJson() const

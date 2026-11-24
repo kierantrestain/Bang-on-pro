@@ -95,6 +95,15 @@ public:
     /** @brief Clear all custom overrides for @p presetId, restoring built-in defaults. */
     void resetPresetToDefaults(const QString &presetId);
 
+    struct ShortcutConflict
+    {
+        QKeySequence sequence;
+        QStringList actionIds;
+    };
+
+    /** @brief Detect conflicting actions sharing the same non-empty shortcut within @p presetId. */
+    QVector<ShortcutConflict> detectShortcutConflicts(const QString &presetId = QString(), bool ignoreKnownAliases = true) const;
+
     /**
      * @brief Applies the effective shortcuts for @p presetId (or activePresetId() if empty)
      * to every matching QAction found on @p actionCollectionOrWindow (QMainWindow or

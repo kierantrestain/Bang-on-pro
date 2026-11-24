@@ -239,6 +239,62 @@ void AiAssistantDock::buildUi()
     }
     rootLayout->addLayout(chipsGrid);
 
+    // 3b. Clarification Prompt Banner (shown when prompt is ambiguous or out-of-scope)
+    m_clarificationBanner = new QFrame(this);
+    m_clarificationBanner->setObjectName(QStringLiteral("clarificationBanner"));
+    m_clarificationBanner->setFrameShape(QFrame::StyledPanel);
+    m_clarificationBanner->setStyleSheet(
+        QStringLiteral("QFrame#clarificationBanner { background-color: #2b2416; border: 1px solid #d4a72c; border-radius: 4px; }"));
+    auto *clarLayout = new QVBoxLayout(m_clarificationBanner);
+    clarLayout->setContentsMargins(8, 6, 8, 6);
+    m_clarificationLabel = new QLabel(m_clarificationBanner);
+    m_clarificationLabel->setObjectName(QStringLiteral("clarificationLabel"));
+    m_clarificationLabel->setWordWrap(true);
+    clarLayout->addWidget(m_clarificationLabel);
+    m_clarificationBanner->setVisible(false);
+    rootLayout->addWidget(m_clarificationBanner);
+
+    // 3c. Stale Proposal / Context Conflict Banner (explicit Rebase vs Regenerate)
+    m_staleBanner = new QFrame(this);
+    m_staleBanner->setObjectName(QStringLiteral("staleProposalBanner"));
+    m_staleBanner->setFrameShape(QFrame::StyledPanel);
+    m_staleBanner->setStyleSheet(QStringLiteral("QFrame#staleProposalBanner { background-color: #321b1b; border: 1px solid #d9534f; border-radius: 4px; }"));
+    auto *staleLayout = new QVBoxLayout(m_staleBanner);
+    staleLayout->setContentsMargins(8, 6, 8, 6);
+    staleLayout->setSpacing(4);
+    m_staleLabel = new QLabel(m_staleBanner);
+    m_staleLabel->setObjectName(QStringLiteral("staleProposalLabel"));
+    m_staleLabel->setWordWrap(true);
+    auto *staleBtnRow = new QHBoxLayout();
+    m_rebaseApplyButton = new QPushButton(tr("Rebase && Apply"), m_staleBanner);
+    m_rebaseApplyButton->setObjectName(QStringLiteral("rebaseApproveButton"));
+    m_regenerateButton = new QPushButton(tr("Regenerate Proposal"), m_staleBanner);
+    m_regenerateButton->setObjectName(QStringLiteral("regenerateProposalButton"));
+    staleBtnRow->addWidget(m_rebaseApplyButton);
+    staleBtnRow->addWidget(m_regenerateButton);
+    staleBtnRow->addStretch(1);
+    staleLayout->addWidget(m_staleLabel);
+    staleLayout->addLayout(staleBtnRow);
+    m_staleBanner->setVisible(false);
+    rootLayout->addWidget(m_staleBanner);
+
+    connect(m_rebaseApplyButton, &QPushButton::clicked, this, [this]() {
+        if (!m_hasPendingProposal) {
+            return;
+        }
+        const QStringList checked = selectedOperationIds();
+        if (checked.isEmpty()) {
+            return;
+        }
+        Q_EMIT batchRebaseApproveRequested(m_currentBatch.requestId, checked);
+    });
+    connect(m_regenerateButton, &QPushButton::clicked, this, [this]() {
+        if (!m_hasPendingProposal) {
+            return;
+        }
+        Q_EMIT regenerateProposalRequested(m_currentBatch.requestId);
+    });
+
     // 4. Proposed Changes Diff Tree (with per-change accept/reject checkboxes)
     auto *diffHeaderRow = new QHBoxLayout();
     auto *diffLabel = new QLabel(tr("Proposed Timeline Changes (Diff)"), this);
@@ -249,6 +305,12 @@ void AiAssistantDock::buildUi()
     diffHeaderRow->addStretch(1);
     diffHeaderRow->addWidget(m_proposalSummaryLabel);
     rootLayout->addLayout(diffHeaderRow);
+
+    m_isolatedPreviewLabel = new QLabel(this);
+    m_isolatedPreviewLabel->setObjectName(QStringLiteral("isolatedPreviewLabel"));
+    m_isolatedPreviewLabel->setWordWrap(true);
+    m_isolatedPreviewLabel->setVisible(false);
+    rootLayout->addWidget(m_isolatedPreviewLabel);
 
     auto *diffSelectRow = new QHBoxLayout();
     diffSelectRow->setSpacing(4);
@@ -306,7 +368,7 @@ void AiAssistantDock::buildUi()
     m_compareButton = new QPushButton(tr("Compare (A/B)"), this);
     m_compareButton->setObjectName(QStringLiteral("compareToggleButton"));
     m_compareButton->setCheckable(true);
-    m_compareButton->setToolTip(tr("Toggle between Original Timeline (A) and AI Proposal Preview (B)"));
+    m_compareButton->setToolTip(tr("Inspect non-destructive isolated diff preview (B) vs current live timeline (A)"));
 
     m_refineButton = new QPushButton(tr("Refine"), this);
     m_refineButton->setObjectName(QStringLiteral("refineProposalButton"));
@@ -383,10 +445,14 @@ void AiAssistantDock::buildUi()
     auto *storageRow = new QHBoxLayout();
     m_storageSummaryLabel = new QLabel(tr("Local AI • Cache bounded"), m_activityContainer);
     m_storageSummaryLabel->setObjectName(QStringLiteral("bangOnProMutedLabel"));
+    m_manageModelsButton = new QPushButton(tr("Manage Models…"), m_activityContainer);
+    m_manageModelsButton->setObjectName(QStringLiteral("manageModelsButton"));
+    m_manageModelsButton->setToolTip(tr("Inspect hardware tier and install or remove local Whisper & SAM AI models"));
     m_clearCacheButton = new QPushButton(tr("Clear Cache"), m_activityContainer);
     m_clearCacheButton->setObjectName(QStringLiteral("clearCacheButton"));
     m_clearCacheButton->setToolTip(tr("Clear temporary proxy & render caches without touching source media"));
     storageRow->addWidget(m_storageSummaryLabel, 1);
+    storageRow->addWidget(m_manageModelsButton);
     storageRow->addWidget(m_clearCacheButton);
     logLayout->addLayout(storageRow);
 
@@ -394,6 +460,7 @@ void AiAssistantDock::buildUi()
 
     connect(m_activityToggleButton, &QToolButton::toggled, this, &AiAssistantDock::handleActivityToggle);
     connect(m_cancelButton, &QPushButton::clicked, this, &AiAssistantDock::handleCancelClicked);
+    connect(m_manageModelsButton, &QPushButton::clicked, this, &AiAssistantDock::modelManagerRequested);
     connect(m_clearCacheButton, &QPushButton::clicked, this, &AiAssistantDock::clearCacheRequested);
 }
 
@@ -544,7 +611,7 @@ void AiAssistantDock::displayProposal(const TimelineCommandBatch &batch)
     const QColor warningFg(255, 206, 112);
     const QColor okFg(122, 224, 152);
 
-    for (const TimelineOperation &op : std::as_const(batch.operations)) {
+    for (const TimelineOperation &op : qAsConst(batch.operations)) {
         auto *item = new QTreeWidgetItem(m_diffTree);
         item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
         item->setCheckState(kColOpType, Qt::Checked);
@@ -589,6 +656,9 @@ void AiAssistantDock::displayProposal(const TimelineCommandBatch &batch)
     m_updatingDiffChecks = false;
 
     if (m_hasPendingProposal) {
+        clearClarificationPrompt();
+        clearStaleProposalWarning();
+        setIsolatedPreviewSummary(QJsonObject{});
         QString summary = tr("%1 ops (%2)").arg(batch.operations.size()).arg(batch.transactionLabel);
         if (m_lowConfidenceCount > 0) {
             summary += tr(" • ⚠ %1 review").arg(m_lowConfidenceCount);
@@ -615,6 +685,8 @@ void AiAssistantDock::clearProposal()
     m_lowConfidenceCount = 0;
     m_diffTree->clear();
     m_proposalSummaryLabel->setText(tr("No active proposal"));
+    clearStaleProposalWarning();
+    setIsolatedPreviewSummary(QJsonObject{});
 
     if (m_compareButton->isChecked()) {
         m_compareButton->blockSignals(true);
@@ -665,7 +737,7 @@ void AiAssistantDock::applyExecutionResponse(const TimelineCommandResponse &resp
     for (int i = 0; i < m_diffTree->topLevelItemCount(); ++i) {
         QTreeWidgetItem *item = m_diffTree->topLevelItem(i);
         const QString opId = item->data(kColOpType, kOpIdRole).toString();
-        for (const TimelineOperationResult &res : std::as_const(response.results)) {
+        for (const TimelineOperationResult &res : qAsConst(response.results)) {
             if (res.opId == opId) {
                 item->setText(kColStatus, res.applied ? tr("Applied") : tr("Failed"));
                 if (!res.message.isEmpty()) {
@@ -856,6 +928,108 @@ void AiAssistantDock::setStorageSummaryText(const QString &summary)
     }
 }
 
+void AiAssistantDock::showStaleProposalWarning(const QString &summary, bool canRebase)
+{
+    if (m_staleBanner == nullptr || m_staleLabel == nullptr) {
+        return;
+    }
+    m_staleLabel->setText(tr("⚠ Timeline Changed Since Proposal: %1").arg(summary));
+    if (m_rebaseApplyButton != nullptr) {
+        m_rebaseApplyButton->setVisible(canRebase);
+        m_rebaseApplyButton->setEnabled(canRebase && m_hasPendingProposal && !m_isBusy);
+    }
+    if (m_regenerateButton != nullptr) {
+        m_regenerateButton->setEnabled(m_hasPendingProposal && !m_isBusy);
+    }
+    m_staleBanner->setVisible(true);
+    setStatusBadge(tr("Stale — Review Required"), QStringLiteral("warning"));
+}
+
+void AiAssistantDock::clearStaleProposalWarning()
+{
+    if (m_staleBanner != nullptr) {
+        m_staleBanner->setVisible(false);
+    }
+    if (m_staleLabel != nullptr) {
+        m_staleLabel->clear();
+    }
+}
+
+bool AiAssistantDock::isStaleProposalWarningVisible() const
+{
+    return m_staleBanner != nullptr && !m_staleBanner->isHidden();
+}
+
+void AiAssistantDock::showClarificationPrompt(const QString &question)
+{
+    if (m_clarificationBanner == nullptr || m_clarificationLabel == nullptr) {
+        return;
+    }
+    m_clarificationLabel->setText(tr("Clarification Needed: %1").arg(question));
+    m_clarificationBanner->setVisible(true);
+    setStatusBadge(tr("Clarification Needed"), QStringLiteral("warning"));
+    appendActivityLog(QStringLiteral("Planner"), tr("Clarification required: %1").arg(question), QStringLiteral("WARN"));
+}
+
+void AiAssistantDock::clearClarificationPrompt()
+{
+    if (m_clarificationBanner != nullptr) {
+        m_clarificationBanner->setVisible(false);
+    }
+    if (m_clarificationLabel != nullptr) {
+        m_clarificationLabel->clear();
+    }
+}
+
+QString AiAssistantDock::clarificationPromptText() const
+{
+    return m_clarificationLabel != nullptr ? m_clarificationLabel->text() : QString();
+}
+
+void AiAssistantDock::setIsolatedPreviewSummary(const QJsonObject &previewJson)
+{
+    if (m_isolatedPreviewLabel == nullptr) {
+        return;
+    }
+    if (previewJson.isEmpty()) {
+        m_isolatedPreviewLabel->setVisible(false);
+        m_isolatedPreviewLabel->clear();
+        return;
+    }
+
+    const QJsonObject diff = previewJson.value(QStringLiteral("diff")).toObject();
+    const QJsonObject freshness = previewJson.value(QStringLiteral("freshness")).toObject();
+    const QJsonObject deps = previewJson.value(QStringLiteral("dependencies")).toObject();
+
+    const int tracksAdded = diff.value(QStringLiteral("tracks_added")).toArray().size();
+    const int clipsAdded = diff.value(QStringLiteral("clips_added")).toArray().size();
+    const int clipsRemoved = diff.value(QStringLiteral("clips_removed")).toArray().size();
+    const int clipsModified = diff.value(QStringLiteral("clips_modified")).toArray().size();
+    const int durDelta = diff.value(QStringLiteral("duration_delta")).toInt(0);
+    const bool liveMutated = previewJson.value(QStringLiteral("live_timeline_mutated")).toBool(false);
+    const QString freshStatus = freshness.value(QStringLiteral("status")).toString(QStringLiteral("unknown"));
+    const bool depsValid = deps.value(QStringLiteral("valid")).toBool(true);
+
+    QString summary = tr("Isolated A/B Preview (live timeline %1): +%2 tracks, +%3/-%4/~%5 clips, Δduration %6f • Freshness: %7 • Dependencies: %8")
+                          .arg(liveMutated ? tr("MUTATED") : tr("unmodified"))
+                          .arg(tracksAdded)
+                          .arg(clipsAdded)
+                          .arg(clipsRemoved)
+                          .arg(clipsModified)
+                          .arg(durDelta)
+                          .arg(freshStatus, depsValid ? tr("OK") : tr("Broken"));
+    if (!depsValid) {
+        summary += QStringLiteral(" (") + deps.value(QStringLiteral("error_message")).toString() + QStringLiteral(")");
+    }
+    m_isolatedPreviewLabel->setText(summary);
+    m_isolatedPreviewLabel->setVisible(true);
+}
+
+QString AiAssistantDock::isolatedPreviewSummaryText() const
+{
+    return m_isolatedPreviewLabel != nullptr ? m_isolatedPreviewLabel->text() : QString();
+}
+
 void AiAssistantDock::handleDiffItemChanged(QTreeWidgetItem *item, int column)
 {
     if (m_updatingDiffChecks || item == nullptr || item->parent() != nullptr || column != kColOpType) {
@@ -898,6 +1072,8 @@ void AiAssistantDock::handleGenerateClicked()
         m_instructionInput->setFocus();
         return;
     }
+    clearClarificationPrompt();
+    clearStaleProposalWarning();
     const QString profileId = selectedProfileId();
     appendActivityLog(QStringLiteral("UI"), tr("Requesting proposal for profile '%1'…").arg(profileId), QStringLiteral("INFO"));
     Q_EMIT proposalRequested(prompt, profileId, m_customProfilePath);
@@ -912,7 +1088,7 @@ void AiAssistantDock::handleAcceptClicked()
     TimelineCommandBatch filteredBatch = m_currentBatch;
     if (!checkedIds.isEmpty() && checkedIds.size() < m_currentBatch.operations.size()) {
         QVector<TimelineOperation> kept;
-        for (const TimelineOperation &op : std::as_const(m_currentBatch.operations)) {
+        for (const TimelineOperation &op : qAsConst(m_currentBatch.operations)) {
             if (checkedIds.contains(op.opId)) {
                 kept.append(op);
             }
@@ -929,6 +1105,7 @@ void AiAssistantDock::handleAcceptClicked()
                           .arg(filteredBatch.operations.size())
                           .arg(m_currentBatch.operations.size()),
                       QStringLiteral("INFO"));
+    Q_EMIT batchApproveSelectionRequested(m_currentBatch.requestId, checkedIds);
     Q_EMIT batchApproveRequested(filteredBatch);
 }
 

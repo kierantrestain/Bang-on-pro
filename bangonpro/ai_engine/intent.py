@@ -130,10 +130,10 @@ def _extract_editorial_targets(raw: str) -> _EditorialTargets:
         r"\b(\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?)\s*(?:-|–|to)\s*(\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?)\b",
     ]
     for pat in range_patterns:
-        m = re.search(pat, lower)
-        if m:
-            t0 = _parse_time_token(m.group(1))
-            t1 = _parse_time_token(m.group(2))
+        range_match = re.search(pat, lower)
+        if range_match:
+            t0 = _parse_time_token(range_match.group(1))
+            t1 = _parse_time_token(range_match.group(2))
             if t0 is not None and t1 is not None and t1 > t0:
                 time_range_sec = (round(t0, 3), round(t1, 3))
                 break

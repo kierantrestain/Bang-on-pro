@@ -115,7 +115,7 @@ void TimelineCommandServer::stop()
     }
     m_clientBuffers.clear();
 
-    for (QLocalSocket *client : std::as_const(m_rejectedClients)) {
+    for (QLocalSocket *client : qAsConst(m_rejectedClients)) {
         if (client != nullptr) {
             client->disconnect(this);
             client->disconnectFromServer();

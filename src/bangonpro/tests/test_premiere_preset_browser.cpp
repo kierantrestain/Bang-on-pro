@@ -39,6 +39,7 @@ private:
         pExact.insert(QStringLiteral("mlt_filters"), QJsonArray{flt});
         pExact.insert(QStringLiteral("kdenlive_effect_xml"), QStringLiteral("<effectgroup id=\"Finzar Punch Zoom\"/>"));
         pExact.insert(QStringLiteral("original_xml_preserved"), true);
+        pExact.insert(QStringLiteral("visual_equivalence_evidence"), QStringLiteral("native_render_verified"));
 
         QJsonObject pUnsupported;
         pUnsupported.insert(QStringLiteral("preset_id"), QStringLiteral("mettle_vr_1"));
@@ -56,6 +57,7 @@ private:
         pUnsupported.insert(QStringLiteral("mlt_filters"), QJsonArray{});
         pUnsupported.insert(QStringLiteral("kdenlive_effect_xml"), QJsonValue::Null);
         pUnsupported.insert(QStringLiteral("original_xml_preserved"), true);
+        pUnsupported.insert(QStringLiteral("visual_equivalence_evidence"), QStringLiteral("not_applicable_unsupported"));
 
         QJsonObject report;
         report.insert(QStringLiteral("schema_version"), QStringLiteral("1.0"));
@@ -82,9 +84,14 @@ private Q_SLOTS:
         QCOMPARE(browser.presetCount(), 2);
         QCOMPARE(browser.visiblePresetCount(), 2);
 
+        PresetDisplayEntry exact;
+        QVERIFY(browser.findPresetById(QStringLiteral("finzar_zoom_1"), &exact));
+        QCOMPARE(exact.visualEquivalenceEvidence, QStringLiteral("native_render_verified"));
+
         PresetDisplayEntry unsupported;
         QVERIFY(browser.findPresetById(QStringLiteral("mettle_vr_1"), &unsupported));
         QCOMPARE(unsupported.record.status, PresetCompatibilityStatus::Unsupported);
+        QCOMPARE(unsupported.visualEquivalenceEvidence, QStringLiteral("not_applicable_unsupported"));
     }
 
     void testFavoritesCustomStackAndMimePayload()

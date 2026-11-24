@@ -1848,7 +1848,7 @@ bool RenderWidget::startWaitingRenderJobs()
 #endif
     QStringList ownedTempFilesToClean;
     ownedTempFilesToClean << autoscriptFile;
-    for (const RenderJobItem *waitingItem : std::as_const(waitingItems)) {
+    for (const RenderJobItem *waitingItem : qAsConst(waitingItems)) {
         const QStringList tempFiles = waitingItem->data(1, TempFilesRole).toStringList();
         for (const QString &tempPath : tempFiles) {
             if (isOwnedTempRenderFile(tempPath) && !ownedTempFilesToClean.contains(tempPath)) {
@@ -1861,7 +1861,7 @@ bool RenderWidget::startWaitingRenderJobs()
     outStream << "#!/bin/sh\n\n";
     QStringList quotedCleanupPaths;
     quotedCleanupPaths.reserve(ownedTempFilesToClean.size());
-    for (const QString &path : std::as_const(ownedTempFilesToClean)) {
+    for (const QString &path : qAsConst(ownedTempFilesToClean)) {
         quotedCleanupPaths << quoteShellArg(path);
     }
     // Always remove the generated runner script and Kdenlive-owned temporary render files
@@ -1870,7 +1870,7 @@ bool RenderWidget::startWaitingRenderJobs()
     outStream << "trap cleanup EXIT INT TERM HUP\n\n";
 #endif
 
-    for (const RenderJobItem *waitingItem : std::as_const(waitingItems)) {
+    for (const RenderJobItem *waitingItem : qAsConst(waitingItems)) {
         // Add render process for item
         QStringList quotedArgs;
         const QStringList rawParams = waitingItem->data(1, ParametersRole).toStringList();
@@ -1886,7 +1886,7 @@ bool RenderWidget::startWaitingRenderJobs()
     }
 
 #ifdef Q_OS_WIN
-    for (const QString &path : std::as_const(ownedTempFilesToClean)) {
+    for (const QString &path : qAsConst(ownedTempFilesToClean)) {
         if (path != autoscriptFile) {
             outStream << "del /F /Q " << quoteShellArg(QDir::toNativeSeparators(path)) << '\n';
         }

@@ -15,12 +15,14 @@
 #include "ui/BangOnProTheme.h"
 #include "ui/BangOnProWorkspace.h"
 #include "ui/ExternalProviderConsentDialog.h"
+#include "ui/ModelManagerDialog.h"
 #include "ui/ShowProfileEditorDialog.h"
 #include "ui/TranscriptEditorWidget.h"
 
 #include "bin/projectclip.h"
 #include "bin/projectitemmodel.h"
 #include "core.h"
+#include "doc/kdenlivedoc.h"
 #include "effects/effectlist/view/effectlistwidget.hpp"
 #include "mainwindow.h"
 #include "monitor/monitormanager.h"
@@ -163,7 +165,7 @@ QString BangOnProIntegration::locatePythonPackageRoot()
                << appDir + QStringLiteral("/../Resources/bangonpro-python") // alternate macOS layout
                << appDir + QStringLiteral("/../share/bangonpro/python")     // installed prefix
                << QString::fromUtf8(BANGONPRO_SOURCE_DIR);                  // developer build
-    for (const QString &c : std::as_const(candidates)) {
+    for (const QString &c : qAsConst(candidates)) {
         if (!c.isEmpty() && QFileInfo::exists(c + QStringLiteral("/bangonpro/__init__.py"))) {
             return QDir(c).absolutePath();
         }
@@ -254,13 +256,18 @@ void BangOnProIntegration::setupAiDock()
     connect(m_aiWidget, &AiAssistantDock::proposalRequested, this, &BangOnProIntegration::startProposal);
     connect(m_aiWidget, &AiAssistantDock::refineRequested, this,
             [this](const QString &, const QString &refinement, const QString &profileId) { startProposal(refinement, profileId, QString()); });
-    connect(m_aiWidget, &AiAssistantDock::batchApproveRequested, this, &BangOnProIntegration::approveBatch);
+    connect(m_aiWidget, &AiAssistantDock::batchApproveSelectionRequested, this,
+            [this](const QString &requestId, const QStringList &opIds) { approveBatchSelection(requestId, opIds, false); });
+    connect(m_aiWidget, &AiAssistantDock::batchRebaseApproveRequested, this,
+            [this](const QString &requestId, const QStringList &opIds) { approveBatchSelection(requestId, opIds, true); });
+    connect(m_aiWidget, &AiAssistantDock::regenerateProposalRequested, this, &BangOnProIntegration::regenerateProposal);
     connect(m_aiWidget, &AiAssistantDock::batchRejectRequested, this, &BangOnProIntegration::rejectBatch);
     connect(m_aiWidget, &AiAssistantDock::undoRequested, this, &BangOnProIntegration::undoLast);
     connect(m_aiWidget, &AiAssistantDock::taskCancelRequested, this, &BangOnProIntegration::cancelTask);
     connect(m_aiWidget, &AiAssistantDock::compareModeToggled, this, &BangOnProIntegration::toggleCompareMode);
     connect(m_aiWidget, &AiAssistantDock::editProfileRequested, this, &BangOnProIntegration::openShowProfileEditor);
     connect(m_aiWidget, &AiAssistantDock::providerSettingsRequested, this, &BangOnProIntegration::openExternalProviderSettings);
+    connect(m_aiWidget, &AiAssistantDock::modelManagerRequested, this, &BangOnProIntegration::openModelManager);
     connect(m_aiWidget, &AiAssistantDock::clearCacheRequested, this, &BangOnProIntegration::clearTemporaryCaches);
     connect(m_engine.get(), &TimelineCommandEngine::revisionChanged, m_aiWidget, &AiAssistantDock::setTimelineRevision);
 }
@@ -367,7 +374,7 @@ void BangOnProIntegration::setupMenu()
     auto *kdenliveWin = qobject_cast<MainWindow *>(m_mainWindow);
     for (const WorkspaceMode mode : allWorkspaceModes()) {
         QAction *wsAct = wsMenu->addAction(workspaceModeDisplayName(mode));
-        const QString actName = QStringLiteral("bangonpro_ws_") + workspaceModeToId(mode);
+        const QString actName = QStringLiteral("bangonpro_workspace_") + workspaceModeToId(mode);
         wsAct->setObjectName(actName);
         if (kdenliveWin && kdenliveWin->actionCollection()) {
             kdenliveWin->actionCollection()->addAction(actName, wsAct);
@@ -388,6 +395,10 @@ void BangOnProIntegration::setupMenu()
     if (m_aiDock) {
         QAction *toggleAi = m_aiDock->toggleViewAction();
         toggleAi->setText(QStringLiteral("AI Assistant Panel"));
+        toggleAi->setObjectName(QStringLiteral("bangonpro_toggle_ai"));
+        if (kdenliveWin && kdenliveWin->actionCollection()) {
+            kdenliveWin->actionCollection()->addAction(QStringLiteral("bangonpro_toggle_ai"), toggleAi);
+        }
         menu->addAction(toggleAi);
     }
     if (m_transcriptDock) {
@@ -409,6 +420,10 @@ void BangOnProIntegration::setupMenu()
     menu->addSeparator();
 
     QAction *shortcutsAct = menu->addAction(QStringLiteral("Keyboard Shortcut Presets (Premiere / Resolve / Kdenlive)…"));
+    shortcutsAct->setObjectName(QStringLiteral("bangonpro_shortcut_presets"));
+    if (kdenliveWin && kdenliveWin->actionCollection()) {
+        kdenliveWin->actionCollection()->addAction(QStringLiteral("bangonpro_shortcut_presets"), shortcutsAct);
+    }
     connect(shortcutsAct, &QAction::triggered, this, &BangOnProIntegration::openShortcutPresetsDialog);
 
     QAction *profileEditorAct = menu->addAction(QStringLiteral("Custom Show Profile Editor…"));
@@ -416,6 +431,9 @@ void BangOnProIntegration::setupMenu()
 
     QAction *providerConsentAct = menu->addAction(QStringLiteral("AI Providers & Privacy Consent…"));
     connect(providerConsentAct, &QAction::triggered, this, &BangOnProIntegration::openExternalProviderSettings);
+
+    QAction *modelManagerAct = menu->addAction(QStringLiteral("Manage Local AI Models (Whisper / SAM)…"));
+    connect(modelManagerAct, &QAction::triggered, this, &BangOnProIntegration::openModelManager);
 
     QAction *clearCacheAct = menu->addAction(QStringLiteral("Clear Proxy & Render Caches"));
     connect(clearCacheAct, &QAction::triggered, this, &BangOnProIntegration::clearTemporaryCaches);
@@ -483,6 +501,49 @@ void BangOnProIntegration::openExternalProviderSettings()
     dlg.exec();
 }
 
+void BangOnProIntegration::openModelManager()
+{
+    ModelManagerDialog dlg(pythonExecutable(), locatePythonPackageRoot(), m_mainWindow);
+    connect(&dlg, &ModelManagerDialog::modelStatusUpdated, this, [this](const QJsonObject &report) {
+        const int installed = report.value(QStringLiteral("installed_count")).toInt(0);
+        const int ready = report.value(QStringLiteral("ready_count")).toInt(0);
+        const double mb = report.value(QStringLiteral("total_mb")).toDouble(0.0);
+        if (m_aiWidget) {
+            m_aiWidget->setStorageSummaryText(
+                QStringLiteral("Local Models: %1 installed (%2 neural-ready) • %3 MB").arg(installed).arg(ready).arg(mb, 0, 'f', 1));
+        }
+        // Update Roto Studio honest backend badge from actual SAM model status.
+        if (m_rotoWidget) {
+            bool samNeuralReady = false;
+            QString samModelName;
+            for (const QJsonValue &v : report.value(QStringLiteral("models")).toArray()) {
+                const QJsonObject m = v.toObject();
+                if (m.value(QStringLiteral("family")).toString() == QStringLiteral("segmentation_sam") &&
+                    (m.value(QStringLiteral("status")).toString() == QStringLiteral("ready") ||
+                     m.value(QStringLiteral("status")).toString() == QStringLiteral("loaded"))) {
+                    samNeuralReady = true;
+                    samModelName = m.value(QStringLiteral("display_name")).toString();
+                    break;
+                }
+            }
+            if (samNeuralReady) {
+                m_rotoWidget->setSegmentationBackendStatus(samModelName, true, QStringLiteral("local neural weights verified"));
+            } else {
+                m_rotoWidget->setSegmentationBackendStatus(QStringLiteral("OpenCV GrabCut / Spline"), false,
+                                                           QStringLiteral("install MobileSAM ONNX or SAM 2.1 in Model Manager for neural segmentation"));
+            }
+        }
+    });
+    connect(&dlg, &ModelManagerDialog::modelOperationCompleted, this, [this](const QString &action, const QString &modelId, bool ok, const QString &msg) {
+        if (m_aiWidget) {
+            m_aiWidget->appendActivityLog(QStringLiteral("models"), QStringLiteral("[%1 %2] %3").arg(action, modelId, msg),
+                                          ok ? QStringLiteral("INFO") : QStringLiteral("ERROR"));
+        }
+    });
+    dlg.refreshStatus();
+    dlg.exec();
+}
+
 void BangOnProIntegration::clearTemporaryCaches()
 {
     const QString cacheDir = dataDir() + QStringLiteral("/cache");
@@ -521,9 +582,9 @@ void BangOnProIntegration::loadBuiltinStarterPresetsIfNeeded()
     if (!proc) {
         return;
     }
-    connect(proc, &QProcess::finished, this, [this, proc](int code, QProcess::ExitStatus) {
+    connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this, [this, proc](int code, QProcess::ExitStatus status) {
         proc->deleteLater();
-        if (code == 0) {
+        if (status == QProcess::NormalExit && code == 0) {
             loadPresetReportIfPresent();
         }
     });
@@ -536,10 +597,49 @@ QProcess *BangOnProIntegration::startPython(const QStringList &args)
         return nullptr;
     }
     auto *proc = new QProcess(this);
-    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
-    const QString existing = env.value(QStringLiteral("PYTHONPATH"));
-    env.insert(QStringLiteral("PYTHONPATH"), existing.isEmpty() ? root : root + QDir::listSeparator() + existing);
-    proc->setProcessEnvironment(env);
+    // Strict allowlist environment: avoid leaking unrelated host secrets into Python child processes.
+    const QProcessEnvironment host = QProcessEnvironment::systemEnvironment();
+    QProcessEnvironment clean;
+    const QStringList allowedVars = {
+        QStringLiteral("PATH"),
+        QStringLiteral("HOME"),
+        QStringLiteral("USER"),
+        QStringLiteral("TMPDIR"),
+        QStringLiteral("TEMP"),
+        QStringLiteral("TMP"),
+        QStringLiteral("LANG"),
+        QStringLiteral("LC_ALL"),
+        QStringLiteral("LC_CTYPE"),
+        QStringLiteral("DISPLAY"),
+        QStringLiteral("WAYLAND_DISPLAY"),
+        QStringLiteral("XDG_RUNTIME_DIR"),
+        QStringLiteral("XDG_CACHE_HOME"),
+        QStringLiteral("XDG_DATA_HOME"),
+        QStringLiteral("XDG_CONFIG_HOME"),
+        QStringLiteral("SDL_AUDIODRIVER"),
+        QStringLiteral("QT_QPA_PLATFORM"),
+        QStringLiteral("SSL_CERT_FILE"),
+        QStringLiteral("SSL_CERT_DIR"),
+        QStringLiteral("REQUESTS_CA_BUNDLE"),
+        QStringLiteral("BANGONPRO_MODEL_DIR"),
+        QStringLiteral("BANGONPRO_PYTHON"),
+        QStringLiteral("BANGONPRO_PYTHONPATH"),
+        QStringLiteral("HF_HOME"),
+        QStringLiteral("DYLD_LIBRARY_PATH"),
+        QStringLiteral("LD_LIBRARY_PATH"),
+        QStringLiteral("MLT_REPOSITORY"),
+        QStringLiteral("MLT_DATA"),
+        QStringLiteral("MLT_PROFILES_PATH"),
+        QStringLiteral("FREI0R_PATH"),
+    };
+    for (const QString &key : allowedVars) {
+        if (host.contains(key)) {
+            clean.insert(key, host.value(key));
+        }
+    }
+    const QString existing = host.value(QStringLiteral("PYTHONPATH"));
+    clean.insert(QStringLiteral("PYTHONPATH"), existing.isEmpty() ? root : root + QDir::listSeparator() + existing);
+    proc->setProcessEnvironment(clean);
     proc->setWorkingDirectory(root);
     // Argument vector only — never a shell, so user-supplied paths cannot inject commands.
     proc->start(pythonExecutable(), args);
@@ -553,16 +653,38 @@ void BangOnProIntegration::startProposal(const QString &instruction, const QStri
         return;
     }
 
+    // Capture the exact active project, sequence, and timeline revision BEFORE generating the proposal
+    // so stale proposals, manual edits, or project switches during async generation are always detected.
+    m_proposalBaseRevision = m_engine->currentRevision();
+    m_proposalBaseProjectId = m_engine->activeProjectId().isEmpty() ? QStringLiteral("active_project") : m_engine->activeProjectId();
+    m_proposalBaseSequenceId = m_engine->activeSequenceId().isEmpty() ? QStringLiteral("seq_main") : m_engine->activeSequenceId();
+    m_lastInstruction = instruction;
+    m_lastCustomProfilePath = customProfilePath;
+
+    QString activeKdenliveProjectPath;
+    if (Core::self() && Core::self()->currentDoc()) {
+        const QString docPath = Core::self()->currentDoc()->url().toLocalFile();
+        if (!docPath.isEmpty() && QFileInfo::exists(docPath)) {
+            activeKdenliveProjectPath = docPath;
+        }
+    }
+
+    const QJsonObject liveState = m_engine->stateSnapshotJson();
+    const bool hasActiveTimelineContext =
+        !activeKdenliveProjectPath.isEmpty() || !liveState.value(QStringLiteral("state")).toObject().value(QStringLiteral("clips")).toArray().isEmpty();
+
     QStringList inputs;
     if (m_aiWidget && m_aiWidget->useProjectBinMedia()) {
         inputs = collectProjectBinMediaPaths();
     }
-    if (inputs.isEmpty()) {
+    // Only prompt the user to select raw media files if there is neither Project Bin media
+    // nor an active project/timeline context to edit in place.
+    if (inputs.isEmpty() && !hasActiveTimelineContext) {
         inputs = QFileDialog::getOpenFileNames(m_mainWindow, QStringLiteral("Select camera / source media for the AI first cut"), QString(),
                                                QStringLiteral("Media (*.mp4 *.mov *.mxf *.mkv *.m4v *.wav *.mp3);;All files (*)"));
     }
-    if (inputs.isEmpty()) {
-        m_aiWidget->appendActivityLog(QStringLiteral("integration"), QStringLiteral("Proposal cancelled: no media selected"));
+    if (inputs.isEmpty() && !hasActiveTimelineContext) {
+        m_aiWidget->appendActivityLog(QStringLiteral("integration"), QStringLiteral("Proposal cancelled: no media or active timeline available"));
         return;
     }
 
@@ -571,9 +693,28 @@ void BangOnProIntegration::startProposal(const QString &instruction, const QStri
     m_aiOutputDir = dataDir() + QStringLiteral("/runs/") + QDateTime::currentDateTimeUtc().toString(QStringLiteral("yyyyMMdd-HHmmss"));
     QDir().mkpath(m_aiOutputDir);
 
-    QStringList args{QStringLiteral("-m"), QStringLiteral("bangonpro.ai_engine.cli"), instruction, QStringLiteral("--inputs")};
-    args << inputs;
-    args << QStringLiteral("--output-dir") << m_aiOutputDir << QStringLiteral("--json");
+    // Export read-only live timeline state snapshot so the AI planner sees the active project without re-import.
+    const QString stateJsonPath = m_aiOutputDir + QStringLiteral("/timeline_state.json");
+    {
+        QFile sf(stateJsonPath);
+        if (sf.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            sf.write(QJsonDocument(liveState).toJson(QJsonDocument::Indented));
+            sf.close();
+        }
+    }
+
+    QStringList args{QStringLiteral("-m"), QStringLiteral("bangonpro.ai_engine.cli"), instruction};
+    if (!inputs.isEmpty()) {
+        args << QStringLiteral("--inputs") << inputs;
+    }
+    if (QFileInfo::exists(stateJsonPath)) {
+        args << QStringLiteral("--project-state") << stateJsonPath;
+    }
+    if (!activeKdenliveProjectPath.isEmpty()) {
+        args << QStringLiteral("--kdenlive-project") << activeKdenliveProjectPath;
+    }
+    args << QStringLiteral("--project-id") << m_proposalBaseProjectId << QStringLiteral("--sequence-id") << m_proposalBaseSequenceId
+         << QStringLiteral("--output-dir") << m_aiOutputDir << QStringLiteral("--json");
     if (!m_lastProfile.isEmpty()) {
         args << QStringLiteral("--profile") << m_lastProfile;
     }
@@ -584,17 +725,20 @@ void BangOnProIntegration::startProposal(const QString &instruction, const QStri
         return;
     }
     m_aiProcess = proc;
-    m_aiWidget->setBusy(true, QStringLiteral("Analysing, syncing and assembling first cut…"), -1);
-    m_aiWidget->appendActivityLog(QStringLiteral("orchestrator"), QStringLiteral("Started pipeline on %1 file(s) -> %2").arg(inputs.size()).arg(m_aiOutputDir));
-    connect(proc, &QProcess::finished, this, [this](int code, QProcess::ExitStatus) { handleProposalFinished(code); });
+    m_aiWidget->setBusy(true, QStringLiteral("Analysing project context and generating scoped proposal…"), -1);
+    m_aiWidget->appendActivityLog(
+        QStringLiteral("orchestrator"),
+        QStringLiteral("Started planner at rev %1 (%2 input(s)) -> %3").arg(m_proposalBaseRevision).arg(inputs.size()).arg(m_aiOutputDir));
+    connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
+            [this](int code, QProcess::ExitStatus status) { handleProposalFinished(code, static_cast<int>(status)); });
     connect(proc, &QProcess::errorOccurred, this, [this](QProcess::ProcessError) {
         if (m_aiProcess && m_aiProcess->state() == QProcess::NotRunning) {
-            handleProposalFinished(-1);
+            handleProposalFinished(-1, static_cast<int>(QProcess::CrashExit));
         }
     });
 }
 
-void BangOnProIntegration::handleProposalFinished(int exitCode)
+void BangOnProIntegration::handleProposalFinished(int exitCode, int exitStatus)
 {
     if (!m_aiProcess) {
         return;
@@ -605,14 +749,23 @@ void BangOnProIntegration::handleProposalFinished(int exitCode)
     m_aiWidget->setBusy(false);
 
     const QByteArray out = proc->readAllStandardOutput();
-    if (exitCode != 0) {
-        m_aiWidget->appendActivityLog(
-            QStringLiteral("orchestrator"),
-            QStringLiteral("Pipeline failed (exit %1): %2").arg(exitCode).arg(QString::fromUtf8(proc->readAllStandardError().right(800))),
-            QStringLiteral("ERROR"));
+    if (exitStatus != static_cast<int>(QProcess::NormalExit) || exitCode != 0) {
+        m_aiWidget->appendActivityLog(QStringLiteral("orchestrator"),
+                                      QStringLiteral("Pipeline failed (status=%1, exit=%2): %3")
+                                          .arg(exitStatus)
+                                          .arg(exitCode)
+                                          .arg(QString::fromUtf8(proc->readAllStandardError().right(800))),
+                                      QStringLiteral("ERROR"));
         return;
     }
     const QJsonObject summary = QJsonDocument::fromJson(out).object();
+    if (summary.value(QStringLiteral("needs_clarification")).toBool(false)) {
+        const QString question = summary.value(QStringLiteral("clarification_question"))
+                                     .toString(QStringLiteral("Please clarify which editorial action you want Bang On Pro to perform."));
+        m_aiWidget->showClarificationPrompt(question);
+        return;
+    }
+
     const QJsonObject artifacts = summary.value(QStringLiteral("artifacts")).toObject();
     const QString cmdsPath = artifacts.value(QStringLiteral("timeline_commands_json")).toString();
     m_lastKdenliveProjectPath = artifacts.value(QStringLiteral("kdenlive_project")).toString();
@@ -636,15 +789,19 @@ void BangOnProIntegration::handleProposalFinished(int exitCode)
         return;
     }
 
-    // Merge the agents' versioned batches into one reviewable proposal targeting the live revision.
+    // Merge the agents' versioned batches into one reviewable proposal preserving the original
+    // project, sequence, and timeline revision captured before proposal generation started.
     TimelineCommandBatch merged;
     merged.requestId = QStringLiteral("ai-") + QUuid::createUuid().toString(QUuid::WithoutBraces);
-    merged.projectId = cmds.value(QStringLiteral("project_id")).toString();
-    merged.sequenceId = cmds.value(QStringLiteral("sequence_id")).toString();
+    merged.projectId = m_proposalBaseProjectId.isEmpty() ? cmds.value(QStringLiteral("project_id")).toString() : m_proposalBaseProjectId;
+    merged.sequenceId = m_proposalBaseSequenceId.isEmpty() ? cmds.value(QStringLiteral("sequence_id")).toString() : m_proposalBaseSequenceId;
     merged.agentId = QStringLiteral("orchestrator");
     merged.agentRole = QStringLiteral("ai_first_cut");
     merged.requiresApproval = true;
-    merged.transactionLabel = QStringLiteral("AI First Cut (%1)").arg(summary.value(QStringLiteral("profile_id")).toString());
+    merged.expectedRevision = m_proposalBaseRevision;
+    merged.transactionLabel =
+        QStringLiteral("AI Edit (%1 / %2)")
+            .arg(summary.value(QStringLiteral("profile_id")).toString(), summary.value(QStringLiteral("intent_scope")).toString(QStringLiteral("scoped")));
     const QJsonArray batches = cmds.value(QStringLiteral("batches")).toArray();
     for (const QJsonValue &bv : batches) {
         TimelineCommandBatch b;
@@ -655,16 +812,34 @@ void BangOnProIntegration::handleProposalFinished(int exitCode)
         }
         merged.operations += b.operations;
     }
-    merged.expectedRevision = m_engine->currentRevision();
 
+    // Stage the proposal inside TimelineCommandEngine (with requiresApproval=true) so the engine
+    // captures the structural state fingerprint and enforces stale-proposal / drift detection.
+    const TimelineCommandResponse stageResp = m_engine->executeBatch(merged);
+    if (stageResp.status == CommandStatus::RevisionConflict) {
+        m_aiWidget->displayProposal(merged);
+        m_aiWidget->showStaleProposalWarning(stageResp.errorMessage, false);
+        m_aiWidget->appendActivityLog(QStringLiteral("orchestrator"), stageResp.errorMessage, QStringLiteral("WARN"));
+        return;
+    }
+    if (stageResp.status != CommandStatus::PendingApproval) {
+        m_aiWidget->appendActivityLog(QStringLiteral("orchestrator"), QStringLiteral("Failed to stage proposal: %1").arg(stageResp.errorMessage),
+                                      QStringLiteral("ERROR"));
+        return;
+    }
+
+    m_activeProposalRequestId = merged.requestId;
     for (auto it = artifacts.constBegin(); it != artifacts.constEnd(); ++it) {
         m_aiWidget->appendActivityLog(QStringLiteral("artifact"), QStringLiteral("%1: %2").arg(it.key(), it.value().toString()));
     }
     m_aiWidget->appendActivityLog(QStringLiteral("orchestrator"),
-                                  QStringLiteral("Proposal ready: %1 operations, %2 shots, QC passed=%3")
+                                  QStringLiteral("Proposal staged at rev %1: %2 ops, %3 shots, ASR=%4 (neural=%5), QC=%6")
+                                      .arg(m_proposalBaseRevision)
                                       .arg(merged.operations.size())
                                       .arg(summary.value(QStringLiteral("shot_count")).toInt())
-                                      .arg(summary.value(QStringLiteral("qc_passed")).toBool() ? QStringLiteral("yes") : QStringLiteral("no")));
+                                      .arg(summary.value(QStringLiteral("asr_backend_used")).toString(QStringLiteral("none")),
+                                           summary.value(QStringLiteral("is_neural_inference")).toBool(false) ? QStringLiteral("yes") : QStringLiteral("no"),
+                                           summary.value(QStringLiteral("qc_passed")).toBool() ? QStringLiteral("yes") : QStringLiteral("no")));
     m_aiWidget->displayProposal(merged);
 }
 
@@ -686,6 +861,7 @@ void BangOnProIntegration::applyTranscriptEdits(const QJsonObject &editedTranscr
     outF.write(QJsonDocument(editedTranscriptJson).toJson(QJsonDocument::Indented));
     outF.close();
 
+    const qint64 capturedRev = m_engine->currentRevision();
     QStringList args{QStringLiteral("-m"), QStringLiteral("bangonpro.ai_engine.cli"), QStringLiteral("--apply-transcript-edits"), editedPath};
     if (!m_lastTranscriptPath.isEmpty() && QFileInfo::exists(m_lastTranscriptPath)) {
         args << QStringLiteral("--original-transcript") << m_lastTranscriptPath;
@@ -694,18 +870,25 @@ void BangOnProIntegration::applyTranscriptEdits(const QJsonObject &editedTranscr
     if (!proc) {
         return;
     }
-    connect(proc, &QProcess::finished, this, [this, proc](int code, QProcess::ExitStatus) {
+    connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this, [this, proc, capturedRev](int code, QProcess::ExitStatus status) {
         proc->deleteLater();
-        if (code != 0) {
+        if (status != QProcess::NormalExit || code != 0) {
             return;
         }
         const QJsonObject batchObj = QJsonDocument::fromJson(proc->readAllStandardOutput()).object();
         TimelineCommandBatch batch;
         QString berr;
         if (TimelineCommandEngine::batchFromJson(batchObj, &batch, &berr) && !batch.operations.isEmpty()) {
-            batch.expectedRevision = m_engine->currentRevision();
+            batch.expectedRevision = capturedRev;
             batch.requiresApproval = true;
-            m_aiWidget->displayProposal(batch);
+            const TimelineCommandResponse stageResp = m_engine->executeBatch(batch);
+            if (stageResp.status == CommandStatus::PendingApproval) {
+                m_activeProposalRequestId = batch.requestId;
+                m_aiWidget->displayProposal(batch);
+            } else {
+                m_aiWidget->displayProposal(batch);
+                m_aiWidget->showStaleProposalWarning(stageResp.errorMessage, false);
+            }
             if (m_aiDock) {
                 m_aiDock->show();
                 m_aiDock->raise();
@@ -723,8 +906,8 @@ void BangOnProIntegration::commitRotoMaskToTimeline(const QJsonObject &rotoSessi
     const QJsonObject primary = masks.first().toObject();
     TimelineCommandBatch batch;
     batch.requestId = QStringLiteral("roto-") + QUuid::createUuid().toString(QUuid::WithoutBraces);
-    batch.projectId = QStringLiteral("active_project");
-    batch.sequenceId = QStringLiteral("seq_main");
+    batch.projectId = m_engine->activeProjectId().isEmpty() ? QStringLiteral("active_project") : m_engine->activeProjectId();
+    batch.sequenceId = m_engine->activeSequenceId().isEmpty() ? QStringLiteral("seq_main") : m_engine->activeSequenceId();
     batch.agentId = QStringLiteral("roto_studio");
     batch.agentRole = QStringLiteral("rotoscoping");
     batch.transactionLabel = QStringLiteral("Apply Rotoscope Mask (%1)").arg(primary.value(QStringLiteral("name")).toString(QStringLiteral("Mask")));
@@ -777,51 +960,52 @@ void BangOnProIntegration::renderAndImport2DComposite(const QJsonObject &canvasJ
     if (!proc) {
         return;
     }
-    connect(proc, &QProcess::finished, this, [this, proc, pngPath, placeOnTimeline](int code, QProcess::ExitStatus) {
-        proc->deleteLater();
-        if (code != 0 || !QFileInfo::exists(pngPath)) {
-            return;
-        }
-        TimelineCommandBatch batch;
-        batch.requestId = QStringLiteral("plate-") + QUuid::createUuid().toString(QUuid::WithoutBraces);
-        batch.projectId = QStringLiteral("active_project");
-        batch.sequenceId = QStringLiteral("seq_main");
-        batch.agentId = QStringLiteral("artcraft_2d");
-        batch.agentRole = QStringLiteral("2d_composition");
-        batch.transactionLabel = QStringLiteral("Import 2D Composite Plate");
-        batch.expectedRevision = m_engine->currentRevision();
-        batch.requiresApproval = false;
+    connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
+            [this, proc, pngPath, placeOnTimeline](int code, QProcess::ExitStatus status) {
+                proc->deleteLater();
+                if (status != QProcess::NormalExit || code != 0 || !QFileInfo::exists(pngPath)) {
+                    return;
+                }
+                TimelineCommandBatch batch;
+                batch.requestId = QStringLiteral("plate-") + QUuid::createUuid().toString(QUuid::WithoutBraces);
+                batch.projectId = m_engine->activeProjectId().isEmpty() ? QStringLiteral("active_project") : m_engine->activeProjectId();
+                batch.sequenceId = m_engine->activeSequenceId().isEmpty() ? QStringLiteral("seq_main") : m_engine->activeSequenceId();
+                batch.agentId = QStringLiteral("artcraft_2d");
+                batch.agentRole = QStringLiteral("2d_composition");
+                batch.transactionLabel = QStringLiteral("Import 2D Composite Plate");
+                batch.expectedRevision = m_engine->currentRevision();
+                batch.requiresApproval = false;
 
-        TimelineOperation imp;
-        imp.opId = QStringLiteral("op_import_plate");
-        imp.type = QStringLiteral("import_media");
-        imp.mediaRef = QStringLiteral("plate_media");
-        imp.params.insert(QStringLiteral("path"), pngPath);
-        imp.confidence = 1.0;
-        imp.rationale = QStringLiteral("Import ArtCraft-adapted 2D composite plate into Media Bin");
-        batch.operations.append(imp);
+                TimelineOperation imp;
+                imp.opId = QStringLiteral("op_import_plate");
+                imp.type = QStringLiteral("import_media");
+                imp.mediaRef = QStringLiteral("plate_media");
+                imp.params.insert(QStringLiteral("path"), pngPath);
+                imp.confidence = 1.0;
+                imp.rationale = QStringLiteral("Import ArtCraft-adapted 2D composite plate into Media Bin");
+                batch.operations.append(imp);
 
-        if (placeOnTimeline) {
-            TimelineOperation place;
-            place.opId = QStringLiteral("op_place_plate");
-            place.type = QStringLiteral("place_clip");
-            place.mediaRef = QStringLiteral("plate_media");
-            place.trackId = QStringLiteral("V2");
-            place.frameRange.inFrame = 0;
-            place.frameRange.outFrame = 125;
-            place.frameRange.timelineStart = 0;
-            place.confidence = 1.0;
-            place.rationale = QStringLiteral("Place 2D composite plate on overlay track V2");
-            batch.operations.append(place);
-        }
+                if (placeOnTimeline) {
+                    TimelineOperation place;
+                    place.opId = QStringLiteral("op_place_plate");
+                    place.type = QStringLiteral("place_clip");
+                    place.mediaRef = QStringLiteral("plate_media");
+                    place.trackId = QStringLiteral("V2");
+                    place.frameRange.inFrame = 0;
+                    place.frameRange.outFrame = 125;
+                    place.frameRange.timelineStart = 0;
+                    place.confidence = 1.0;
+                    place.rationale = QStringLiteral("Place 2D composite plate on overlay track V2");
+                    batch.operations.append(place);
+                }
 
-        const TimelineCommandResponse resp = m_engine->executeBatch(batch);
-        if (m_aiWidget) {
-            m_aiWidget->setCanUndo(m_engine->canUndo());
-            m_aiWidget->appendActivityLog(QStringLiteral("artcraft-2d"),
-                                          QStringLiteral("Rendered plate %1 -> %2").arg(pngPath, commandStatusToString(resp.status)));
-        }
-    });
+                const TimelineCommandResponse resp = m_engine->executeBatch(batch);
+                if (m_aiWidget) {
+                    m_aiWidget->setCanUndo(m_engine->canUndo());
+                    m_aiWidget->appendActivityLog(QStringLiteral("artcraft-2d"),
+                                                  QStringLiteral("Rendered plate %1 -> %2").arg(pngPath, commandStatusToString(resp.status)));
+                }
+            });
 }
 
 void BangOnProIntegration::exportStoryboardToTimeline(const QJsonObject &storyboardJson)
@@ -836,14 +1020,15 @@ void BangOnProIntegration::exportStoryboardToTimeline(const QJsonObject &storybo
     f.write(QJsonDocument(storyboardJson).toJson(QJsonDocument::Indented));
     f.close();
 
+    const qint64 capturedRev = m_engine->currentRevision();
     QProcess *proc = startPython({QStringLiteral("-m"), QStringLiteral("bangonpro.roto_studio.cli"), QStringLiteral("storyboard-export"),
                                   QStringLiteral("--storyboard-json"), sbPath, QStringLiteral("--output-dir"), outDir});
     if (!proc) {
         return;
     }
-    connect(proc, &QProcess::finished, this, [this, proc](int code, QProcess::ExitStatus) {
+    connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this, [this, proc, capturedRev](int code, QProcess::ExitStatus status) {
         proc->deleteLater();
-        if (code != 0) {
+        if (status != QProcess::NormalExit || code != 0) {
             return;
         }
         const QJsonObject result = QJsonDocument::fromJson(proc->readAllStandardOutput()).object();
@@ -851,14 +1036,19 @@ void BangOnProIntegration::exportStoryboardToTimeline(const QJsonObject &storybo
         TimelineCommandBatch batch;
         QString err;
         if (TimelineCommandEngine::batchFromJson(batchObj, &batch, &err) && !batch.operations.isEmpty()) {
-            batch.expectedRevision = m_engine->currentRevision();
+            batch.expectedRevision = capturedRev;
             batch.requiresApproval = true;
+            const TimelineCommandResponse stageResp = m_engine->executeBatch(batch);
             if (m_aiWidget) {
                 m_aiWidget->displayProposal(batch);
-                m_aiWidget->appendActivityLog(QStringLiteral("storyboard"),
-                                              QStringLiteral("Storyboard animatic ready (%1 shots, %2 operations)")
-                                                  .arg(result.value(QStringLiteral("shot_count")).toInt())
-                                                  .arg(batch.operations.size()));
+                if (stageResp.status == CommandStatus::PendingApproval) {
+                    m_activeProposalRequestId = batch.requestId;
+                } else {
+                    m_aiWidget->showStaleProposalWarning(stageResp.errorMessage, false);
+                }
+                m_aiWidget->appendActivityLog(QStringLiteral("storyboard"), QStringLiteral("Storyboard animatic ready (%1 shots, %2 operations)")
+                                                                                .arg(result.value(QStringLiteral("shot_count")).toInt())
+                                                                                .arg(batch.operations.size()));
             }
             if (m_aiDock) {
                 m_aiDock->show();
@@ -870,15 +1060,48 @@ void BangOnProIntegration::exportStoryboardToTimeline(const QJsonObject &storybo
 
 void BangOnProIntegration::approveBatch(const TimelineCommandBatch &batch)
 {
-    m_compareUndidBatch = false;
-    m_aiWidget->setCompareModeActive(false);
+    QStringList opIds;
+    opIds.reserve(batch.operations.size());
+    for (const TimelineOperation &op : batch.operations) {
+        opIds.append(op.opId);
+    }
+    approveBatchSelection(batch.requestId, opIds, false);
+}
 
-    TimelineCommandBatch b = batch;
-    b.requiresApproval = false; // the user just approved the selected ops in the dock
-    b.expectedRevision = m_engine->currentRevision();
-    const TimelineCommandResponse resp = m_engine->executeBatch(b);
+void BangOnProIntegration::approveBatchSelection(const QString &requestId, const QStringList &selectedOpIds, bool rebaseToCurrentRevision)
+{
+    m_aiWidget->setCompareModeActive(false);
+    m_aiWidget->setIsolatedPreviewSummary(QJsonObject{});
+
+    QSet<QString> opSet;
+    for (const QString &id : selectedOpIds) {
+        opSet.insert(id);
+    }
+
+    // NEVER overwrite expectedRevision silently. Delegate strictly to TimelineCommandEngine so stale
+    // revisions, manual edits, project/sequence switches, and broken partial selections are enforced.
+    const TimelineCommandResponse resp = m_engine->approveBatchWithSelection(requestId, opSet, QStringLiteral("user"), rebaseToCurrentRevision);
+
+    if (resp.status == CommandStatus::RevisionConflict) {
+        const ProposalFreshnessReport freshness = m_engine->validateProposalFreshness(requestId);
+        m_aiWidget->showStaleProposalWarning(freshness.summary.isEmpty() ? resp.errorMessage : freshness.summary, freshness.canRebase);
+        m_aiWidget->appendActivityLog(QStringLiteral("timeline-writer"), QStringLiteral("Approval blocked (stale/conflict): %1").arg(resp.errorMessage),
+                                      QStringLiteral("WARN"));
+        return;
+    }
+
+    if (resp.status == CommandStatus::ValidationError) {
+        m_aiWidget->appendActivityLog(QStringLiteral("timeline-writer"), QStringLiteral("Approval rejected: %1").arg(resp.errorMessage),
+                                      QStringLiteral("ERROR"));
+        return;
+    }
+
+    m_aiWidget->clearStaleProposalWarning();
     m_aiWidget->applyExecutionResponse(resp);
     m_aiWidget->setCanUndo(m_engine->canUndo());
+    if (resp.status == CommandStatus::Ok && m_activeProposalRequestId == requestId) {
+        m_activeProposalRequestId.clear();
+    }
     m_aiWidget->appendActivityLog(
         QStringLiteral("timeline-writer"),
         QStringLiteral("%1 -> revision %2 %3").arg(commandStatusToString(resp.status)).arg(resp.currentRevision).arg(resp.errorMessage),
@@ -892,43 +1115,58 @@ void BangOnProIntegration::approveBatch(const TimelineCommandBatch &batch)
     }
 }
 
+void BangOnProIntegration::regenerateProposal(const QString &requestId)
+{
+    if (!requestId.isEmpty()) {
+        m_engine->rejectProposal(requestId, QStringLiteral("Regenerating against updated timeline revision"));
+    }
+    m_activeProposalRequestId.clear();
+    m_aiWidget->clearProposal();
+    const QString instruction = m_lastInstruction.isEmpty() ? m_aiWidget->instructionText() : m_lastInstruction;
+    const QString profileId = m_aiWidget->selectedProfileId();
+    startProposal(instruction, profileId, m_lastCustomProfilePath);
+}
+
 void BangOnProIntegration::rejectBatch(const QString &requestId)
 {
     m_engine->rejectProposal(requestId, QStringLiteral("Rejected by user"));
+    if (m_activeProposalRequestId == requestId) {
+        m_activeProposalRequestId.clear();
+    }
     m_aiWidget->clearProposal();
     m_aiWidget->appendActivityLog(QStringLiteral("integration"), QStringLiteral("Proposal %1 rejected; timeline untouched").arg(requestId));
 }
 
-void BangOnProIntegration::toggleCompareMode(bool previewBefore)
+void BangOnProIntegration::toggleCompareMode(bool previewEnabled)
 {
-    if (previewBefore) {
-        if (!m_compareUndidBatch && m_engine->canUndo()) {
-            const TimelineCommandResponse resp = m_engine->undoLastTransaction(QStringLiteral("compare-before"));
-            if (resp.status == CommandStatus::Ok) {
-                m_compareUndidBatch = true;
-                m_aiWidget->appendActivityLog(QStringLiteral("compare"),
-                                              QStringLiteral("Showing BEFORE (A) timeline state (revision %1)").arg(resp.currentRevision));
-                return;
-            }
-        }
-        m_aiWidget->appendActivityLog(QStringLiteral("compare"),
-                                      QStringLiteral("Compare active: proposal not yet applied; programme monitor shows current (A) timeline"));
-    } else if (m_compareUndidBatch && m_engine->canRedo()) {
-        const TimelineCommandResponse resp = m_engine->redoLastTransaction(QStringLiteral("compare-after"));
-        m_compareUndidBatch = false;
-        m_aiWidget->setCanUndo(m_engine->canUndo());
-        m_aiWidget->appendActivityLog(QStringLiteral("compare"),
-                                      QStringLiteral("Restored AFTER (B) AI timeline state (revision %1)").arg(resp.currentRevision));
-    } else {
-        m_compareUndidBatch = false;
-        m_aiWidget->appendActivityLog(QStringLiteral("compare"), QStringLiteral("Compare mode off"));
+    if (!previewEnabled) {
+        m_aiWidget->setIsolatedPreviewSummary(QJsonObject{});
+        m_aiWidget->appendActivityLog(QStringLiteral("compare"), QStringLiteral("Showing current live timeline (A); isolated preview hidden"));
+        return;
     }
+
+    const QString reqId = m_aiWidget->hasPendingProposal() ? m_aiWidget->currentProposal().requestId : m_activeProposalRequestId;
+    if (reqId.isEmpty()) {
+        m_aiWidget->appendActivityLog(QStringLiteral("compare"), QStringLiteral("No pending proposal to preview; live timeline unmodified"));
+        return;
+    }
+
+    // Strictly non-destructive isolated clone simulation: NEVER runs undo/redo on the live timeline.
+    QSet<QString> selectedSet;
+    for (const QString &opId : m_aiWidget->selectedOperationIds()) {
+        selectedSet.insert(opId);
+    }
+    const QJsonObject preview = m_engine->previewPendingProposal(reqId, selectedSet.isEmpty() ? nullptr : &selectedSet);
+    m_aiWidget->setIsolatedPreviewSummary(preview);
+    m_aiWidget->appendActivityLog(QStringLiteral("compare"),
+                                  QStringLiteral("Isolated A/B preview computed for '%1' (live_timeline_mutated=false, can_apply=%2)")
+                                      .arg(reqId, preview.value(QStringLiteral("can_apply")).toBool(false) ? QStringLiteral("yes") : QStringLiteral("no")));
 }
 
 void BangOnProIntegration::undoLast()
 {
-    m_compareUndidBatch = false;
     m_aiWidget->setCompareModeActive(false);
+    m_aiWidget->setIsolatedPreviewSummary(QJsonObject{});
     const TimelineCommandResponse resp = m_engine->undoLastTransaction(QStringLiteral("user"));
     m_aiWidget->setCanUndo(m_engine->canUndo());
     m_aiWidget->appendActivityLog(
@@ -978,9 +1216,9 @@ void BangOnProIntegration::importPresetArchive(const QString &zipPath)
     if (m_aiWidget) {
         m_aiWidget->appendActivityLog(QStringLiteral("premiere-compat"), QStringLiteral("Importing Premiere preset archive: %1").arg(zipPath));
     }
-    connect(proc, &QProcess::finished, this, [this, proc](int code, QProcess::ExitStatus) {
+    connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this, [this, proc](int code, QProcess::ExitStatus status) {
         proc->deleteLater();
-        if (code == 0) {
+        if (status == QProcess::NormalExit && code == 0) {
             loadPresetReportIfPresent();
             if (m_presetDock) {
                 m_presetDock->show();

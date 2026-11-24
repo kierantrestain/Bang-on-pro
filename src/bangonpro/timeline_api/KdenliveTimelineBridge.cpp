@@ -25,6 +25,7 @@
 
 #include <mlt++/MltProperties.h>
 
+#include <QCryptographicHash>
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QRegularExpression>
@@ -85,6 +86,256 @@ QString KdenliveTimelineBridge::backendName() const
 void KdenliveTimelineBridge::setTimelineOverride(std::shared_ptr<TimelineItemModel> timeline)
 {
     m_explicitTimeline = std::move(timeline);
+}
+
+QString KdenliveTimelineBridge::currentProjectId() const
+{
+    if (!Core::self()) {
+        return {};
+    }
+    if (KdenliveDoc *doc = Core::self()->currentDoc(); doc != nullptr) {
+        const QString docId = doc->getDocumentProperty(QStringLiteral("documentid")).trimmed();
+        if (!docId.isEmpty()) {
+            return docId;
+        }
+        const QString urlStr = doc->url().toLocalFile().trimmed();
+        if (!urlStr.isEmpty()) {
+            return urlStr;
+        }
+    }
+    return {};
+}
+
+QString KdenliveTimelineBridge::currentSequenceId() const
+{
+    if (!Core::self()) {
+        return {};
+    }
+    if (KdenliveDoc *doc = Core::self()->currentDoc(); doc != nullptr) {
+        if (!doc->activeUuid.isNull()) {
+            return doc->activeUuid.toString(QUuid::WithoutBraces);
+        }
+    }
+    return {};
+}
+
+TimelineStateFingerprint KdenliveTimelineBridge::captureStateFingerprint(const QString &sequenceId) const
+{
+    TimelineStateFingerprint fp;
+    fp.projectId = currentProjectId();
+    fp.sequenceId = sequenceId.trimmed().isEmpty() ? currentSequenceId() : sequenceId.trimmed();
+
+    std::shared_ptr<TimelineItemModel> timeline = resolveTimeline(fp.sequenceId);
+    if (!timeline) {
+        fp.valid = false;
+        return fp;
+    }
+
+    QVector<QPair<int, int>> orderedTracks;
+    const auto allTrackIds = timeline->getAllTracksIds();
+    orderedTracks.reserve(static_cast<int>(allTrackIds.size()));
+    for (int tid : allTrackIds) {
+        orderedTracks.append({timeline->getTrackPosition(tid), tid});
+    }
+    std::sort(orderedTracks.begin(), orderedTracks.end(), [](const QPair<int, int> &a, const QPair<int, int> &b) { return a.first < b.first; });
+
+    QSet<int> seenClipIds;
+    for (const auto &pair : orderedTracks) {
+        const int tid = pair.second;
+        const QString tidStr = QString::number(tid);
+        const QString tag = timeline->getTrackTagById(tid);
+        const QString kind = timeline->isAudioTrack(tid) ? QStringLiteral("audio") : QStringLiteral("video");
+        fp.trackIds.append(tidStr);
+        fp.trackSignatures.insert(tidStr, QStringLiteral("%1|%2|%3").arg(kind, tag).arg(pair.first));
+        if (!tag.isEmpty()) {
+            fp.trackSignatures.insert(tag, QStringLiteral("%1|%2|%3").arg(kind, tidStr).arg(pair.first));
+        }
+
+        const auto items = timeline->getItemsInRange(tid, 0, -1, false);
+        for (int itemId : items) {
+            if (!timeline->isClip(itemId) || seenClipIds.contains(itemId)) {
+                continue;
+            }
+            seenClipIds.insert(itemId);
+            const QString cidStr = QString::number(itemId);
+            const int pos = timeline->getClipPosition(itemId);
+            const int inFrame = timeline->getClipIn(itemId);
+            const int dur = timeline->getClipPlaytime(itemId);
+            const QString binId = timeline->getClipBinId(itemId);
+            fp.clipIds.append(cidStr);
+            fp.clipSignatures.insert(cidStr, QStringLiteral("%1|%2|%3|%4|%5").arg(tid).arg(pos).arg(inFrame).arg(dur).arg(binId));
+        }
+    }
+
+    // Include reverse alias entries so logical IDs created by previous AI batches are also tracked.
+    for (auto it = m_trackAliases.cbegin(); it != m_trackAliases.cend(); ++it) {
+        if (timeline->isTrack(it.value())) {
+            const QString aliasSig = fp.trackSignatures.value(QString::number(it.value()));
+            if (!aliasSig.isEmpty()) {
+                fp.trackSignatures.insert(it.key(), aliasSig);
+            }
+        }
+    }
+    for (auto it = m_clipAliases.cbegin(); it != m_clipAliases.cend(); ++it) {
+        if (timeline->isClip(it.value())) {
+            const QString aliasSig = fp.clipSignatures.value(QString::number(it.value()));
+            if (!aliasSig.isEmpty()) {
+                fp.clipSignatures.insert(it.key(), aliasSig);
+            }
+        }
+    }
+
+    fp.trackIds.sort();
+    fp.clipIds.sort();
+
+    QCryptographicHash hasher(QCryptographicHash::Sha256);
+    hasher.addData(QByteArrayLiteral("proj="));
+    hasher.addData(fp.projectId.toUtf8());
+    hasher.addData(QByteArrayLiteral("\nseq="));
+    hasher.addData(fp.sequenceId.toUtf8());
+    for (auto it = fp.trackSignatures.cbegin(); it != fp.trackSignatures.cend(); ++it) {
+        hasher.addData(QByteArrayLiteral("\nt="));
+        hasher.addData(it.key().toUtf8());
+        hasher.addData(QByteArrayLiteral(":"));
+        hasher.addData(it.value().toUtf8());
+    }
+    for (auto it = fp.clipSignatures.cbegin(); it != fp.clipSignatures.cend(); ++it) {
+        hasher.addData(QByteArrayLiteral("\nc="));
+        hasher.addData(it.key().toUtf8());
+        hasher.addData(QByteArrayLiteral(":"));
+        hasher.addData(it.value().toUtf8());
+    }
+    fp.digest = QString::fromLatin1(hasher.result().toHex());
+    fp.valid = true;
+    return fp;
+}
+
+QJsonObject KdenliveTimelineBridge::captureReadOnlyStateJson(const QString &sequenceId) const
+{
+    const QString seqId =
+        sequenceId.trimmed().isEmpty() ? (currentSequenceId().isEmpty() ? QStringLiteral("seq_main") : currentSequenceId()) : sequenceId.trimmed();
+    std::shared_ptr<TimelineItemModel> timeline = resolveTimeline(seqId);
+    if (!timeline) {
+        return {};
+    }
+
+    QJsonObject root;
+    root.insert(QStringLiteral("active_sequence_id"), seqId);
+
+    QJsonArray sequencesArr;
+    QJsonObject seqObj;
+    seqObj.insert(QStringLiteral("sequence_id"), seqId);
+    seqObj.insert(QStringLiteral("name"), QStringLiteral("Active Sequence"));
+    const double fps = Core::self() ? Core::self()->getCurrentFps() : 25.0;
+    seqObj.insert(QStringLiteral("fps_num"), qMax(1, static_cast<int>(std::lround(fps))));
+    seqObj.insert(QStringLiteral("fps_den"), 1);
+    seqObj.insert(QStringLiteral("width"), 1920);
+    seqObj.insert(QStringLiteral("height"), 1080);
+    sequencesArr.append(seqObj);
+    root.insert(QStringLiteral("sequences"), sequencesArr);
+
+    QJsonArray mediaArr;
+    QSet<QString> addedMedia;
+    if (Core::self() && Core::self()->projectItemModel()) {
+        const auto binIds = Core::self()->projectItemModel()->getAllClipIds();
+        for (const QString &bid : binIds) {
+            auto binClip = Core::self()->projectItemModel()->getClipByBinID(bid);
+            if (!binClip) {
+                continue;
+            }
+            const QString srcPath = binClip->url();
+            if (srcPath.isEmpty()) {
+                continue;
+            }
+            QJsonObject m;
+            m.insert(QStringLiteral("media_ref"), bid);
+            m.insert(QStringLiteral("source_path"), srcPath);
+            m.insert(QStringLiteral("name"), binClip->clipName());
+            m.insert(QStringLiteral("media_type"), QStringLiteral("av"));
+            m.insert(QStringLiteral("duration_frames"), static_cast<int>(binClip->frameDuration()));
+            mediaArr.append(m);
+            addedMedia.insert(bid);
+        }
+    }
+
+    QJsonArray tracksArr;
+    QJsonArray clipsArr;
+    QVector<QPair<int, int>> orderedTracks;
+    for (int tid : timeline->getAllTracksIds()) {
+        orderedTracks.append({timeline->getTrackPosition(tid), tid});
+    }
+    std::sort(orderedTracks.begin(), orderedTracks.end(), [](const QPair<int, int> &a, const QPair<int, int> &b) { return a.first < b.first; });
+
+    QSet<int> seenClipIds;
+    int vIdx = 1;
+    int aIdx = 1;
+    for (const auto &pair : orderedTracks) {
+        const int tid = pair.second;
+        const bool isAudio = timeline->isAudioTrack(tid);
+        const QString tag = timeline->getTrackTagById(tid);
+        const QString logicalTag = !tag.isEmpty() ? tag : (isAudio ? QStringLiteral("A%1").arg(aIdx) : QStringLiteral("V%1").arg(vIdx));
+        if (isAudio) {
+            ++aIdx;
+        } else {
+            ++vIdx;
+        }
+
+        QJsonObject t;
+        t.insert(QStringLiteral("track_id"), logicalTag);
+        t.insert(QStringLiteral("sequence_id"), seqId);
+        t.insert(QStringLiteral("name"), logicalTag);
+        t.insert(QStringLiteral("kind"), isAudio ? QStringLiteral("audio") : QStringLiteral("video"));
+        t.insert(QStringLiteral("index"), pair.first);
+        tracksArr.append(t);
+
+        const auto items = timeline->getItemsInRange(tid, 0, -1, false);
+        for (int itemId : items) {
+            if (!timeline->isClip(itemId) || seenClipIds.contains(itemId)) {
+                continue;
+            }
+            seenClipIds.insert(itemId);
+            const int pos = timeline->getClipPosition(itemId);
+            const int inFrame = timeline->getClipIn(itemId);
+            const int dur = qMax(1, timeline->getClipPlaytime(itemId));
+            const QString binId = timeline->getClipBinId(itemId);
+
+            if (!binId.isEmpty() && !addedMedia.contains(binId)) {
+                QJsonObject m;
+                m.insert(QStringLiteral("media_ref"), binId);
+                m.insert(QStringLiteral("name"), timeline->getClipName(itemId));
+                m.insert(QStringLiteral("duration_frames"), inFrame + dur);
+                mediaArr.append(m);
+                addedMedia.insert(binId);
+            }
+
+            QJsonObject fr;
+            fr.insert(QStringLiteral("in_frame"), inFrame);
+            fr.insert(QStringLiteral("out_frame"), inFrame + dur);
+            fr.insert(QStringLiteral("timeline_start"), pos);
+
+            QJsonObject c;
+            c.insert(QStringLiteral("clip_id"), QString::number(itemId));
+            c.insert(QStringLiteral("sequence_id"), seqId);
+            c.insert(QStringLiteral("track_id"), logicalTag);
+            c.insert(QStringLiteral("media_ref"), binId);
+            c.insert(QStringLiteral("name"), timeline->getClipName(itemId));
+            c.insert(QStringLiteral("frame_range"), fr);
+            clipsArr.append(c);
+        }
+    }
+
+    root.insert(QStringLiteral("media_bin"), mediaArr);
+    root.insert(QStringLiteral("tracks"), tracksArr);
+    root.insert(QStringLiteral("clips"), clipsArr);
+    root.insert(QStringLiteral("captions"), QJsonArray{});
+    root.insert(QStringLiteral("markers"), QJsonArray{});
+    root.insert(QStringLiteral("masks"), QJsonArray{});
+    root.insert(QStringLiteral("transitions"), QJsonArray{});
+    root.insert(QStringLiteral("lower_thirds"), QJsonArray{});
+    root.insert(QStringLiteral("camera_selections"), QJsonArray{});
+    root.insert(QStringLiteral("sync_groups"), QJsonArray{});
+    root.insert(QStringLiteral("export_requests"), QJsonArray{});
+    return root;
 }
 
 std::shared_ptr<TimelineItemModel> KdenliveTimelineBridge::resolveTimeline(const QString &sequenceId) const

@@ -144,6 +144,20 @@ public:
     /** @brief Update the compact storage/cache summary label inside the dock. */
     void setStorageSummaryText(const QString &summary);
 
+    /** @brief Show or clear an explicit stale/conflict banner with Rebase & Regenerate actions. */
+    void showStaleProposalWarning(const QString &summary, bool canRebase);
+    void clearStaleProposalWarning();
+    bool isStaleProposalWarningVisible() const;
+
+    /** @brief Show or clear a clarification prompt when an instruction is ambiguous or out-of-scope. */
+    void showClarificationPrompt(const QString &question);
+    void clearClarificationPrompt();
+    QString clarificationPromptText() const;
+
+    /** @brief Display read-only isolated A/B preview simulation diff (live timeline untouched). */
+    void setIsolatedPreviewSummary(const QJsonObject &previewJson);
+    QString isolatedPreviewSummaryText() const;
+
 Q_SIGNALS:
     /** @brief Emitted when the user requests a new AI edit proposal. */
     void proposalRequested(const QString &instruction, const QString &profileId, const QString &customProfilePath);
@@ -151,13 +165,22 @@ Q_SIGNALS:
     /** @brief Emitted when the user clicks Accept & Apply on the pending batch (filtered to checked ops). */
     void batchApproveRequested(const BangOnPro::TimelineCommandBatch &batch);
 
+    /** @brief Emitted alongside batchApproveRequested with exact request_id and selected op_ids. */
+    void batchApproveSelectionRequested(const QString &requestId, const QStringList &selectedOpIds);
+
+    /** @brief Emitted when the user explicitly confirms Rebase & Apply on a stale proposal. */
+    void batchRebaseApproveRequested(const QString &requestId, const QStringList &selectedOpIds);
+
+    /** @brief Emitted when the user clicks Regenerate Proposal after a stale/context conflict. */
+    void regenerateProposalRequested(const QString &requestId);
+
     /** @brief Emitted when the user toggles individual operation checkboxes in the diff tree. */
     void selectedOperationIdsChanged(const QStringList &opIds);
 
     /** @brief Emitted when the user clicks Reject on the pending batch. */
     void batchRejectRequested(const QString &requestId);
 
-    /** @brief Emitted when the user toggles A/B Compare mode (true = AI preview, false = original). */
+    /** @brief Emitted when the user toggles A/B Compare mode (true = isolated AI preview, false = original). */
     void compareModeToggled(bool previewEnabled);
 
     /** @brief Emitted when the user requests a refinement pass on the current proposal. */
@@ -177,6 +200,9 @@ Q_SIGNALS:
 
     /** @brief Emitted when the user clicks AI Providers & Consent to open ExternalProviderConsentDialog. */
     void providerSettingsRequested();
+
+    /** @brief Emitted when the user clicks Manage Models to open ModelManagerDialog. */
+    void modelManagerRequested();
 
     /** @brief Emitted when the user clicks Clear Cache in the Storage & Models footer. */
     void clearCacheRequested();
@@ -223,6 +249,15 @@ private:
     QVector<QPushButton *> m_quickChipButtons;
     QPushButton *m_useBinMediaButton = nullptr;
 
+    // Clarification, Stale Proposal & Isolated Preview Banners
+    QFrame *m_clarificationBanner = nullptr;
+    QLabel *m_clarificationLabel = nullptr;
+    QFrame *m_staleBanner = nullptr;
+    QLabel *m_staleLabel = nullptr;
+    QPushButton *m_rebaseApplyButton = nullptr;
+    QPushButton *m_regenerateButton = nullptr;
+    QLabel *m_isolatedPreviewLabel = nullptr;
+
     // Proposal diff tree & per-change selection helpers
     QLabel *m_proposalSummaryLabel = nullptr;
     QTreeWidget *m_diffTree = nullptr;
@@ -245,6 +280,7 @@ private:
     QPushButton *m_cancelButton = nullptr;
     QPlainTextEdit *m_activityLog = nullptr;
     QLabel *m_storageSummaryLabel = nullptr;
+    QPushButton *m_manageModelsButton = nullptr;
     QPushButton *m_clearCacheButton = nullptr;
 
     // State

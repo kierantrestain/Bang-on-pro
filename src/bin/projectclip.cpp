@@ -1281,8 +1281,7 @@ std::pair<std::shared_ptr<Mlt::Producer>, bool> ProjectClip::giveMasterAndGetTim
         // check whether it's a timewarp
         double speed = 1.0;
         bool timeWarp = false;
-        ProjectClip::TimeWarpInfo remapInfo;
-        remapInfo.enableRemap = false;
+        ProjectClip::TimeWarpInfo remapInfo{false, QString(), 0, QString()};
         if (master->parent().property_exists("warp_speed")) {
             speed = master->parent().get_double("warp_speed");
             timeWarp = true;

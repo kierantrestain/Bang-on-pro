@@ -857,32 +857,58 @@ def ingest_timeline_state_json(state_path: str | Path) -> ProjectContext:
         if c and c not in speakers:
             speakers.append(c)
 
-    # Support timeline_state.json schema (tracks + clips) AND analysis_state.json schema (media_assets + rough_cut_shots)
-    for tr in data.get("tracks", []):
+    # Support C++ TimelineCommandEngine::stateSnapshotJson() (nested "state" dict),
+    # flat timeline_state.json (tracks + clips), AND analysis_state.json (media_assets + rough_cut_shots).
+    state_body = data.get("state") if isinstance(data.get("state"), dict) else data
+    if not isinstance(state_body, dict):
+        state_body = data
+
+    for mb in state_body.get("media_bin", []):
+        if not isinstance(mb, dict):
+            continue
+        m_ref = str(mb.get("media_ref") or "").strip()
+        if not m_ref:
+            continue
+        fp = str(mb.get("source_path") or mb.get("file_path") or "")
+        media_resources[m_ref] = {
+            "media_ref": m_ref,
+            "camera_id": str(mb.get("name") or m_ref),
+            "clip_name": str(mb.get("name") or m_ref),
+            "file_path": fp,
+            "duration_frames": int(mb.get("duration_frames", 0)),
+            "exists_on_disk": bool(fp and Path(fp).is_file()),
+        }
+
+    for tr in state_body.get("tracks", []):
         tracks.append(
             ProjectTrackInfo(
                 track_id=str(tr.get("track_id", tr.get("id", "V1"))),
                 name=str(tr.get("name", tr.get("track_id", "Track"))),
-                track_type=str(tr.get("track_type", tr.get("type", "video"))),
+                track_type=str(tr.get("track_type", tr.get("kind", tr.get("type", "video")))),
                 clip_count=int(tr.get("clip_count", 0)),
-                filters=list(tr.get("filters", [])),
+                filters=list(tr.get("filters", tr.get("effects", []))),
             )
         )
 
-    for c_idx, clip in enumerate(data.get("clips", []), start=1):
-        in_f = int(clip.get("in_frame", 0))
-        out_f = int(clip.get("out_frame", in_f))
-        tl_s = int(clip.get("timeline_start", 0))
-        dur_f = max(1, int(clip.get("duration_frames", out_f - in_f + 1)))
+    for c_idx, clip in enumerate(state_body.get("clips", []), start=1):
+        fr = clip.get("frame_range") if isinstance(clip.get("frame_range"), dict) else {}
+        in_f = int(clip.get("in_frame", fr.get("in_frame", 0)))
+        out_f = int(clip.get("out_frame", fr.get("out_frame", in_f)))
+        tl_s = int(clip.get("timeline_start", fr.get("timeline_start", 0)))
+        dur_f = max(1, int(clip.get("duration_frames", max(1, out_f - in_f))))
         tl_e = int(clip.get("timeline_end", tl_s + dur_f))
+        m_ref_raw = clip.get("media_ref")
+        resolved_fp = clip.get("file_path")
+        if not resolved_fp and m_ref_raw and str(m_ref_raw) in media_resources:
+            resolved_fp = media_resources[str(m_ref_raw)].get("file_path") or None
         clips.append(
             ProjectClipInfo(
                 clip_id=str(clip.get("clip_id", f"clip_{c_idx:03d}")),
                 track_id=str(clip.get("track_id", "V1")),
                 producer_id=str(clip.get("producer_id", "")),
-                media_ref=clip.get("media_ref"),
-                file_path=clip.get("file_path"),
-                clip_name=str(clip.get("clip_name", clip.get("clip_id", f"clip_{c_idx:03d}"))),
+                media_ref=str(m_ref_raw) if m_ref_raw is not None else None,
+                file_path=str(resolved_fp) if resolved_fp else None,
+                clip_name=str(clip.get("clip_name", clip.get("name", clip.get("clip_id", f"clip_{c_idx:03d}")))),
                 in_frame=in_f,
                 out_frame=out_f,
                 timeline_start=tl_s,
@@ -890,7 +916,7 @@ def ingest_timeline_state_json(state_path: str | Path) -> ProjectContext:
                 duration_frames=dur_f,
                 duration_sec=round(dur_f / max(1.0, fps_val), 4),
                 clip_kind=str(clip.get("clip_kind", "av")),
-                filters=list(clip.get("filters", [])),
+                filters=list(clip.get("filters", clip.get("effects", []))),
             )
         )
         if clip.get("file_path"):
@@ -899,8 +925,8 @@ def ingest_timeline_state_json(state_path: str | Path) -> ProjectContext:
                 m_ref,
                 {
                     "media_ref": m_ref,
-                    "camera_id": str(clip.get("camera_id") or clip.get("clip_name") or m_ref),
-                    "clip_name": str(clip.get("clip_name") or m_ref),
+                    "camera_id": str(clip.get("camera_id") or clip.get("clip_name") or clip.get("name") or m_ref),
+                    "clip_name": str(clip.get("clip_name") or clip.get("name") or m_ref),
                     "file_path": str(clip["file_path"]),
                     "exists_on_disk": Path(str(clip["file_path"])).is_file(),
                 },
@@ -979,7 +1005,7 @@ def ingest_timeline_state_json(state_path: str | Path) -> ProjectContext:
         source_kind="timeline_state_json",
         source_path=str(json_path),
         project_id=str(data.get("project_id", json_path.stem)),
-        sequence_id=str(data.get("sequence_id", "seq_main")),
+        sequence_id=str(data.get("sequence_id") or state_body.get("active_sequence_id") or "seq_main"),
         revision=int(data.get("revision", 0)),
         profile_id=data.get("profile_id"),
         width=int(data.get("width", 1920)),
@@ -991,11 +1017,11 @@ def ingest_timeline_state_json(state_path: str | Path) -> ProjectContext:
         tracks=tracks,
         clips=clips,
         media_resources=media_resources,
-        markers=list(data.get("markers", data.get("review_markers", []))),
+        markers=list(state_body.get("markers") or data.get("markers") or data.get("review_markers") or []),
         speakers=speakers,
         transcript_segments=transcript_segments,
         audio_filters=list(data.get("audio_filters", [])),
-        subtitles=list(data.get("subtitles", [])),
+        subtitles=list(state_body.get("captions") or data.get("subtitles") or []),
         transcript_path=data.get("transcript_path"),
     )
 
