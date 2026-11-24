@@ -345,6 +345,7 @@ build_application() {
             bangonpro_test_premiere_preset_browser
             bangonpro_test_pro_workspace
             bangonpro_test_roto_studio
+            bangonpro_test_agent_control_centre
         )
     fi
     log "Compiling ${build_targets[*]} with ${JOBS} parallel Ninja jobs..."
