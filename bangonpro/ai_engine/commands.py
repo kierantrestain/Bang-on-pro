@@ -18,6 +18,25 @@ from typing import Any
 from jsonschema import Draft202012Validator
 
 
+KNOWN_MLT_AUDIO_FILTER_IDS: frozenset[str] = frozenset(
+    {
+        "volume",
+        "avfilter.highpass",
+        "avfilter.lowpass",
+        "avfilter.afftdn",
+        "avfilter.arnndn",
+        "avfilter.acompressor",
+        "avfilter.loudnorm",
+        "avfilter.agate",
+        "avfilter.equalizer",
+        "avfilter.alimiter",
+        "loudness",
+        "panner",
+        "mute",
+    }
+)
+
+
 class TimelineCommandValidationError(ValueError):
     """Raised when a Timeline Command API v1 payload fails schema or semantic validation."""
 
@@ -33,6 +52,26 @@ def _get_command_validator() -> Draft202012Validator:
     with schema_path.open("r", encoding="utf-8") as fh:
         schema = json.load(fh)
     return Draft202012Validator(schema)
+
+
+def get_supported_command_types() -> frozenset[str]:
+    """Return the exact set of operation types permitted by ``timeline_command_v1.schema.json``."""
+    schema = _get_command_validator().schema
+    enum_vals = (
+        schema.get("properties", {})
+        .get("operations", {})
+        .get("items", {})
+        .get("properties", {})
+        .get("type", {})
+        .get("enum", [])
+    )
+    return frozenset(str(v) for v in enum_vals)
+
+
+def is_valid_mlt_audio_filter(filter_id: str) -> bool:
+    """Return True if ``filter_id`` is a valid Kdenlive/MLT audio filter identifier."""
+    cleaned = (filter_id or "").strip()
+    return cleaned in KNOWN_MLT_AUDIO_FILTER_IDS or cleaned.startswith("avfilter.")
 
 
 def validate_timeline_command_batch(batch: dict[str, Any]) -> dict[str, Any]:
