@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+    SPDX-FileCopyrightText: 2026 Bang On Pro Contributors
+    SPDX-FileCopyrightText: 2007-2024 Kdenlive Contributors
+    SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
+-->
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleDisplayName</key>
+    <string>Bang On Pro</string>
+    <key>CFBundleExecutable</key>
+    <string>@BANGONPRO_EXECUTABLE@</string>
+    <key>CFBundleIconFile</key>
+    <string>@BANGONPRO_ICON_FILE@</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.bangonpro.editor</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>Bang On Pro</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>@BANGONPRO_VERSION@</string>
+    <key>CFBundleVersion</key>
+    <string>@BANGONPRO_BUILD_NUMBER@</string>
+    <key>CFBundleGetInfoString</key>
+    <string>Bang On Pro @BANGONPRO_VERSION@ (@BANGONPRO_GIT_SHA@) — AI-Native Video Editor built on Kdenlive &amp; MLT</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.video</string>
+    <key>LSArchitecturePriority</key>
+    <array>
+        <string>arm64</string>
+    </array>
+    <key>LSMinimumSystemVersion</key>
+    <string>@BANGONPRO_MIN_MACOS@</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSSupportsAutomaticGraphicsSwitching</key>
+    <true/>
+    <key>CSResourcesFileMapped</key>
+    <true/>
+    <key>NSHumanReadableCopyright</key>
+    <string>Copyright (c) 2026 Bang On Pro Contributors; Built on Kdenlive (c) KDE Contributors. Licensed under GNU GPL v3.0.</string>
+    <key>NSCameraUsageDescription</key>
+    <string>Bang On Pro requests camera access only when capturing video directly into a project bin.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Bang On Pro requests microphone access to record voiceover and studio audio directly onto the timeline.</string>
+    <key>NSDesktopFolderUsageDescription</key>
+    <string>Bang On Pro requests access to import source media and export rendered videos from your Desktop folder.</string>
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>Bang On Pro requests access to save and open editable .kdenlive projects in your Documents folder.</string>
+    <key>NSDownloadsFolderUsageDescription</key>
+    <string>Bang On Pro requests access to import user-selected media and Premiere preset packs from Downloads.</string>
+    <key>NSRemovableVolumesUsageDescription</key>
+    <string>Bang On Pro requests access to read camera media and store optional proxy caches or AI models on external drives.</string>
+    <key>LSApplicationQueriesSchemes</key>
+    <array>
+        <string>https</string>
+    </array>
+    <key>LSEnvironment</key>
+    <dict>
+        <key>BANGONPRO_PACKAGED_MACOS</key>
+        <string>1</string>
+        <key>QT_MAC_WANTS_LAYER</key>
+        <string>1</string>
+        <key>QT_AUTO_SCREEN_SCALE_FACTOR</key>
+        <string>1</string>
+    </dict>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+                <string>kdenlive</string>
+            </array>
+            <key>CFBundleTypeName</key>
+            <string>Bang On Pro / Kdenlive Video Project</string>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>LSHandlerRank</key>
+            <string>Owner</string>
+        </dict>
+        <dict>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+                <string>otio</string>
+            </array>
+            <key>CFBundleTypeName</key>
+            <string>OpenTimelineIO Editorial Timeline</string>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>LSHandlerRank</key>
+            <string>Alternate</string>
+        </dict>
+        <dict>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+                <string>prfpset</string>
+            </array>
+            <key>CFBundleTypeName</key>
+            <string>Adobe Premiere Pro Effect Preset (Import)</string>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>LSHandlerRank</key>
+            <string>Alternate</string>
+        </dict>
+    </array>
+</dict>
+</plist>

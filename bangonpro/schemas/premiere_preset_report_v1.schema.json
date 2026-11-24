@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bangonpro.dev/schemas/premiere_preset_report_v1.schema.json",
+  "title": "Bang On Pro Premiere Preset Compatibility Report v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "generated_at",
+    "source_archive",
+    "summary",
+    "presets"
+  ],
+  "properties": {
+    "schema_version": { "type": "string", "const": "1.0" },
+    "generated_at": { "type": "string" },
+    "source_archive": {
+      "type": "object",
+      "required": ["name", "sha256", "file_count"],
+      "properties": {
+        "name": { "type": "string" },
+        "sha256": { "type": "string" },
+        "file_count": { "type": "integer", "minimum": 0 },
+        "redistribution_restricted": { "type": "boolean", "default": true }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": [
+        "total_presets",
+        "distinct_effects",
+        "exact_validated",
+        "approximated",
+        "unsupported",
+        "missing_dependency"
+      ],
+      "properties": {
+        "total_presets": { "type": "integer", "minimum": 0 },
+        "distinct_effects": { "type": "integer", "minimum": 0 },
+        "exact_validated": { "type": "integer", "minimum": 0 },
+        "approximated": { "type": "integer", "minimum": 0 },
+        "unsupported": { "type": "integer", "minimum": 0 },
+        "missing_dependency": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "presets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "preset_id",
+          "name",
+          "pack",
+          "folder_path",
+          "source_file",
+          "compatibility_status",
+          "effect_chain",
+          "missing_dependencies",
+          "mlt_filters"
+        ],
+        "properties": {
+          "preset_id": { "type": "string" },
+          "name": { "type": "string" },
+          "pack": { "type": "string" },
+          "attribution": { "type": "string" },
+          "folder_path": { "type": "array", "items": { "type": "string" } },
+          "source_file": { "type": "string" },
+          "preset_type": { "type": "string" },
+          "compatibility_status": {
+            "type": "string",
+            "enum": [
+              "exact_validated",
+              "approximated",
+              "unsupported",
+              "missing_dependency"
+            ]
+          },
+          "notes": { "type": "array", "items": { "type": "string" } },
+          "category": { "type": "string" },
+          "tags": { "type": "array", "items": { "type": "string" } },
+          "description": { "type": "string" },
+          "effect_chain": { "type": "array", "items": { "type": "object" } },
+          "missing_dependencies": { "type": "array", "items": { "type": "object" } },
+          "mlt_filters": { "type": "array", "items": { "type": "object" } },
+          "kdenlive_effect_xml": { "type": ["string", "null"] },
+          "original_xml_preserved": { "type": "boolean" },
+          "original_xml": { "type": "string" },
+          "preview_before_path": { "type": ["string", "null"] },
+          "preview_after_path": { "type": ["string", "null"] },
+          "preview_split_path": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "audit_reconciliation": {
+      "type": ["object", "null"]
+    },
+    "missing_source_inputs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["input_name", "expected_path", "reason", "remediation"],
+        "properties": {
+          "input_name": { "type": "string" },
+          "expected_path": { "type": "string" },
+          "reason": { "type": "string" },
+          "remediation": { "type": "string" }
+        }
+      }
+    }
+  }
+}

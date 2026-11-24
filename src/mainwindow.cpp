@@ -108,6 +108,7 @@ SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
 #include <KToolBar>
 #include <KXMLGUIFactory>
 
+#include "bangonpro/BangOnProIntegration.h"
 #include <KConfigGroup>
 #include <QAction>
 #include <QClipboard>
@@ -574,6 +575,13 @@ void MainWindow::init(const QString &mltPath)
     tabifyDockWidget(m_clipMonitorDock, m_projectMonitorDock);
     tabifyDockWidget(m_compositionListDock, m_effectListDock);
     tabifyDockWidget(m_effectStackDock, pCore->bin()->clipPropertiesDock());
+
+    // Bang On Pro: native AI Timeline Command API, AI Assistant Dock, and Premiere Preset Browser
+    auto *bangOnPro = new BangOnPro::BangOnProIntegration(this, m_effectList2, this);
+    if (bangOnPro->presetDock() && m_effectListDock) {
+        tabifyDockWidget(m_effectListDock, bangOnPro->presetDock());
+    }
+
     bool firstRun = readOptions();
     if (KdenliveSettings::lastCacheCheck().isNull()) {
         // Define a date for first check
@@ -2785,7 +2793,7 @@ void MainWindow::slotSwitchAudioThumbs()
 void MainWindow::slotSwitchMarkersComments()
 {
     KdenliveSettings::setShowmarkers(!KdenliveSettings::showmarkers());
-    Q_EMIT getCurrentTimeline()->controller()->showMarkersChanged();
+    Q_EMIT getCurrentTimeline() -> controller()->showMarkersChanged();
     m_buttonShowMarkers->setChecked(KdenliveSettings::showmarkers());
 }
 
@@ -2793,7 +2801,7 @@ void MainWindow::slotSwitchSnap()
 {
     KdenliveSettings::setSnaptopoints(!KdenliveSettings::snaptopoints());
     m_buttonSnap->setChecked(KdenliveSettings::snaptopoints());
-    Q_EMIT getCurrentTimeline()->controller()->snapChanged();
+    Q_EMIT getCurrentTimeline() -> controller()->snapChanged();
 }
 
 void MainWindow::slotShowTimelineTags()
@@ -2956,7 +2964,6 @@ void MainWindow::slotAddMarkerWithCategory()
         return;
     }
 
-
     auto *caller = qobject_cast<QAction *>(QObject::sender());
     if (!caller) {
         return;
@@ -3021,7 +3028,7 @@ void MainWindow::slotRemoveAllClipsInTrack()
 void MainWindow::slotSeparateAudioChannel()
 {
     KdenliveSettings::setDisplayallchannels(!KdenliveSettings::displayallchannels());
-    Q_EMIT getCurrentTimeline()->controller()->audioThumbFormatChanged();
+    Q_EMIT getCurrentTimeline() -> controller()->audioThumbFormatChanged();
     if (m_clipMonitor) {
         m_clipMonitor->refreshAudioThumbs();
     }
@@ -3036,7 +3043,7 @@ void MainWindow::slotAutoTrackHeight(bool enable)
 void MainWindow::slotNormalizeAudioChannel()
 {
     KdenliveSettings::setNormalizechannels(!KdenliveSettings::normalizechannels());
-    Q_EMIT getCurrentTimeline()->controller()->audioThumbNormalizeChanged();
+    Q_EMIT getCurrentTimeline() -> controller()->audioThumbNormalizeChanged();
     if (m_clipMonitor) {
         m_clipMonitor->normalizeAudioThumbs();
     }
@@ -3117,7 +3124,7 @@ void MainWindow::slotExportGuides()
 void MainWindow::slotLockGuides(bool lock)
 {
     KdenliveSettings::setLockedGuides(lock);
-    Q_EMIT getCurrentTimeline()->controller()->guidesLockedChanged();
+    Q_EMIT getCurrentTimeline() -> controller()->guidesLockedChanged();
 }
 
 void MainWindow::slotDeleteGuide()
@@ -4186,7 +4193,7 @@ void MainWindow::slotUpdateTimecodeFormat(int ix)
     Q_EMIT pCore->updateProjectTimecode();
     m_clipMonitor->updateTimecodeFormat();
     m_projectMonitor->updateTimecodeFormat();
-    Q_EMIT getCurrentTimeline()->controller()->frameFormatChanged();
+    Q_EMIT getCurrentTimeline() -> controller()->frameFormatChanged();
     m_timeFormatButton->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
 }
 
@@ -4642,7 +4649,7 @@ void MainWindow::slotEditItemSpeed()
 void MainWindow::slotSwitchTimelineZone(bool active)
 {
     pCore->currentDoc()->setDocumentProperty(QStringLiteral("enableTimelineZone"), active ? QStringLiteral("1") : QStringLiteral("0"));
-    Q_EMIT getCurrentTimeline()->controller()->useRulerChanged();
+    Q_EMIT getCurrentTimeline() -> controller()->useRulerChanged();
     QSignalBlocker blocker(m_useTimelineZone);
     m_useTimelineZone->setActive(active);
 }
@@ -4777,12 +4784,12 @@ void MainWindow::slotEditSubtitle(const QMap<QString, QString> &subProperties)
         if (!subProperties.isEmpty()) {
             subtitleModel->loadProperties(subProperties);
             // Load the disabled / locked state of the subtitle
-            Q_EMIT getCurrentTimeline()->controller()->subtitlesLockedChanged();
-            Q_EMIT getCurrentTimeline()->controller()->subtitlesDisabledChanged();
+            Q_EMIT getCurrentTimeline() -> controller()->subtitlesLockedChanged();
+            Q_EMIT getCurrentTimeline() -> controller()->subtitlesDisabledChanged();
         }
         getCurrentTimeline()->connectSubtitleModel(true);
         // Update subtitle track combo list
-        Q_EMIT getCurrentTimeline()->controller()->subtitlesListChanged();
+        Q_EMIT getCurrentTimeline() -> controller()->subtitlesListChanged();
     } else {
         KdenliveSettings::setShowSubtitles(m_buttonSubtitleEditTool->isChecked());
         getCurrentTimeline()->connectSubtitleModel(false);
@@ -5284,8 +5291,8 @@ void MainWindow::connectTimeline()
     // switch to active subtitle model
     pCore->subtitleWidget()->setModel(getCurrentTimeline()->model()->getSubtitleModel());
     bool hasSubtitleModel = getCurrentTimeline()->hasSubtitles();
-    Q_EMIT getCurrentTimeline()->controller()->subtitlesLockedChanged();
-    Q_EMIT getCurrentTimeline()->controller()->subtitlesDisabledChanged();
+    Q_EMIT getCurrentTimeline() -> controller()->subtitlesLockedChanged();
+    Q_EMIT getCurrentTimeline() -> controller()->subtitlesDisabledChanged();
     bool showSubs = project->getSequenceProperty(uuid, QStringLiteral("hidesubtitle")).toInt() == 0;
     KdenliveSettings::setShowSubtitles(showSubs && hasSubtitleModel);
     getCurrentTimeline()->connectSubtitleModel(hasSubtitleModel);

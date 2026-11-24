@@ -1,0 +1,341 @@
+# SPDX-FileCopyrightText: 2026 Bang On Pro Contributors
+# SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
+
+name: Build macOS Apple Silicon (arm64)
+
+on:
+  push:
+    branches:
+      - main
+      - "bangonpro/**"
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_version:
+        description: "Release version label (defaults to 1.0.0 or git tag)"
+        required: false
+        default: "1.0.0"
+      build_mode:
+        description: "Dependency resolution mode (craft uses KDE CraftMaster Qt6/KF6 binary cache)"
+        required: false
+        type: choice
+        default: "craft"
+        options:
+          - craft
+          - auto
+          - homebrew
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-macos-arm64-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-macos-arm64:
+    name: Build & Package BangOnPro-arm64.dmg (macos-15)
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      CRAFT_ROOT: ${{ github.workspace }}/CraftRoot
+      CRAFT_TARGET: macos-arm-clang
+      CRAFT_PREFIX: ${{ github.workspace }}/CraftRoot/macos-arm-clang
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify native Apple Silicon (arm64) runner
+        run: |
+          echo "OS: $(sw_vers -productVersion)"
+          echo "Arch: $(uname -m)"
+          test "$(uname -m)" = "arm64"
+          xcode-select -p
+
+      - name: Resolve release version
+        id: version
+        env:
+          INPUT_RELEASE_VERSION: ${{ inputs.release_version }}
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            VER="${GITHUB_REF_NAME#v}"
+          elif [[ -n "${INPUT_RELEASE_VERSION:-}" ]]; then
+            VER="${INPUT_RELEASE_VERSION}"
+          else
+            VER="1.0.0"
+          fi
+          echo "app_version=${VER}" >> "$GITHUB_OUTPUT"
+          echo "Resolved Bang On Pro version: ${VER}"
+
+      - name: Install Homebrew base build & packaging tools
+        env:
+          INPUT_BUILD_MODE: ${{ inputs.build_mode || 'craft' }}
+        run: |
+          brew install \
+            cmake \
+            ninja \
+            ccache \
+            pkg-config \
+            create-dmg \
+            python@3.12
+
+          if [[ "${INPUT_BUILD_MODE}" != "craft" ]]; then
+            brew install ffmpeg mlt frei0r qt@6
+          fi
+
+      - name: Restore KDE Craft Qt6/KF6 Apple Silicon prefix cache
+        id: craft-cache
+        if: ${{ (inputs.build_mode || 'craft') != 'homebrew' }}
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.CRAFT_ROOT }}
+          key: craft-qt6-master-macos15-arm64-${{ hashFiles('packaging/macos/CraftConfig.ini', 'packaging/macos/craft_blueprint.py', 'CMakeLists.txt') }}
+          restore-keys: |
+            craft-qt6-master-macos15-arm64-
+
+      - name: Bootstrap KDE CraftMaster (Qt6 + KF6 + MLT 7 + FFmpeg binary cache, arm64)
+        if: ${{ (inputs.build_mode || 'craft') != 'homebrew' && steps.craft-cache.outputs.cache-hit != 'true' }}
+        run: |
+          CRAFTMASTER_DIR="${RUNNER_TEMP}/craftmaster"
+          rm -rf "${CRAFTMASTER_DIR}"
+          git clone --depth=1 https://invent.kde.org/packaging/craftmaster.git --branch=master "${CRAFTMASTER_DIR}"
+
+          python3 "${CRAFTMASTER_DIR}/CraftMaster.py" \
+            --config packaging/macos/CraftConfig.ini \
+            --variables "Root=${CRAFT_ROOT}" \
+            --targets "${CRAFT_TARGET}" \
+            --setup
+
+          python3 "${CRAFTMASTER_DIR}/CraftMaster.py" \
+            --config packaging/macos/CraftConfig.ini \
+            --variables "Root=${CRAFT_ROOT}" \
+            --targets "${CRAFT_TARGET}" \
+            -c -i --options virtual.ignored=True --update craft
+
+          # Overlay Bang On Pro blueprint into Craft's KDE blueprints tree
+          BLUEPRINT_BASE="${CRAFT_PREFIX}/etc/blueprints/locations/craft-blueprints-kde"
+          if [[ ! -d "${BLUEPRINT_BASE}" ]]; then
+            BLUEPRINT_BASE="$(find "${CRAFT_ROOT}" -maxdepth 5 -type d -name craft-blueprints-kde 2>/dev/null | head -n 1 || true)"
+          fi
+          if [[ -n "${BLUEPRINT_BASE}" && -d "${BLUEPRINT_BASE}" ]]; then
+            mkdir -p "${BLUEPRINT_BASE}/kde/kdemultimedia/bangonpro"
+            cp packaging/macos/craft_blueprint.py "${BLUEPRINT_BASE}/kde/kdemultimedia/bangonpro/bangonpro.py"
+          fi
+
+          # Install prebuilt Qt6/KF6/MLT/FFmpeg binary-cached dependencies via KDE's kdenlive blueprint
+          python3 "${CRAFTMASTER_DIR}/CraftMaster.py" \
+            --config packaging/macos/CraftConfig.ini \
+            --variables "Root=${CRAFT_ROOT}" \
+            --targets "${CRAFT_TARGET}" \
+            -c --install-deps kdenlive
+
+          # Trim transient downloaded archives to keep actions/cache compact
+          rm -rf "${CRAFT_PREFIX}/download/archives" "${CRAFT_ROOT}/cache/download" 2>/dev/null || true
+
+      - name: Save KDE Craft Qt6/KF6 Apple Silicon prefix cache
+        if: ${{ (inputs.build_mode || 'craft') != 'homebrew' && steps.craft-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.CRAFT_ROOT }}
+          key: ${{ steps.craft-cache.outputs.cache-primary-key }}
+
+      - name: Configure optional Developer ID signing & notarization
+        id: signing
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          MACOS_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
+          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+        run: |
+          if [[ -n "${MACOS_CERTIFICATE_P12:-}" && -n "${MACOS_CERTIFICATE_PASSWORD:-}" && -n "${MACOS_SIGNING_IDENTITY:-}" ]]; then
+            KEYCHAIN_PATH="${RUNNER_TEMP}/bangonpro-signing.keychain-db"
+            KEYCHAIN_PASS="$(openssl rand -base64 24)"
+            CERT_P12_PATH="${RUNNER_TEMP}/certificate.p12"
+
+            printf '%s' "${MACOS_CERTIFICATE_P12}" | base64 --decode > "${CERT_P12_PATH}"
+            security create-keychain -p "${KEYCHAIN_PASS}" "${KEYCHAIN_PATH}"
+            security set-keychain-settings -lut 21600 "${KEYCHAIN_PATH}"
+            security unlock-keychain -p "${KEYCHAIN_PASS}" "${KEYCHAIN_PATH}"
+            security import "${CERT_P12_PATH}" \
+              -P "${MACOS_CERTIFICATE_PASSWORD}" \
+              -A -t cert -f pkcs12 \
+              -k "${KEYCHAIN_PATH}"
+            security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${KEYCHAIN_PASS}" "${KEYCHAIN_PATH}"
+            security list-keychains -d user -s "${KEYCHAIN_PATH}" login.keychain-db
+            rm -f "${CERT_P12_PATH}"
+
+            echo "APPLE_SIGNING_IDENTITY=${MACOS_SIGNING_IDENTITY}" >> "$GITHUB_ENV"
+            echo "SIGNING_KEYCHAIN_PATH=${KEYCHAIN_PATH}" >> "$GITHUB_ENV"
+            echo "signing_configured=true" >> "$GITHUB_OUTPUT"
+
+            if [[ -n "${MACOS_NOTARY_KEY:-}" && -n "${MACOS_NOTARY_KEY_ID:-}" && -n "${MACOS_NOTARY_ISSUER_ID:-}" ]]; then
+              NOTARY_KEY_FILE="${RUNNER_TEMP}/AuthKey_${MACOS_NOTARY_KEY_ID}.p8"
+              printf '%s' "${MACOS_NOTARY_KEY}" | base64 --decode > "${NOTARY_KEY_FILE}"
+              chmod 600 "${NOTARY_KEY_FILE}"
+              echo "MACOS_NOTARY_KEY_PATH=${NOTARY_KEY_FILE}" >> "$GITHUB_ENV"
+              echo "MACOS_NOTARY_KEY_ID=${MACOS_NOTARY_KEY_ID}" >> "$GITHUB_ENV"
+              echo "MACOS_NOTARY_ISSUER_ID=${MACOS_NOTARY_ISSUER_ID}" >> "$GITHUB_ENV"
+              echo "notarization_configured=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "notarization_configured=false" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "::notice title=Ad-Hoc Signing Fallback::MACOS_CERTIFICATE_P12 / MACOS_SIGNING_IDENTITY secrets are not configured. Building with ad-hoc signature (codesign --force --deep --sign -); artifact will NOT be notarized."
+            echo "signing_configured=false" >> "$GITHUB_OUTPUT"
+            echo "notarization_configured=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Restore macOS arm64 ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-macos15-arm64-qt6-${{ github.ref_name }}-${{ hashFiles('CMakeLists.txt', 'src/CMakeLists.txt') }}
+          restore-keys: |
+            ccache-macos15-arm64-qt6-${{ github.ref_name }}-
+            ccache-macos15-arm64-qt6-
+
+      - name: Build, Relocate, Sign, Package BangOnPro-arm64.dmg & Smoke-Test
+        env:
+          INPUT_BUILD_MODE: ${{ inputs.build_mode || 'craft' }}
+          APP_VERSION: ${{ steps.version.outputs.app_version }}
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+          CCACHE_MAXSIZE: 2G
+        run: |
+          chmod +x packaging/macos/build_macos_arm64.sh packaging/macos/bootstrap_ai_runtime.sh
+          ./packaging/macos/build_macos_arm64.sh \
+            --mode "${INPUT_BUILD_MODE}" \
+            --craft-root "${CRAFT_PREFIX}" \
+            --version "${APP_VERSION}" \
+            --output-dir dist/macos-arm64
+          ccache --show-stats || true
+
+      - name: Run Python QA, security & Apple Silicon performance checks on macOS arm64
+        run: |
+          APP_ABS="${PWD}/dist/macos-arm64/Bang On Pro.app"
+          BUNDLED_PY="${APP_ABS}/Contents/Resources/python-env/bin/python3"
+          if [[ -x "${BUNDLED_PY}" ]]; then
+            PATH="${APP_ABS}/Contents/MacOS:${CRAFT_PREFIX}/bin:${PATH}" \
+            MLT_REPOSITORY="${APP_ABS}/Contents/PlugIns/mlt" \
+            MLT_DATA="${APP_ABS}/Contents/Resources/mlt" \
+            FREI0R_PATH="${APP_ABS}/Contents/PlugIns/frei0r-1" \
+              "${BUNDLED_PY}" -m pytest -v \
+              tests/bangonpro/test_security_and_compliance.py \
+              tests/bangonpro/test_project_integrity.py \
+              tests/bangonpro/test_macos_perf.py
+            mkdir -p dist/macos-arm64/benchmarks
+            PATH="${APP_ABS}/Contents/MacOS:${CRAFT_PREFIX}/bin:${PATH}" \
+            MLT_REPOSITORY="${APP_ABS}/Contents/PlugIns/mlt" \
+            MLT_DATA="${APP_ABS}/Contents/Resources/mlt" \
+            FREI0R_PATH="${APP_ABS}/Contents/PlugIns/frei0r-1" \
+              "${BUNDLED_PY}" -m bangonpro.macos.benchmark \
+              --comprehensive \
+              --duration 1.5 \
+              --output-dir dist/macos-arm64/benchmarks || true
+            if [[ -f dist/macos-arm64/benchmarks/benchmark_report.md ]]; then
+              cat dist/macos-arm64/benchmarks/benchmark_report.md
+            fi
+          else
+            python3 -m pip install --user -r requirements-bangonpro.txt PyYAML Pillow || true
+            python3 -m pytest -v \
+              tests/bangonpro/test_security_and_compliance.py \
+              tests/bangonpro/test_project_integrity.py
+          fi
+
+      - name: Annotate artifact signing state in workflow summary
+        if: always()
+        run: |
+          {
+            echo "## Bang On Pro Apple Silicon (\`arm64\`) Build Summary"
+            echo ""
+            if [[ -f dist/macos-arm64/SIGNING_STATUS.txt ]]; then
+              echo '```'
+              cat dist/macos-arm64/SIGNING_STATUS.txt
+              echo '```'
+            else
+              echo "> Build did not reach packaging/signing stage."
+            fi
+            echo ""
+            if [[ -f dist/macos-arm64/SHA256SUMS.txt ]]; then
+              echo "### SHA-256 Checksums"
+              echo '```'
+              cat dist/macos-arm64/SHA256SUMS.txt
+              echo '```'
+            fi
+            echo ""
+            if [[ -f dist/macos-arm64/benchmarks/benchmark_report.md ]]; then
+              cat dist/macos-arm64/benchmarks/benchmark_report.md
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Clean up temporary signing keychain & notary key
+        if: always()
+        run: |
+          if [[ -n "${SIGNING_KEYCHAIN_PATH:-}" && -f "${SIGNING_KEYCHAIN_PATH}" ]]; then
+            security delete-keychain "${SIGNING_KEYCHAIN_PATH}" || true
+          fi
+          if [[ -n "${MACOS_NOTARY_KEY_PATH:-}" && -f "${MACOS_NOTARY_KEY_PATH}" ]]; then
+            rm -f "${MACOS_NOTARY_KEY_PATH}"
+          fi
+
+      - name: Upload BangOnPro-arm64.dmg, checksums & verification log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: BangOnPro-macos-arm64-${{ steps.version.outputs.app_version }}
+          path: |
+            dist/macos-arm64/*.dmg
+            dist/macos-arm64/SHA256SUMS.txt
+            dist/macos-arm64/SIGNING_STATUS.txt
+            dist/macos-arm64/BUILD_VERIFICATION.log
+            dist/macos-arm64/benchmarks/
+          retention-days: 30
+          if-no-files-found: warn
+
+  publish-release:
+    name: Publish Versioned GitHub Release with arm64 DMG (Tags Only)
+    needs: build-macos-arm64
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download macOS arm64 build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: BangOnPro-macos-arm64-*
+          merge-multiple: true
+          path: release-assets
+
+      - name: Publish GitHub Release with arm64 DMG, SHA-256 & signing status
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true
+          body: |
+            ## Bang On Pro — Apple Silicon (`arm64`) Native macOS Installer
+
+            Self-contained `.app` bundle packaged as a native Apple Silicon `.dmg` (includes Qt 6, KDE Frameworks 6, MLT 7, frei0r plugins, FFmpeg with Apple VideoToolbox acceleration, Breeze icons, and embedded Python 3.12 AI runtime — zero manual terminal setup required).
+
+            ### 1. Verify Download Integrity (SHA-256)
+            ```bash
+            shasum -a 256 -c SHA256SUMS.txt
+            ```
+
+            ### 2. Install
+            1. Open `BangOnPro-*.dmg` and drag **`Bang On Pro.app`** into **`/Applications`**.
+            2. Inspect `SIGNING_STATUS.txt` attached to this release:
+               - If `signing_state=developer_id_signed_and_notarized`: launch normally.
+               - If `signing_state=adhoc_signed_not_notarized`: on first launch open **System Settings → Privacy & Security → Open Anyway** (or after verifying `SHA256SUMS.txt`, run `xattr -dr com.apple.quarantine "/Applications/Bang On Pro.app"`). See `docs/MACOS_BUILD_AND_INSTALL.md` for details.
+          files: |
+            release-assets/*.dmg
+            release-assets/SHA256SUMS.txt
+            release-assets/SIGNING_STATUS.txt
+            release-assets/BUILD_VERIFICATION.log

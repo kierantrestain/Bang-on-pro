@@ -1,0 +1,13 @@
+# Bang On Pro — Pinned Python Dependencies (Core Runtime & Verification)
+# Optional heavy ML backends (whisperx, faster-whisper, sam2, auto-editor) are
+# documented separately in docs/OPEN_SOURCE_COMPONENTS.md to avoid unnecessary
+# multi-GB model downloads on low-storage Macs.
+numpy>=1.26.0,<3.0.0
+scipy>=1.13.0,<2.0.0
+defusedxml>=0.7.1,<1.0.0
+jsonschema>=4.22.0,<5.0.0
+opentimelineio>=0.17.0,<1.0.0
+scenedetect>=0.6.4,<1.0.0
+Pillow>=10.0.0,<12.0.0
+PyYAML>=6.0,<7.0
+pytest>=8.2.0,<9.0.0
