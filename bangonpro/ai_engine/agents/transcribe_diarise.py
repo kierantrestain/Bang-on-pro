@@ -407,17 +407,24 @@ def _try_neural_whisper_asr(
         if not backends["faster_whisper"]:
             fallback_reasons.append("faster_whisper Python package is not installed")
         else:
-            model_arg = (
-                str(local_model_path.parent)
-                if (local_model_path is not None and local_model_path.is_file())
-                else str(state.metadata.get("whisper_model", "tiny"))
-            )
             try:
                 from faster_whisper import WhisperModel  # type: ignore[import-not-found]
 
-                model = WhisperModel(model_arg, device=device, local_files_only=True)
+                fw_download_root = str(mgr.model_dir / fw_model_id)
+                if local_model_path is not None and local_model_path.is_file():
+                    model = WhisperModel(str(local_model_path.parent), device=device, local_files_only=True)
+                else:
+                    model = WhisperModel(
+                        str(state.metadata.get("whisper_model", "tiny")),
+                        device=device,
+                        download_root=fw_download_root,
+                        local_files_only=True,
+                    )
+                # Decode 16kHz mono float32 PCM via FFmpeg so faster-whisper never crashes on
+                # mismatched host PyAV versions (e.g. av.open metadata_errors TypeError).
+                audio_pcm_16k = np.asarray(extract_mono_pcm(audio_path, sample_rate=16000), dtype=np.float32)
                 segments_iter, _ = model.transcribe(
-                    audio_path,
+                    audio_pcm_16k,
                     vad_filter=True,
                     word_timestamps=True,
                 )

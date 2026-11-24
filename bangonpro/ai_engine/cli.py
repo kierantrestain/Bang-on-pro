@@ -372,6 +372,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         asr_model_id=args.asr_model,
     )
 
+    asr_rep = state.metadata.get("asr_backend_report")
+    asr_rep_dict = asr_rep if isinstance(asr_rep, dict) else {}
     summary = {
         "project_id": state.project_id,
         "sequence_id": state.sequence_id,
@@ -389,8 +391,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "shot_count": len(state.rough_cut_shots),
         "caption_count": len(state.captions),
         "lower_third_count": len(state.lower_thirds),
-        "asr_backend_used": state.metadata.get("asr_backend_used"),
-        "is_neural_inference": state.metadata.get("is_neural_inference", False),
+        "asr_backend_used": asr_rep_dict.get("backend_id") or state.metadata.get("asr_backend_used"),
+        "is_neural_inference": bool(asr_rep_dict.get("is_neural_inference", state.metadata.get("is_neural_inference", False))),
+        "asr_backend_report": asr_rep_dict,
         "qc_passed": state.qc_report.passed,
         "qc_issue_count": len(state.qc_report.issues),
         "missing_media_count": len(state.missing_media),

@@ -56,6 +56,8 @@ _SAM2_WEIGHT_CANDIDATES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
 }
 
 _ONNX_PAIRED_CANDIDATES: tuple[tuple[str, str], ...] = (
+    ("mobile_sam_image_encoder.onnx", "sam_mask_decoder_single.onnx"),
+    ("mobile_sam_image_encoder.onnx", "mobile_sam_mask_decoder.onnx"),
     ("mobile_sam_encoder.onnx", "mobile_sam_decoder.onnx"),
     ("mobilesam_encoder.onnx", "mobilesam_decoder.onnx"),
     ("edge_sam_encoder.onnx", "edge_sam_decoder.onnx"),
@@ -84,7 +86,16 @@ def resolve_model_dir(model_dir: str | Path | None = None) -> Path:
 
 
 def _candidate_model_subdirs(root: Path) -> list[Path]:
-    return [root, root / "sam2", root / "sam", root / "mobile_sam", root / "roto"]
+    return [
+        root,
+        root / "mobilesam-onnx",
+        root / "sam2.1-hiera-tiny",
+        root / "sam2.1-hiera-small",
+        root / "sam2",
+        root / "sam",
+        root / "mobile_sam",
+        root / "roto",
+    ]
 
 
 def _find_sam2_weights(variant: str, model_dir: Path) -> tuple[Path | None, str]:
@@ -873,9 +884,22 @@ def _try_mobile_sam_onnx_segmentation(
             dec_sess = ort.InferenceSession(str(decoder_path), providers=providers)
             enc_in = enc_sess.get_inputs()[0]
             enc_shape = getattr(enc_in, "shape", None) or [1, 3, 1024, 1024]
-            target_h = int(enc_shape[2]) if len(enc_shape) >= 4 and isinstance(enc_shape[2], int) and enc_shape[2] > 0 else 1024
-            target_w = int(enc_shape[3]) if len(enc_shape) >= 4 and isinstance(enc_shape[3], int) and enc_shape[3] > 0 else 1024
-            img_tensor, sx, sy = _preprocess_encoder_input(target_h, target_w)
+            if len(enc_shape) == 3 and (enc_shape[2] == 3 or str(enc_shape[2]) == "3"):
+                # Rank-3 HWC MobileSAM encoder (e.g. Acly/MobileSAM) expects aspect-preserving
+                # longest-side-1024 float32 RGB HWC input and handles padding + normalization internally.
+                longest_scale = 1024.0 / float(max(1, h, w))
+                new_w = max(1, int(round(w * longest_scale)))
+                new_h = max(1, int(round(h * longest_scale)))
+                img_tensor = np.asarray(
+                    Image.fromarray(arr, mode="RGB").resize((new_w, new_h), resample),
+                    dtype=np.float32,
+                )
+                sx = float(new_w) / float(max(1, w))
+                sy = float(new_h) / float(max(1, h))
+            else:
+                target_h = int(enc_shape[2]) if len(enc_shape) >= 4 and isinstance(enc_shape[2], int) and enc_shape[2] > 0 else 1024
+                target_w = int(enc_shape[3]) if len(enc_shape) >= 4 and isinstance(enc_shape[3], int) and enc_shape[3] > 0 else 1024
+                img_tensor, sx, sy = _preprocess_encoder_input(target_h, target_w)
             enc_outputs = enc_sess.run(None, {enc_in.name: img_tensor})
             image_embeddings = np.asarray(enc_outputs[0], dtype=np.float32)
 
