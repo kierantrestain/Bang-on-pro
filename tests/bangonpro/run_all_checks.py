@@ -135,6 +135,43 @@ def run_static_checks() -> list[dict[str, Any]]:
             }
         )
 
+    # 4. bash -n on packaging/macos/bootstrap_ai_runtime.sh
+    bootstrap_script = REPO_ROOT / "packaging" / "macos" / "bootstrap_ai_runtime.sh"
+    t0 = time.monotonic()
+    if bootstrap_script.is_file():
+        proc = subprocess.run(
+            ["bash", "-n", str(bootstrap_script)],
+            shell=False,
+            capture_output=True,
+            text=True,
+        )
+        checks.append(
+            {
+                "name": "bash_syntax:bootstrap_ai_runtime.sh",
+                "status": "PASS" if proc.returncode == 0 else "FAIL",
+                "duration_sec": round(time.monotonic() - t0, 3),
+                "detail": proc.stderr.strip() or "ok",
+            }
+        )
+
+    # 5. configparser check on packaging/macos/CraftConfig.ini
+    craft_ini = REPO_ROOT / "packaging" / "macos" / "CraftConfig.ini"
+    t0 = time.monotonic()
+    if craft_ini.is_file():
+        import configparser
+
+        cp = configparser.ConfigParser()
+        cp.optionxform = str
+        ok = bool(cp.read(craft_ini, encoding="utf-8")) and "macos-arm-clang" in cp
+        checks.append(
+            {
+                "name": "ini_syntax:CraftConfig.ini",
+                "status": "PASS" if ok else "FAIL",
+                "duration_sec": round(time.monotonic() - t0, 3),
+                "detail": "ok" if ok else "Missing [macos-arm-clang] section",
+            }
+        )
+
     return checks
 
 

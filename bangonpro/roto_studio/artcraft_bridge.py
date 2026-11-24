@@ -508,18 +508,26 @@ class StoryboardEngine:
         out.parent.mkdir(parents=True, exist_ok=True)
         img = Image.new("RGBA", (width, height), (18, 21, 27, 255))
         draw = ImageDraw.Draw(img)
+        header_h = max(24, min(54, height // 6))
+        margin_x = max(12, min(48, width // 20))
+        box_top = header_h + max(10, height // 24)
+        dialogue_h = max(28, min(68, height // 5))
+        box_bot = max(box_top + 8, height - dialogue_h - max(12, height // 20))
         # Studio framing guides & accent header bar
-        draw.rectangle([0, 0, width, 54], fill=(24, 28, 36, 255))
-        draw.rectangle([0, 52, width, 56], fill=(255, 90, 31, 255))
-        draw.rectangle([48, 84, width - 48, height - 110], outline=(58, 67, 86, 255), width=2)
-        draw.text((24, 18), f"SHOT {shot.shot_number:02d}  |  {shot.title}  ({shot.duration_sec:.1f}s)", fill=(232, 236, 242, 255))
+        draw.rectangle([0, 0, width, header_h], fill=(24, 28, 36, 255))
+        draw.rectangle([0, max(0, header_h - 3), width, header_h], fill=(255, 90, 31, 255))
+        if width - margin_x > margin_x and box_bot > box_top:
+            draw.rectangle([margin_x, box_top, width - margin_x, box_bot], outline=(58, 67, 86, 255), width=2)
+        draw.text((max(8, margin_x // 2), max(4, header_h // 3)), f"SHOT {shot.shot_number:02d} | {shot.title} ({shot.duration_sec:.1f}s)", fill=(232, 236, 242, 255))
         if shot.action:
-            draw.text((68, 120), f"ACTION: {shot.action}", fill=(200, 208, 220, 255))
-        if shot.prompt:
-            draw.text((68, 160), f"VISUAL: {shot.prompt}", fill=(150, 160, 178, 255))
+            draw.text((margin_x + 10, box_top + 10), f"ACTION: {shot.action}", fill=(200, 208, 220, 255))
+        if shot.prompt and box_top + 32 < box_bot:
+            draw.text((margin_x + 10, box_top + 32), f"VISUAL: {shot.prompt}", fill=(150, 160, 178, 255))
         if shot.dialogue:
-            draw.rectangle([48, height - 92, width - 48, height - 24], fill=(11, 13, 17, 230), outline=(42, 48, 60, 255))
-            draw.text((64, height - 70), f'"{shot.dialogue}"', fill=(255, 198, 132, 255))
+            d_top = max(box_bot + 4, height - dialogue_h - 6)
+            d_bot = max(d_top + 10, height - 6)
+            draw.rectangle([margin_x, d_top, max(margin_x + 10, width - margin_x), d_bot], fill=(11, 13, 17, 230), outline=(42, 48, 60, 255))
+            draw.text((margin_x + 10, d_top + 6), f'"{shot.dialogue}"', fill=(255, 198, 132, 255))
         img.save(out)
         shot.image_path = str(out)
         return out

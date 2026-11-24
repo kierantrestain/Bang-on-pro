@@ -71,6 +71,7 @@ private Q_SLOTS:
     void testServerOversizedPayloadAndPipelining();
     void testValidationRejections();
     void testConcurrentSerializedWrites();
+    void testStageTwoOperationsAndSelectiveApproval();
 };
 
 void TestTimelineCommandEngine::testMultiOpBatchExecution()
@@ -918,6 +919,110 @@ void TestTimelineCommandEngine::testServerOversizedPayloadAndPipelining()
     }
 
     server.stop();
+}
+
+void TestTimelineCommandEngine::testStageTwoOperationsAndSelectiveApproval()
+{
+    auto backend = std::make_shared<InMemoryTimelineBackend>();
+    TimelineCommandEngine engine(backend);
+
+    // Revision 0 -> 1: Seed tracks, media, clip, and caption
+    TimelineCommandBatch seed = makeBaseBatch(QStringLiteral("req-s2-seed"), 0);
+    TimelineOperation imp = makeOp(QStringLiteral("op-imp"), QStringLiteral("import_media"));
+    imp.mediaRef = QStringLiteral("m-s2");
+    imp.params.insert(QStringLiteral("path"), QStringLiteral("/media/s2.mov"));
+    imp.params.insert(QStringLiteral("duration_frames"), 600);
+
+    TimelineOperation t1 = makeOp(QStringLiteral("op-t1"), QStringLiteral("create_track"));
+    t1.trackId = QStringLiteral("V1");
+    TimelineOperation t2 = makeOp(QStringLiteral("op-t2"), QStringLiteral("create_track"));
+    t2.trackId = QStringLiteral("V2");
+
+    TimelineOperation place = makeOp(QStringLiteral("op-place"), QStringLiteral("place_clip"));
+    place.mediaRef = QStringLiteral("m-s2");
+    place.trackId = QStringLiteral("V1");
+    place.clipId = QStringLiteral("clip-s2");
+    place.frameRange = {0, 200, 0, 25, 1};
+
+    TimelineOperation addCap = makeOp(QStringLiteral("op-cap-add"), QStringLiteral("add_caption"));
+    addCap.frameRange = {0, 75, 0, 25, 1};
+    addCap.params.insert(QStringLiteral("caption_id"), QStringLiteral("cap-1"));
+    addCap.params.insert(QStringLiteral("text"), QStringLiteral("Initial Draft Line"));
+    addCap.params.insert(QStringLiteral("speaker"), QStringLiteral("Host"));
+
+    seed.operations = {imp, t1, t2, place, addCap};
+    const TimelineCommandResponse rSeed = engine.executeBatch(seed);
+    QVERIFY2(rSeed.status == CommandStatus::Ok, qPrintable(rSeed.errorMessage));
+    QCOMPARE(engine.currentRevision(), 1);
+
+    // Revision 1 -> 2: Apply mask, transition, lower third, clip speed, and update caption
+    TimelineCommandBatch s2 = makeBaseBatch(QStringLiteral("req-s2-ops"), 1);
+
+    TimelineOperation maskOp = makeOp(QStringLiteral("op-mask"), QStringLiteral("apply_mask"));
+    maskOp.clipId = QStringLiteral("clip-s2");
+    maskOp.params.insert(QStringLiteral("mask_id"), QStringLiteral("mask-roto-1"));
+    maskOp.params.insert(QStringLiteral("mask_type"), QStringLiteral("matte_file"));
+    maskOp.params.insert(QStringLiteral("matte_path"), QStringLiteral("/tmp/matte_alpha.png"));
+    maskOp.params.insert(QStringLiteral("feather"), 6.0);
+    maskOp.params.insert(QStringLiteral("expand"), 2.0);
+    maskOp.params.insert(QStringLiteral("invert"), false);
+
+    TimelineOperation trOp = makeOp(QStringLiteral("op-tr"), QStringLiteral("add_transition"));
+    trOp.trackId = QStringLiteral("V2");
+    trOp.params.insert(QStringLiteral("transition_id"), QStringLiteral("dissolve"));
+    trOp.params.insert(QStringLiteral("a_track"), QStringLiteral("V1"));
+    trOp.params.insert(QStringLiteral("b_track"), QStringLiteral("V2"));
+    trOp.params.insert(QStringLiteral("in_frame"), 25);
+    trOp.params.insert(QStringLiteral("out_frame"), 50);
+
+    TimelineOperation ltOp = makeOp(QStringLiteral("op-lt"), QStringLiteral("add_lower_third"));
+    ltOp.trackId = QStringLiteral("V2");
+    ltOp.frameRange = {0, 100, 10, 25, 1};
+    ltOp.params.insert(QStringLiteral("speaker_name"), QStringLiteral("Alex Rivera"));
+    ltOp.params.insert(QStringLiteral("subtitle"), QStringLiteral("Executive Producer"));
+
+    TimelineOperation spdOp = makeOp(QStringLiteral("op-spd"), QStringLiteral("set_clip_speed"));
+    spdOp.clipId = QStringLiteral("clip-s2");
+    spdOp.params.insert(QStringLiteral("speed_percent"), 200.0);
+    spdOp.params.insert(QStringLiteral("pitch_compensate"), true);
+
+    TimelineOperation updCap = makeOp(QStringLiteral("op-cap-upd"), QStringLiteral("update_caption"));
+    updCap.params.insert(QStringLiteral("caption_id"), QStringLiteral("cap-1"));
+    updCap.params.insert(QStringLiteral("text"), QStringLiteral("Final Approved Line"));
+
+    s2.operations = {maskOp, trOp, ltOp, spdOp, updCap};
+    const TimelineCommandResponse rS2 = engine.executeBatch(s2);
+    QVERIFY2(rS2.status == CommandStatus::Ok, qPrintable(rS2.errorMessage));
+    QCOMPARE(engine.currentRevision(), 2);
+
+    const QJsonObject snap2 = backend->exportStateJson();
+    QCOMPARE(snap2.value(QStringLiteral("masks")).toArray().size(), 1);
+    QCOMPARE(snap2.value(QStringLiteral("transitions")).toArray().size(), 1);
+    QCOMPARE(snap2.value(QStringLiteral("lower_thirds")).toArray().size(), 1);
+    QCOMPARE(backend->clip(QStringLiteral("clip-s2"))->duration(), 100);
+    QCOMPARE(backend->captions().first().text, QStringLiteral("Final Approved Line"));
+
+    // Stage approval batch with 2 ops (delete_caption + add_marker) and selectively approve ONLY add_marker
+    TimelineCommandBatch staged = makeBaseBatch(QStringLiteral("req-s2-selective"), 2, true, false);
+    TimelineOperation delCap = makeOp(QStringLiteral("op-del-cap"), QStringLiteral("delete_caption"));
+    delCap.params.insert(QStringLiteral("caption_id"), QStringLiteral("cap-1"));
+    TimelineOperation mkr = makeOp(QStringLiteral("op-keep-mkr"), QStringLiteral("add_marker"));
+    mkr.frameRange.timelineStart = 50;
+    mkr.params.insert(QStringLiteral("label"), QStringLiteral("Approved Marker"));
+    staged.operations = {delCap, mkr};
+
+    QCOMPARE(engine.executeBatch(staged).status, CommandStatus::PendingApproval);
+    const QSet<QString> accepted = {QStringLiteral("op-keep-mkr")};
+    const TimelineCommandResponse rSel = engine.approveBatchWithSelection(QStringLiteral("req-s2-selective"), accepted, QStringLiteral("editor"));
+    QVERIFY2(rSel.status == CommandStatus::Ok, qPrintable(rSel.errorMessage));
+    QCOMPARE(engine.currentRevision(), 3);
+    // Rejected delete_caption must NOT have removed the caption; accepted marker MUST exist
+    QCOMPARE(backend->captions().size(), 1);
+    QCOMPARE(backend->markers().size(), 1);
+
+    // Undo restores state cleanly
+    QCOMPARE(engine.undoLastTransaction().status, CommandStatus::Ok);
+    QVERIFY(backend->markers().isEmpty());
 }
 
 QTEST_MAIN(TestTimelineCommandEngine)

@@ -91,6 +91,55 @@ private Q_SLOTS:
         QVERIFY(applyPremiereWorkspaceLayout(&mw));
         QCOMPARE(mw.dockWidgetArea(aiDock), Qt::RightDockWidgetArea);
     }
+
+    void testPerChangeCheckboxesAndBinToggle()
+    {
+        AiAssistantDock dock;
+        dock.setTimelineRevision(7);
+        dock.setReviewConfidenceThreshold(0.75);
+
+        QVERIFY(dock.useProjectBinMedia());
+        dock.setUseProjectBinMedia(false);
+        QVERIFY(!dock.useProjectBinMedia());
+        dock.setUseProjectBinMedia(true);
+        QVERIFY(dock.useProjectBinMedia());
+
+        TimelineCommandBatch batch;
+        batch.requestId = QStringLiteral("req-partial-1");
+        batch.projectId = QStringLiteral("proj-1");
+        batch.sequenceId = QStringLiteral("seq-1");
+        batch.expectedRevision = 7;
+        batch.transactionLabel = QStringLiteral("Selective Approval Batch");
+
+        TimelineOperation highConf;
+        highConf.opId = QStringLiteral("op-high");
+        highConf.type = QStringLiteral("sync_clips");
+        highConf.confidence = 0.96;
+
+        TimelineOperation lowConf;
+        lowConf.opId = QStringLiteral("op-low");
+        lowConf.type = QStringLiteral("select_camera");
+        lowConf.confidence = 0.42;
+
+        batch.operations = {highConf, lowConf};
+        dock.displayProposal(batch);
+
+        QCOMPARE(dock.selectedOperationIds().size(), 2);
+        QCOMPARE(dock.lowConfidenceOperationCount(), 1);
+
+        // Uncheck low-confidence items and verify filtered approval emits only high-confidence op
+        dock.uncheckLowConfidenceOperations();
+        QCOMPARE(dock.selectedOperationIds(), QStringList{QStringLiteral("op-high")});
+
+        QSignalSpy approveSpy(&dock, &AiAssistantDock::batchApproveRequested);
+        auto *acceptBtn = dock.findChild<QPushButton *>(QStringLiteral("acceptProposalButton"));
+        QVERIFY(acceptBtn != nullptr);
+        acceptBtn->click();
+        QCOMPARE(approveSpy.count(), 1);
+        const auto emittedBatch = approveSpy.takeFirst().at(0).value<TimelineCommandBatch>();
+        QCOMPARE(emittedBatch.operations.size(), 1);
+        QCOMPARE(emittedBatch.operations.first().opId, QStringLiteral("op-high"));
+    }
 };
 
 QTEST_MAIN(TestAiAssistantDock)

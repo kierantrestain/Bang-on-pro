@@ -9,6 +9,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSignalSpy>
+#include <QTemporaryDir>
 #include <QtTest/QtTest>
 
 using namespace BangOnPro;
@@ -103,6 +104,30 @@ private Q_SLOTS:
         QVERIFY(!mime.isEmpty());
         const QJsonObject payload = QJsonDocument::fromJson(mime).object();
         QCOMPARE(payload.value(QStringLiteral("preset_id")).toString(), QStringLiteral("finzar_zoom_1"));
+    }
+
+    void testUserStatePersistenceAndParamEditor()
+    {
+        QTemporaryDir tmpDir;
+        QVERIFY(tmpDir.isValid());
+        const QString statePath = tmpDir.filePath(QStringLiteral("preset_user_state.json"));
+
+        {
+            PremierePresetBrowser browser;
+            QVERIFY(browser.loadReportJson(makeSampleReport()));
+            browser.setFavorite(QStringLiteral("finzar_zoom_1"), true);
+            QVERIFY(browser.saveCustomStack(QStringLiteral("Broadcast Stack"), QStringList{QStringLiteral("finzar_zoom_1")}));
+            QVERIFY(browser.saveUserState(statePath));
+        }
+
+        {
+            PremierePresetBrowser reloaded;
+            QVERIFY(reloaded.loadReportJson(makeSampleReport()));
+            QVERIFY(reloaded.loadUserState(statePath));
+            QVERIFY(reloaded.isFavorite(QStringLiteral("finzar_zoom_1")));
+            QCOMPARE(reloaded.customStacks().size(), 1);
+            QCOMPARE(reloaded.customStacks().first().name, QStringLiteral("Broadcast Stack"));
+        }
     }
 };
 
