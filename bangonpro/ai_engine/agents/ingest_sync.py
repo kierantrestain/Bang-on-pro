@@ -11,6 +11,7 @@ SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import itertools
 import json
@@ -46,8 +47,36 @@ _STANDARD_BROADCAST_FPS: tuple[tuple[int, int], ...] = (
 )
 
 
-def compute_file_sha256(path: str | Path, chunk_size: int = 1024 * 1024) -> str:
-    """Compute SHA-256 digest of a source media file in strictly read-only mode."""
+# Shared in-process analysis memo (V1.2 production department): keyed by
+# (resolved path, size, mtime_ns) so specialist agents never re-hash or re-probe
+# unchanged media. Any modification to a file changes its key and forces a fresh read.
+_SHA256_MEMO: dict[tuple[str, int, int], str] = {}
+_PROBE_MEMO: dict[tuple[str, int, int], dict[str, Any]] = {}
+
+
+def media_identity_key(path: str | Path) -> tuple[str, int, int]:
+    """Return the (resolved path, size, mtime_ns) identity used by shared analysis caches."""
+    file_path = Path(path).resolve()
+    st = file_path.stat()
+    return (str(file_path), int(st.st_size), int(st.st_mtime_ns))
+
+
+def compute_file_sha256(
+    path: str | Path, chunk_size: int = 1024 * 1024, *, use_cache: bool = True
+) -> str:
+    """Compute SHA-256 digest of a source media file in strictly read-only mode.
+
+    Results are memoised per media identity; pass ``use_cache=False`` to force a
+    full re-read (used by source-immutability verification).
+    """
+    key: tuple[str, int, int] | None = None
+    if use_cache:
+        try:
+            key = media_identity_key(path)
+        except OSError:
+            key = None
+        if key is not None and key in _SHA256_MEMO:
+            return _SHA256_MEMO[key]
     file_path = Path(path)
     hasher = hashlib.sha256()
     with file_path.open("rb") as fh:
@@ -56,14 +85,17 @@ def compute_file_sha256(path: str | Path, chunk_size: int = 1024 * 1024) -> str:
             if not chunk:
                 break
             hasher.update(chunk)
-    return hasher.hexdigest()
+    digest = hasher.hexdigest()
+    if key is not None:
+        _SHA256_MEMO[key] = digest
+    return digest
 
 
 def verify_source_integrity(state: ProjectAnalysisState) -> dict[str, bool]:
     """Re-hash every registered source media asset and confirm zero mutation."""
     results: dict[str, bool] = {}
     for cam_id, asset in state.media_assets.items():
-        current = compute_file_sha256(asset.file_path)
+        current = compute_file_sha256(asset.file_path, use_cache=False)
         results[cam_id] = current == asset.sha256
     return results
 
@@ -98,6 +130,16 @@ def probe_media_file(path: str | Path) -> dict[str, Any]:
     file_path = Path(path).resolve()
     if not file_path.is_file():
         raise FileNotFoundError(f"Media file not found: {file_path}")
+    probe_key = media_identity_key(file_path)
+    cached_probe = _PROBE_MEMO.get(probe_key)
+    if cached_probe is not None:
+        return copy.deepcopy(cached_probe)
+    result = _probe_media_file_uncached(file_path)
+    _PROBE_MEMO[probe_key] = copy.deepcopy(result)
+    return result
+
+
+def _probe_media_file_uncached(file_path: Path) -> dict[str, Any]:
 
     cmd = [
         "ffprobe",
