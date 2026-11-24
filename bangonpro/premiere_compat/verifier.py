@@ -93,6 +93,9 @@ class PresetVerificationResult:
     visual: Optional[VisualMetrics] = None
     audio: Optional[AudioMetrics] = None
     error: str = ""
+    preview_before_path: Optional[str] = None
+    preview_after_path: Optional[str] = None
+    preview_split_path: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         data: Dict[str, Any] = {
@@ -108,6 +111,12 @@ class PresetVerificationResult:
             data["visual"] = self.visual.to_dict()
         if self.audio is not None:
             data["audio"] = self.audio.to_dict()
+        if self.preview_before_path is not None:
+            data["preview_before_path"] = self.preview_before_path
+        if self.preview_after_path is not None:
+            data["preview_after_path"] = self.preview_after_path
+        if self.preview_split_path is not None:
+            data["preview_split_path"] = self.preview_split_path
         if self.error:
             data["error"] = self.error
         return data
@@ -263,7 +272,7 @@ def render_mlt_xml(
         "ar=48000",
         "channels=2",
         "threads=1",
-        "real_time=-1",
+        "real_time=0",
         "terminate_on_pause=1",
     ]
     proc = subprocess.run(
@@ -500,6 +509,8 @@ def verify_preset_render(
     height: int = 180,
     duration_sec: float = 0.8,
     check_determinism: bool = True,
+    preview_dir: Optional[Union[str, Path]] = None,
+    before_clip: Optional[Path] = None,
 ) -> PresetVerificationResult:
     """Verify a single MappedPreset end-to-end with real `melt` before/after + determinism renders."""
     has_video = any(f.media_type == "video" for f in preset.mlt_filters)
@@ -539,16 +550,19 @@ def verify_preset_render(
 
         try:
             # 1. Baseline ("before") render through MLT with zero filters
-            before_xml = generate_mlt_filter_xml(
-                input_media=str(ref_path),
-                mlt_filters=[],
-                out_frame=out_frame,
-                fps_num=fps,
-                fps_den=1,
-                width=width,
-                height=height,
-            )
-            before_out = render_mlt_xml(before_xml, work_dir / "before.mkv", work_dir)
+            if before_clip is not None and before_clip.is_file():
+                before_out = before_clip
+            else:
+                before_xml = generate_mlt_filter_xml(
+                    input_media=str(ref_path),
+                    mlt_filters=[],
+                    out_frame=out_frame,
+                    fps_num=fps,
+                    fps_den=1,
+                    width=width,
+                    height=height,
+                )
+                before_out = render_mlt_xml(before_xml, work_dir / "before.mkv", work_dir)
 
             # 2. Converted preset ("after" run 1)
             after_xml = generate_mlt_filter_xml(
@@ -576,6 +590,28 @@ def verify_preset_render(
                     and audio_2 == audio.audio_sha256_after
                 )
 
+            preview_before: Optional[str] = None
+            preview_after: Optional[str] = None
+            preview_split: Optional[str] = None
+            if preview_dir is not None:
+                from .preview_generator import generate_preset_previews
+
+                p_paths = generate_preset_previews(
+                    preset,
+                    cache_dir=preview_dir,
+                    width=width,
+                    height=height,
+                    fps=fps,
+                    duration_sec=duration_sec,
+                    sample_frame=min(6, out_frame),
+                    reference_clip=ref_path,
+                    before_video=before_out,
+                )
+                if p_paths is not None:
+                    preview_before = str(p_paths.before_path)
+                    preview_after = str(p_paths.after_path)
+                    preview_split = str(p_paths.split_path)
+
             return PresetVerificationResult(
                 preset_id=preset.preset_id,
                 preset_name=preset.name,
@@ -586,6 +622,9 @@ def verify_preset_render(
                 has_audio_filters=has_audio,
                 visual=visual,
                 audio=audio,
+                preview_before_path=preview_before,
+                preview_after_path=preview_after,
+                preview_split_path=preview_split,
             )
         except Exception as exc:
             return PresetVerificationResult(
@@ -607,16 +646,30 @@ def verify_presets_batch(
     height: int = 180,
     duration_sec: float = 0.8,
     check_determinism: bool = True,
+    preview_dir: Optional[Union[str, Path]] = None,
 ) -> List[PresetVerificationResult]:
-    """Verify multiple mapped presets reusing a single generated reference clip."""
+    """Verify multiple mapped presets reusing a single generated reference clip & baseline render."""
+    out_frame = max(4, int(round(duration_sec * fps)) - 1)
     with tempfile.TemporaryDirectory(prefix="bangonpro_batch_ref_") as tmp:
+        work_dir = Path(tmp)
         ref = generate_reference_clip(
-            Path(tmp) / "shared_reference.mkv",
+            work_dir / "shared_reference.mkv",
             duration_sec=duration_sec,
             fps=fps,
             width=width,
             height=height,
         )
+        before_xml = generate_mlt_filter_xml(
+            input_media=str(ref),
+            mlt_filters=[],
+            out_frame=out_frame,
+            fps_num=fps,
+            fps_den=1,
+            width=width,
+            height=height,
+        )
+        shared_before = render_mlt_xml(before_xml, work_dir / "shared_before.mkv", work_dir)
+
         results: List[PresetVerificationResult] = []
         for preset in presets:
             if preset.compatibility_status in (
@@ -632,6 +685,8 @@ def verify_presets_batch(
                         height=height,
                         duration_sec=duration_sec,
                         check_determinism=check_determinism,
+                        preview_dir=preview_dir,
+                        before_clip=shared_before,
                     )
                 )
         return results

@@ -1,0 +1,204 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bangonpro.dev/schemas/roto_mask_v1.schema.json",
+  "title": "Bang On Pro Stage Two Rotoscoping & Masking Session v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "clip_path",
+    "fps",
+    "width",
+    "height",
+    "masks",
+    "preview_mode",
+    "background_mode"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "clip_path": {
+      "type": "string"
+    },
+    "fps": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "width": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "height": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "preview_mode": {
+      "type": "string",
+      "enum": ["overlay", "alpha", "before_after", "composite"]
+    },
+    "background_mode": {
+      "type": "string",
+      "enum": [
+        "transparent",
+        "solid_color",
+        "blur_bg",
+        "replace_image",
+        "selective_effect"
+      ]
+    },
+    "selective_effect_service": {
+      "type": ["string", "null"]
+    },
+    "selective_effect_params": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "background_color": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 4,
+      "items": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 255
+      }
+    },
+    "replace_image_path": {
+      "type": ["string", "null"]
+    },
+    "blur_strength": {
+      "type": "number",
+      "minimum": 0
+    },
+    "masks": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/mask_shape"
+      }
+    }
+  },
+  "$defs": {
+    "point2d": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": { "type": "number" }
+    },
+    "vertex": {
+      "oneOf": [
+        { "$ref": "#/$defs/point2d" },
+        {
+          "type": "object",
+          "required": ["x", "y"],
+          "properties": {
+            "x": { "type": "number" },
+            "y": { "type": "number" },
+            "in_x": { "type": "number" },
+            "in_y": { "type": "number" },
+            "out_x": { "type": "number" },
+            "out_y": { "type": "number" }
+          }
+        }
+      ]
+    },
+    "brush_stroke": {
+      "type": "object",
+      "required": ["points", "radius"],
+      "properties": {
+        "points": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/point2d" }
+        },
+        "radius": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "erase": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "mask_shape": {
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "tool",
+        "combine_mode",
+        "inverted",
+        "feather_px",
+        "expand_px",
+        "edge_refine_strength",
+        "opacity"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "tool": {
+          "type": "string",
+          "enum": ["ai_sam", "polygon", "bezier", "freehand", "brush"]
+        },
+        "combine_mode": {
+          "type": "string",
+          "enum": ["add", "subtract", "intersect", "xor"]
+        },
+        "inverted": { "type": "boolean" },
+        "feather_px": { "type": "number", "minimum": 0 },
+        "expand_px": { "type": "number" },
+        "edge_refine_strength": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "opacity": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "positive_points": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/point2d" }
+        },
+        "negative_points": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/point2d" }
+        },
+        "bbox": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "array",
+              "minItems": 4,
+              "maxItems": 4,
+              "items": { "type": "number" }
+            }
+          ]
+        },
+        "vertices": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/vertex" }
+        },
+        "brush_strokes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/brush_stroke" }
+        },
+        "keyframed_paths": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/vertex" }
+          }
+        },
+        "manual_override_frames": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 0 }
+        }
+      }
+    }
+  }
+}
