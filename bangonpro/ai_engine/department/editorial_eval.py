@@ -144,7 +144,7 @@ def scenarios() -> dict[str, dict[str, Any]]:
             "truth": {
                 "meaningful_pauses": [(6.0, 7.8, "after question"), (20.0, 21.2, "beat before punchline"), (26.5, 27.5, "laugh settling")],
                 "dead_air": [(13.0, 16.0), (32.0, 34.4)],
-                "disfluencies": [("I", 27.5, 32.0, 0), ("we", 27.5, 32.0, 0)],
+                "disfluencies": [("I", 27.5, 32.0, 3), ("we", 27.5, 32.0, 6)],
                 "highlight_payoff": (24.5, 26.5),
             },
         },
@@ -164,7 +164,7 @@ def scenarios() -> dict[str, dict[str, Any]]:
         },
         "false_start_repeat": {
             "profile": "podcast_multicam", "duration": 13.0, "turns": false_start,
-            "truth": {"meaningful_pauses": [], "dead_air": [], "disfluencies": [("We were going to-", 1.0, 7.0, 0), ("the", 1.0, 7.0, 8), ("I think", 8.0, 12.0, 0)]},
+            "truth": {"meaningful_pauses": [], "dead_air": [], "disfluencies": [("We were going to-", 1.0, 7.0, 0), ("the", 1.0, 7.0, 10), ("I think", 8.0, 12.0, 0)]},
         },
     }
 
@@ -355,6 +355,131 @@ def edit_shots(st: ProjectAnalysisState, shots: list[dict[str, Any]]) -> list[An
         out.append(EditShot(f"shot_{i:04d}", sp["camera_id"], f"media_{sp['camera_id']}", f"media_{sp['camera_id']}", sp["start"], sp["end"], sp["start"], sp["end"], cursor / fps, (cursor + n) / fps, f_in, f_in + n - 1, f_in, f_in + n - 1, cursor, cursor + n - 1, sp["start"], sp["end"], sp["speaker_id"], sp["reason"], float(sp["confidence"])))
         cursor += n
     return out
+
+
+def _split_word(kept: list[Any], w: dict[str, Any]) -> list[Any]:
+    """Remove 0.1 s from the middle of a word (a clipped word), keeping everything else."""
+    mid = (w["start_sec"] + w["end_sec"]) / 2.0
+    out = []
+    for k in kept:
+        if k.start_sec < mid < k.end_sec:
+            out += [TimeInterval(k.start_sec, round(mid - 0.05, 4), k.label + "a"), TimeInterval(round(mid + 0.05, 4), k.end_sec, k.label + "b")]
+        else:
+            out.append(k)
+    return out
+
+
+def rough_cut_variants(name: str = "podcast_question_punchline_laugh") -> list[dict[str, Any]]:
+    """Graded kept-interval variants with a ground-truth quality order (best first)."""
+    from bangonpro.ai_engine.department.editorial_analysis import build_editorial_context
+    from bangonpro.ai_engine.department.editorial_pacing import compute_pacing_plan, resolve_pacing_rules
+
+    st = build(name)
+    st.metadata["editorial_context"] = build_editorial_context(st)
+    dur = st.sync_result.common_duration_sec
+    base = resolve_pacing_rules(st)
+    natural = compute_pacing_plan(st, dur)
+    keep = compute_pacing_plan(st, dur, {**base, "pause_policy": "keep"})
+    remove = compute_pacing_plan(st, dur, {**base, "pause_policy": "remove"})
+    words = [w for s in st.transcript_segments for w in et.segment_words(s)]
+    content = [w for w in words if len(et.norm_token(w["word"])) >= 4]
+    clipped = _split_word(natural.kept, content[len(content) // 2])
+    over = remove.kept
+    for w in (content[2], content[len(content) // 3], content[-3]):
+        over = _split_word(over, w)
+    extra = list(natural.kept)
+    # natural + one more harmless cut inside an already compressed pause (more cuts, same quality)
+    p = next(x for x in natural.pauses if not x["protected"] and x["kept_sec"] > 0.5)
+    mid = (p["start_sec"] + p["end_sec"]) / 2.0
+    extra2 = []
+    for k in extra:
+        if k.start_sec < p["start_sec"] + 0.2 < k.end_sec:
+            extra2 += [TimeInterval(k.start_sec, round(p["start_sec"] + 0.2, 4), "x1"), TimeInterval(round(p["start_sec"] + 0.25, 4), k.end_sec, "x2")]
+        else:
+            extra2.append(k)
+    _ = mid
+    return [
+        {"variant": "natural (V1.2.2 plan)", "rank": 5, "kept": natural.kept, "declared": natural.disfluencies, "state": st},
+        {"variant": "keeps dead air", "rank": 4, "kept": keep.kept, "declared": keep.disfluencies, "state": st},
+        {"variant": "removes meaningful pauses and the laugh's timing", "rank": 3, "kept": remove.kept, "declared": remove.disfluencies, "state": st},
+        {"variant": "cut inside a word", "rank": 2, "kept": clipped, "declared": natural.disfluencies, "state": st},
+        {"variant": "over-cut: meaningful pauses removed and three clipped words", "rank": 1, "kept": over, "declared": remove.disfluencies, "state": st},
+        {"variant": "natural + one extra harmless cut", "rank": None, "kept": extra2, "declared": natural.disfluencies, "state": st},
+    ]
+
+
+def director_variants(name: str = "crosstalk_exchange_interjection") -> list[dict[str, Any]]:
+    """Graded shot-plan variants with a ground-truth quality order (best first)."""
+    from bangonpro.ai_engine.department.editorial_analysis import build_editorial_context
+
+    st = build(name)
+    st.metadata["editorial_context"] = build_editorial_context(st)
+    r = run_v122(st)
+    natural = [dict(s) for s in r["shots"]]
+    longest = max(range(len(natural)), key=lambda i: natural[i]["end"] - natural[i]["start"])
+    noop = natural[:longest] + [{**natural[longest], "end": round((natural[longest]["start"] + natural[longest]["end"]) / 2, 4)}, {**natural[longest], "start": round((natural[longest]["start"] + natural[longest]["end"]) / 2, 4)}] + natural[longest + 1:]
+    inter = []
+    for s in natural:
+        if s["start"] < 5.0 < s["end"] and s["camera_id"] == "cam_host":
+            inter += [{**s, "end": 5.0}, {**s, "start": 5.0, "end": 5.9, "camera_id": "cam_guest", "reason": "active_speaker_guest"}, {**s, "start": 5.9}]
+        else:
+            inter.append(s)
+    over = []
+    cams = ["cam_host", "cam_guest", "cam_wide"]
+    for s in natural:
+        t, k = s["start"], 0
+        while t < s["end"] - 1e-6:
+            e = min(s["end"], t + 0.8)
+            over.append({**s, "start": round(t, 4), "end": round(e, 4), "camera_id": cams[k % 3], "reason": "active_speaker_x"})
+            t, k = e, k + 1
+    host_shot = next(s for s in natural if s["camera_id"] == "cam_host" and s["end"] - s["start"] > 5)
+    unavailable = {"cam_host": {"unavailable_intervals": [{"start_sec": host_shot["start"] + 0.5, "end_sec": host_shot["start"] + 5.5}]}}
+    return [
+        {"variant": "natural (V1.2.2 plan)", "rank": 5, "shots": natural, "kept": r["kept"], "state": st},
+        {"variant": "no-op cut (same angle twice)", "rank": 4, "shots": noop, "kept": r["kept"], "state": st},
+        {"variant": "cut to a one-word interjection and back", "rank": 3, "shots": inter, "kept": r["kept"], "state": st},
+        {"variant": "unavailable (black) angle kept on air for 5 s", "rank": 2, "shots": natural, "kept": r["kept"], "state": st, "visual_analysis": unavailable},
+        {"variant": "over-cut: 0.8 s shots rotating angles", "rank": 1, "shots": over, "kept": r["kept"], "state": st},
+    ]
+
+
+def assessor_validity() -> dict[str, Any]:
+    """Score graded variants with the registered assessors' scoring functions; Kendall tau vs truth."""
+    from bangonpro.ai_engine.department.editorial_director import shot_plan_metrics
+    from bangonpro.ai_engine.department.editorial_intel import director_score, rough_cut_score
+    from bangonpro.ai_engine.department.editorial_pacing import pacing_metrics
+
+    rc_rows = []
+    for v in rough_cut_variants():
+        pm = pacing_metrics(v["state"], v["kept"], declared_disfluencies=v["declared"])
+        score, defects = rough_cut_score(pm)
+        rc_rows.append({"variant": v["variant"], "truth_rank": v["rank"], "score": score, "interior_cuts": pm["interior_cuts"], "defects": sorted({d.code for d in defects}), "critical_defects": sum(1 for d in defects if d.severity == "error")})
+    dir_rows = []
+    for v in director_variants():
+        st = v["state"]
+        st.metadata.pop("visual_analysis", None)
+        if v.get("visual_analysis"):
+            st.metadata["visual_analysis"] = v["visual_analysis"]
+        m = shot_plan_metrics(st, v["shots"], v["kept"])
+        score, defects = director_score(m)
+        st.metadata.pop("visual_analysis", None)
+        dir_rows.append({"variant": v["variant"], "truth_rank": v["rank"], "score": score, "camera_cuts": m["camera_cuts"], "defects": sorted({d.code for d in defects}), "critical_defects": sum(1 for d in defects if d.severity == "error")})
+    ranked = [r for r in rc_rows if r["truth_rank"] is not None]
+    extra = next(r for r in rc_rows if r["truth_rank"] is None)
+    natural = next(r for r in rc_rows if r["truth_rank"] == 5)
+    return {
+        "rough_cut": {
+            "metric": "rough_cut_pacing_integrity",
+            "kendall_tau": kendall_tau([r["truth_rank"] for r in ranked], [r["score"] for r in ranked]),
+            "variants": rc_rows,
+            "extra_cut_not_rewarded": extra["score"] <= natural["score"] and extra["interior_cuts"] > natural["interior_cuts"],
+        },
+        "multicam_director": {
+            "metric": "director_cut_discipline",
+            "kendall_tau": kendall_tau([r["truth_rank"] for r in dir_rows], [r["score"] for r in dir_rows]),
+            "variants": dir_rows,
+        },
+    }
 
 
 def kendall_tau(a: list[float], b: list[float]) -> float:

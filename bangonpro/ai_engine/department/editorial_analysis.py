@@ -38,7 +38,7 @@ _TOPIC_CUES = re.compile(
     r"let'?s (?:start|begin|kick off) with|elsewhere|meanwhile|now,? (?:to|for)|time for|coming up|back to)\b",
     re.IGNORECASE,
 )
-_LAUGH_TEXT = re.compile(r"\b(?:ha(?:ha)+|he(?:he)+|lol|lmao)\b|[\[(*]\s*(?:laugh\w*|chuckl\w*|giggl\w*)\s*[\])*]", re.IGNORECASE)
+_LAUGH_TEXT = re.compile(r"\b(?:ha(?:[\s,!.-]*ha)+|he(?:[\s,!.-]*he)+|lol|lmao)\b|[\[(*]\s*(?:laugh\w*|chuckl\w*|giggl\w*)\s*[\])*]", re.IGNORECASE)
 _APPLAUSE_TEXT = re.compile(r"[\[(*]\s*(?:applause|clapping|cheer\w*)\s*[\])*]", re.IGNORECASE)
 _EMPHATIC_WORDS = re.compile(r"\b(absolutely|incredible|unbelievable|amazing|insane|ridiculous|brilliant|outrageous|massive|huge|never|disaster|shocking|wow|goal|winner|unreal)\b", re.IGNORECASE)
 _NEWS_WORDS = re.compile(
@@ -48,6 +48,7 @@ _NEWS_WORDS = re.compile(
 )
 MOMENT_WEIGHT: dict[str, float] = {"humour": 1.0, "laughter": 0.95, "applause": 0.9, "newsworthy": 0.8, "reaction": 0.7, "emphatic": 0.55, "interruption": 0.35, "crosstalk": 0.3, "question": 0.25, "topic_change": 0.1}
 _PAYOFF_TYPES = frozenset({"humour", "laughter", "applause", "newsworthy", "reaction", "emphatic"})
+_REACTION_TYPES = frozenset({"laughter", "applause", "reaction"})
 _NOT_NAMES = frozenset(
     "Not So Very Really Just Going Sure Glad Happy Sorry Here There Back Fine Good Great Okay Ok Excited Delighted Thrilled Honoured Honored "
     "Joined Joining Talking Telling Saying Thinking Looking Trying Getting Doing Making Still Also Always Never Actually Literally Pretty Quite "
@@ -396,6 +397,13 @@ def _window_candidates(state: Any, units: list[dict[str, Any]], moments: list[di
     p_starts = [m["start_sec"] for m in payoff]
     topic_starts = [s.start_sec for s in (state.story_sections or [])[1:]]
     out: list[dict[str, Any]] = []
+    unit_starts = [u["start"] for u in units]
+
+    def _limit(t: float) -> float:
+        """Latest time a window may end without entering the next unit's speech."""
+        k = bisect.bisect_left(unit_starts, t - 1e-3)
+        return unit_starts[k] - 0.01 if k < len(unit_starts) else t + 0.15
+
     programme = units[-1]["end"] - units[0]["start"]
     if programme < min_len:
         min_len = max(1.0, programme * 0.5)
@@ -410,14 +418,16 @@ def _window_candidates(state: Any, units: list[dict[str, Any]], moments: list[di
             if dur < min_len or not units[j]["ends_sentence"]:
                 continue
             start, end = u["start"], units[j]["end"]
+            # Padding never reaches into the neighbouring words
+            pad_lo = max(0.0, start - 0.15, units[i - 1]["end"] + 0.01 if i else 0.0)
             lo = bisect.bisect_left(p_starts, start - 0.5)
             hi = bisect.bisect_right(p_starts, end + 2.0)
             pay, pay_types, ext_end = 0.0, [], end
             for m in payoff[lo:hi]:
                 w = MOMENT_WEIGHT.get(m["type"], 0.3) * float(m.get("confidence", 0.6))
-                if m["start_sec"] >= end - 0.05:  # reaction right after the window: include it
-                    if m["end_sec"] + 0.3 - start <= max_len + 4.0:
-                        ext_end = max(ext_end, m["end_sec"] + 0.3)
+                if m["start_sec"] >= end - 0.05:  # only an audible reaction right after the window is included
+                    if m["type"] in _REACTION_TYPES and m["end_sec"] + 0.3 - start <= max_len + 4.0:
+                        ext_end = max(ext_end, min(m["end_sec"] + 0.3, max(m["end_sec"], _limit(m["end_sec"]))))
                     else:
                         continue
                 pay = max(pay, w)
@@ -443,7 +453,10 @@ def _window_candidates(state: Any, units: list[dict[str, Any]], moments: list[di
             eng = 0.5 * float(np.clip((zc[j + 1] - zc[i]) / n, -2, 2)) / 2.0 + 0.5 * min(1.0, float(turns[j + 1] - turns[i + 1]) / max(1.0, dur / 10.0))
             lenpref = max(0.0, 1.0 - abs(dur - target_len) / target_len)
             crosses = sum(1 for t in topic_starts if start + 1.0 < t < end - 1.0)
-            score = 1.5 * pay + 0.6 * setup + 1.0 * completeness + 0.5 * eng + 0.2 * lenpref - 0.3 * crosses
+            # Setup -> payoff structure: the strongest payoff lands in the last 40 % of the window
+            best_pay = max(((MOMENT_WEIGHT.get(m["type"], 0.3), m) for m in payoff[lo:hi]), key=lambda x: x[0], default=(0.0, None))[1]
+            pay_end = 0.3 if best_pay is not None and best_pay["start_sec"] >= start + 0.6 * max(1e-6, ext_end - start) - 1e-6 else 0.0
+            score = 1.5 * pay + 0.6 * setup + 1.0 * completeness + 0.4 * eng + 0.6 * lenpref + pay_end - 0.3 * crosses
             reasons = []
             if pay_types:
                 reasons.append("payoff: " + ", ".join(sorted(set(pay_types))))
@@ -459,8 +472,8 @@ def _window_candidates(state: Any, units: list[dict[str, Any]], moments: list[di
                 spk[units[k]["speaker"]] += units[k]["end"] - units[k]["start"]
             out.append(
                 {
-                    "start_sec": round(max(0.0, start - 0.15), 3),
-                    "end_sec": round(ext_end + 0.15, 3),
+                    "start_sec": round(min(start, pad_lo), 3),
+                    "end_sec": round(max(ext_end, min(ext_end + 0.15, _limit(ext_end))), 3),
                     "score": round(float(score), 4),
                     "speaker_id": spk.most_common(1)[0][0],
                     "segment_id": u["segment_id"],

@@ -366,6 +366,8 @@ def _plan_shots_for_kept_interval(
                 and next_seg is not None
                 and (seg.end_sec - seg.start_sec) < interjection_max
                 and prev_seg.speaker_id == next_seg.speaker_id != seg.speaker_id
+                and seg.start_sec - prev_seg.end_sec < 1.0
+                and next_seg.start_sec - seg.end_sec < 1.0
             ):
                 # One-word interjection ("yeah", "right") inside another speaker's turn: stay put
                 cam_id = raw_spans[-1]["camera_id"]
@@ -376,14 +378,26 @@ def _plan_shots_for_kept_interval(
                     cam_id = wide_cam
                 shot_reason = f"active_speaker_{seg.speaker_id.lower().replace(' ', '_')}"
             if seg_s > cursor + 0.08:
+                pad_cam, pad_reason = cam_id, "dialogue_padding"
+                # V1.2.2: a gap filled by applause/laughter shows the room or the person reacting
+                react = next(
+                    (m for m in ctx.get("reactions", []) if min(seg_s, m["end_sec"]) - max(cursor, m["start_sec"]) >= 0.5 * (seg_s - cursor)),
+                    None,
+                )
+                if react is not None and state.intent.multicam_switch:
+                    if react["type"] == "applause" and wide_cam in available_video_cams:
+                        pad_cam = wide_cam
+                    else:
+                        pad_cam = ed.reactor_camera(react, speaker_to_cam, available_video_cams, "") or (reaction_cam if reaction_cam in available_video_cams else wide_cam)
+                    pad_reason = f"reaction_audio_{react['type']}"
                 raw_spans.append(
                     {
                         "start": cursor,
                         "end": seg_s,
-                        "camera_id": cam_id,
+                        "camera_id": pad_cam,
                         "speaker_id": seg.speaker_id,
                         "confidence": max(0.75, seg.confidence),
-                        "reason": "dialogue_padding",
+                        "reason": pad_reason,
                     }
                 )
             raw_spans.append(
@@ -457,7 +471,8 @@ def _plan_shots_for_kept_interval(
         and wide_cam != prev_end_camera
         and (coalesced[0]["end"] - coalesced[0]["start"]) >= (2.0 * min_shot)
     ):
-        bridge_dur = min(min_shot + 0.4, (coalesced[0]["end"] - coalesced[0]["start"]) * 0.35)
+        # V1.2.2: the bridge itself must respect the minimum shot (V1.2.1 could emit 0.35 x span)
+        bridge_dur = max(min_shot, min(min_shot + 0.4, (coalesced[0]["end"] - coalesced[0]["start"]) * 0.35))
         split_t = round(coalesced[0]["start"] + bridge_dur, 4)
         first = dict(coalesced[0])
         first["end"] = split_t

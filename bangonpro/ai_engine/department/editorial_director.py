@@ -80,7 +80,7 @@ def build_switch_context(state: Any) -> dict[str, Any]:
         talk.setdefault(s.speaker_id, Counter())[s.camera_id] += s.end_sec - s.start_sec
     totals = Counter({k: sum(v.values()) for k, v in talk.items()})
     moments = _moments(state)
-    reactions = [m for m in moments if m["type"] in ("laughter", "applause", "reaction", "humour")]
+    reactions = [m for m in moments if m["type"] in ("laughter", "applause", "reaction")]
     return {
         "boundaries": et.sentence_boundaries(segs),
         "reactions": sorted(reactions, key=lambda m: m["start_sec"]),
@@ -184,6 +184,74 @@ def _absorb_short(shots: list[dict[str, Any]], min_shot: float, protect: tuple[s
     return _remerge(shots)
 
 
+def cover_jump_splices(shots: list[dict[str, Any]], *, state: Any, wide_cam: str, speaker_to_cam: dict[str, str], ctx: dict[str, Any], min_shot: float, ok: Any) -> list[dict[str, Any]]:
+    """Hide same-angle splices (pause compression, removed stutters) under the wide or a listener shot.
+
+    A cut that removes material while the same close-up stays on screen is a jump cut. The
+    shots around such splices are switched to a covering angle for at least the minimum shot,
+    on the edited timeline, so the jump happens in the wide where it reads as a normal cut.
+    """
+    if len(shots) < 2:
+        return shots
+    times, t = [], 0.0
+    for sp in shots:
+        times.append((t, t + (sp["end"] - sp["start"])))
+        t += sp["end"] - sp["start"]
+    windows: list[list[Any]] = []
+    for i in range(len(shots) - 1):
+        a, b = shots[i], shots[i + 1]
+        if a["camera_id"] != b["camera_id"] or abs(a["end"] - b["start"]) < 1e-3 or a["camera_id"] == wide_cam:
+            continue
+        spk = a.get("speaker_id") or ""
+        cover = wide_cam if ok(wide_cam, a["end"] - min_shot, b["start"] + min_shot) else listener_camera(ctx, spk, speaker_to_cam, list(state.media_assets), a["camera_id"])
+        if not cover:
+            continue
+        te = times[i][1]
+        lo, hi = te - min_shot / 2.0, te + min_shot / 2.0
+        if windows and lo <= windows[-1][1] + min_shot and windows[-1][2] == cover:
+            windows[-1][1] = max(windows[-1][1], hi)
+        else:
+            windows.append([lo, hi, cover])
+    if not windows:
+        return shots
+    out: list[dict[str, Any]] = []
+    for sp, (ts, te) in zip(shots, times):
+        cuts = [ts]
+        for lo, hi, _c in windows:
+            for x in (lo, hi):
+                if ts + 1e-3 < x < te - 1e-3:
+                    cuts.append(x)
+        cuts = sorted(set(cuts)) + [te]
+        for a, b in zip(cuts, cuts[1:]):
+            mid = (a + b) / 2.0
+            win = next((w for w in windows if w[0] <= mid <= w[1]), None)
+            piece = {**sp, "start": round(sp["start"] + (a - ts), 4), "end": round(sp["start"] + (b - ts), 4)}
+            if win is not None and win[2] != sp["camera_id"]:
+                piece.update({"camera_id": win[2], "reason": "jump_cut_cover_" + ("wide" if win[2] == wide_cam else "listener"), "confidence": round(min(0.85, sp["confidence"]), 4)})
+            out.append(piece)
+    # Remnants shorter than the minimum shot join the covering shot next to them
+    merged: list[dict[str, Any]] = []
+    for sp in out:
+        if merged and merged[-1]["camera_id"] == sp["camera_id"] and (sp["reason"].startswith("jump_cut_cover") or merged[-1]["reason"].startswith("jump_cut_cover")):
+            merged[-1]["end_edit"] = merged[-1].get("end_edit", 0)
+            merged.append(sp)
+            continue
+        merged.append(sp)
+    final: list[dict[str, Any]] = []
+    for sp in merged:
+        sp.pop("end_edit", None)
+        final.append(sp)
+    k = 0
+    while k < len(final):
+        dur = final[k]["end"] - final[k]["start"]
+        if dur < min_shot - 0.05 and not final[k]["reason"].startswith("jump_cut_cover"):
+            nb = k - 1 if k > 0 and final[k - 1]["reason"].startswith("jump_cut_cover") else (k + 1 if k + 1 < len(final) and final[k + 1]["reason"].startswith("jump_cut_cover") else None)
+            if nb is not None:
+                final[k] = {**final[k], "camera_id": final[nb]["camera_id"], "reason": final[nb]["reason"]}
+        k += 1
+    return final
+
+
 def refine_shot_plan(shots: list[dict[str, Any]], *, state: Any, wide_cam: str, speaker_to_cam: dict[str, str], ctx: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     """Availability substitution, topic-change wides and removal of no-op cuts (post-pass)."""
     from bangonpro.show_profiles.loader import get_effective_profile_settings
@@ -220,6 +288,8 @@ def refine_shot_plan(shots: list[dict[str, Any]], *, state: Any, wide_cam: str, 
                         out.append({**sp, "start": round(a, 4), "end": round(b, 4), "needs_review": True, "reason": sp["reason"] + "_no_available_alternative"})
                 cur = max(cur, b)
         shots = _absorb_short(out, min_shot)
+    if bool(prefs.get("avoid_jump_cuts", True)):
+        shots = cover_jump_splices(shots, state=state, wide_cam=wide_cam, speaker_to_cam=speaker_to_cam, ctx=ctx, min_shot=min_shot, ok=ok)
     if bool(prefs.get("wide_on_topic_change", True)) and wide_cam in video:
         wide_dur = max(min_shot, 2.5)
         refined: list[dict[str, Any]] = []
@@ -265,17 +335,31 @@ def shot_plan_metrics(state: Any, shots: list[dict[str, Any]], kept: list[Any] |
         k = next((iv for iv in (kept or []) if iv.start_sec - 1e-3 <= sp["start"] and sp["end"] <= iv.end_sec + 1e-3), None)
         kept_lens.append(k.duration_sec if k is not None else float("inf"))
     camera_cuts = sum(1 for a, b in zip(shots, shots[1:]) if a["camera_id"] != b["camera_id"])
+    # What the viewer sees: consecutive shots on one angle read as a single shot (a splice inside
+    # it is a jump cut, counted separately), so shot length is measured on camera runs.
+    runs: list[dict[str, Any]] = []
+    for i, sp in enumerate(shots):
+        if runs and runs[-1]["camera_id"] == sp["camera_id"]:
+            runs[-1]["dur"] += sp["end"] - sp["start"]
+            runs[-1]["kept_ok"] = runs[-1]["kept_ok"] or kept_lens[i] >= min_shot
+        else:
+            runs.append({"camera_id": sp["camera_id"], "at": sp["start"], "dur": sp["end"] - sp["start"], "kept_ok": kept_lens[i] >= min_shot})
     sub_min, noop, interjection, too_long = [], [], [], []
+    for k, r in enumerate(runs):
+        if r["dur"] < min_shot - 0.05 and k < len(runs) - 1 and r["kept_ok"]:
+            sub_min.append({"at_sec": round(r["at"], 3), "duration_sec": round(r["dur"], 3), "camera_id": r["camera_id"]})
+        if r["dur"] > max_shot * 1.5:
+            too_long.append({"at_sec": round(r["at"], 3), "duration_sec": round(r["dur"], 3), "camera_id": r["camera_id"]})
+    jump_cuts = [
+        {"at_sec": round(b["start"], 3), "camera_id": b["camera_id"]}
+        for a, b in zip(shots, shots[1:])
+        if a["camera_id"] == b["camera_id"] and abs(a["end"] - b["start"]) >= 1e-3 and roles.get(b["camera_id"]) != "wide"
+    ]
     for i, sp in enumerate(shots):
         dur = sp["end"] - sp["start"]
-        last = i == len(shots) - 1
-        if dur < min_shot - 0.05 and not last and kept_lens[i] >= min_shot:
-            sub_min.append({"at_sec": round(sp["start"], 3), "duration_sec": round(dur, 3), "camera_id": sp["camera_id"]})
-        if dur > max_shot * 1.5:
-            too_long.append({"at_sec": round(sp["start"], 3), "duration_sec": round(dur, 3), "camera_id": sp["camera_id"]})
         if i and shots[i - 1]["camera_id"] == sp["camera_id"] and abs(shots[i - 1]["end"] - sp["start"]) < 1e-3:
             noop.append({"at_sec": round(sp["start"], 3), "camera_id": sp["camera_id"]})
-        if 0 < i < len(shots) - 1 and shots[i - 1]["camera_id"] == shots[i + 1]["camera_id"] != sp["camera_id"]:
+        if 0 < i < len(shots) - 1 and shots[i - 1]["camera_id"] == shots[i + 1]["camera_id"] != sp["camera_id"] and not any(k in sp["reason"] for k in ("reaction", "listener", "cover", "wide")):
             on = [s for s in segs if s.end_sec > sp["start"] and s.start_sec < sp["end"]]
             if on and all((s.end_sec - s.start_sec) < 1.2 for s in on if spk_map.get(s.speaker_id) == sp["camera_id"]) and any(spk_map.get(s.speaker_id) == sp["camera_id"] for s in on) and dur < 1.5 * min_shot:
                 interjection.append({"at_sec": round(sp["start"], 3), "camera_id": sp["camera_id"]})
@@ -307,6 +391,7 @@ def shot_plan_metrics(state: Any, shots: list[dict[str, Any]], kept: list[Any] |
         "noop_cuts": noop,
         "interjection_cuts": interjection,
         "unnecessary_cuts": len(noop) + len(interjection),
+        "close_up_jump_cuts": jump_cuts,
         "speaker_coverage": round(on_angle / total, 4) if total > 0 else None,
         "overlap_on_wide": round(overlap_wide / overlap_total, 4) if overlap_total > 0 else None,
         "unavailable_on_air_sec": round(unavailable, 3),

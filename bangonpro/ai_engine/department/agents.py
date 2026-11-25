@@ -845,27 +845,70 @@ def run_captions(ctx: AgentContext) -> AgentOutcome:
 
 
 def run_graphics(ctx: AgentContext) -> AgentOutcome:
+    from bangonpro.ai_engine.department import editorial_graphics as eg
+
     st = ctx.state
-    agq.prepare_lower_thirds(st)
-    b = agq.new_agent_builder(st, agent_id="graphics", agent_role="graphics", transaction_label="Graphics Agent: lower thirds & title card")
-    n = agq.emit_lower_third_ops(st, b)
     rules = st.profile.get("graphics_rules", {}) or {}
     templates = st.profile.get("graphics_templates", {}) or {}
     title = ctx.options.episode_title or rules.get("title_card_text") or ""
+    want_title = bool(title and rules.get("enable_title_card", True))
+    title_sec = float(min(6.0, max(2.0, float(rules.get("title_card_duration_sec", 3.0)))))
+    spec = st.profile["video_spec"]
+    width, height = int(spec["width"]), int(spec["height"])
+    accent = str(rules.get("brand_accent_hex", templates.get("accent_hex", "#FF5A1F")))
+    font = str(templates.get("font_family", "DejaVu Sans"))
+    # V1.2.2: V2 occupancy is planned up front: title card, then topic cards, then lower thirds
+    reserved: list[tuple[float, float]] = [(0.0, title_sec)] if want_title else []
+    topic_cards = eg.plan_topic_cards(st, reserved) if st.rough_cut_shots or st.transcript_segments else []
+    st.metadata["graphics_reserved"] = reserved
+    agq.prepare_lower_thirds(st)
+    b = agq.new_agent_builder(st, agent_id="graphics", agent_role="graphics", transaction_label="Graphics Agent: lower thirds & title card")
+    n = agq.emit_lower_third_ops(st, b)
+    report: list[dict[str, Any]] = []
+    lt_name, lt_spec, lt_known = eg.get_template(str(templates.get("lower_third_template", "studio_clean_bar")), "lower_third")
+    lt_min, lt_max = float(rules.get("lower_third_min_sec", 3.0)), float(rules.get("lower_third_max_sec", 8.0))
+    for lt in st.lower_thirds:
+        report.append({"graphic_id": lt.graphic_id, "kind": "lower_third", "template": lt.template, "start_sec": lt.start_sec, **eg.validate_graphic(spec=lt_spec, position=lt.position, width=width, height=height, title=lt.title, subtitle=lt.subtitle, duration_sec=lt.duration_sec, min_sec=lt_min, max_sec=lt_max)})
+    tc_name, tc_spec, _ = eg.get_template("topic_card", "topic_card")
+    for k, card in enumerate(topic_cards, start=1):
+        dur_f = max(1, st.sec_to_frame(card["duration_sec"]))
+        xml = agq.generate_kdenlive_lower_third_xml(
+            title=card["title"], subtitle=card["subtitle"], width=width, height=height, accent_hex=accent, duration_frames=dur_f,
+            position=str(tc_spec["position"]), font_family=font, box_w_frac=float(tc_spec["box_w"]), box_h_frac=float(tc_spec["box_h"]),
+            title_px_frac=float(tc_spec["title_px"]), sub_px_frac=float(tc_spec["sub_px"]),
+        )
+        start_f = st.sec_to_frame(card["start_sec"])
+        b.add_operation(
+            "place_clip",
+            clip_id=f"topic_card_{k:02d}",
+            track_id="V2",
+            in_frame=0,
+            out_frame=max(0, dur_f - 1),
+            timeline_start=start_f,
+            params={"clip_kind": "kdenlivetitle", "title": card["title"], "subtitle": card["subtitle"], "template": tc_name, "position": str(tc_spec["position"]), "kdenlive_title_xml": xml},
+            confidence=0.85,
+            rationale=f"Topic card for {card['section_id']} at the start of the story",
+        )
+        report.append({"graphic_id": f"topic_card_{k:02d}", "kind": "topic_card", "template": tc_name, "start_sec": card["start_sec"], **eg.validate_graphic(spec=tc_spec, position=str(tc_spec["position"]), width=width, height=height, title=card["title"], subtitle=card["subtitle"], duration_sec=card["duration_sec"], min_sec=2.5, max_sec=6.0)})
     title_added = False
-    if title and rules.get("enable_title_card", True):
-        spec = st.profile["video_spec"]
-        dur_f = st.sec_to_frame(float(rules.get("title_card_duration_sec", 3.0)))
+    if want_title:
+        t_name, t_spec, _ = eg.get_template(str(templates.get("title_card_template", "episode_opener")), "title_card")
+        dur_f = st.sec_to_frame(title_sec)
         xml = agq.generate_kdenlive_lower_third_xml(
             title=title,
             subtitle=str(st.profile.get("display_name", "")),
-            width=int(spec["width"]),
-            height=int(spec["height"]),
-            accent_hex=str(rules.get("brand_accent_hex", templates.get("accent_hex", "#FF5A1F"))),
+            width=width,
+            height=height,
+            accent_hex=accent,
             duration_frames=dur_f,
             position="center",
-            font_family=str(templates.get("font_family", "DejaVu Sans")),
+            font_family=font,
+            box_w_frac=float(t_spec["box_w"]),
+            box_h_frac=float(t_spec["box_h"]),
+            title_px_frac=float(t_spec["title_px"]),
+            sub_px_frac=float(t_spec["sub_px"]),
         )
+        report.append({"graphic_id": "title_card_001", "kind": "title_card", "template": t_name, "start_sec": 0.0, **eg.validate_graphic(spec=t_spec, position="center", width=width, height=height, title=title, subtitle=str(st.profile.get("display_name", "")), duration_sec=title_sec, min_sec=2.0, max_sec=6.0)})
         b.add_operation(
             "place_clip",
             clip_id="title_card_001",
@@ -879,12 +922,27 @@ def run_graphics(ctx: AgentContext) -> AgentOutcome:
         )
         title_added = True
     intro = (st.profile.get("intro_outro_rules", {}) or {})
+    st.metadata["graphics_report"] = {"graphics": report, "lower_third_plan": st.metadata.get("lower_third_plan", []), "template_known": lt_known, "lower_third_template": lt_name}
+    write_json_atomic(Path(st.output_dir) / "graphics_report.json", st.metadata["graphics_report"])
+    review = [] if st.lower_thirds or title_added else ["No speakers identified for lower thirds; add names in the profile speaker map"]
+    for r in report:
+        if not r["inside_title_safe"]:
+            review.append(f"{r['graphic_id']} extends outside the title-safe area")
+        if not r["text_fits"]:
+            review.append(f"{r['graphic_id']}: text may not fit the {r['template']} template")
+    for row in st.metadata.get("lower_third_plan", []):
+        if row.get("tier") == 3:
+            review.append(f"Lower third for {row['title']} placed without the speaker on screen: check timing")
+    if not lt_known:
+        review.append(f"Unknown lower-third template '{templates.get('lower_third_template')}': used {lt_name}")
     return AgentOutcome(
         batches=[b.build()] if b.operation_count else [],
-        confidence=0.95,
-        summary=f"{n} lower thirds" + (", title card" if title_added else "") + (f"; intro={intro.get('intro_asset')}" if intro.get("intro_asset") else ""),
-        rationale="Branded templates from the production profile",
-        review_items=[] if st.lower_thirds or title_added else ["No speakers identified for lower thirds; add names in the profile speaker map"],
+        confidence=0.95 if all(r.get("tier", 1) < 3 for r in st.metadata.get("lower_third_plan", [])) else 0.8,
+        summary=f"{n} lower thirds" + (f", {len(topic_cards)} topic cards" if topic_cards else "") + (", title card" if title_added else "") + (f"; intro={intro.get('intro_asset')}" if intro.get("intro_asset") else ""),
+        rationale="Lower thirds at each speaker's first substantive appearance on their own angle (never during crosstalk or under another graphic); branded templates; title/action-safe validated",
+        review_items=review,
+        metrics={"lower_thirds": n, "topic_cards": len(topic_cards), "safe_area_failures": sum(1 for r in report if not r["inside_title_safe"])},
+        est_external_cost_usd=0.0,
     )
 
 

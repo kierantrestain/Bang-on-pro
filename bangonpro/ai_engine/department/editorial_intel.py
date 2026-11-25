@@ -36,7 +36,7 @@ from bangonpro.ai_engine.department.quality_loop import (
 # ---------------------------------------------------------------------------
 W_PROTECTED = 0.35  # share of meaningful pauses removed
 W_DEAD_AIR = 0.25  # share of removable dead air left in
-P_CRITICAL = 0.12  # per clipped/lost word (capped at 0.36)
+P_CRITICAL = 0.4  # per distinct word clipped or lost (critical; capped at 0.8)
 P_FLASH = 0.04  # per speech sliver between two cuts (capped at 0.12)
 P_CHOPPY = 0.05  # edit rate above the format reference
 
@@ -46,12 +46,18 @@ def rough_cut_score(pm: dict[str, Any], *, silence_removal_requested: bool = Tru
     defects: list[Defect] = []
     for p in pm.get("protected_lost", []):
         defects.append(Defect("PROTECTED_PAUSE_REMOVED", "warning", f"Meaningful pause ({p['kind'].replace('_', ' ')}) cut from {p['original_sec']:.1f}s to {p['kept_sec']:.1f}s", p["start_sec"]))
+    # One defect per affected word (a clipped word is not counted again as lost)
+    clipped: dict[float, dict[str, Any]] = {}
     for c in pm.get("cuts_inside_words", []):
-        defects.append(Defect("CUT_INSIDE_WORD", "error", f"Cut splits the word '{c['word']}'", c["at_sec"]))
-    for c in pm.get("cuts_inside_segments", []):
-        defects.append(Defect("CUT_INSIDE_SPEECH", "error", f"Cut inside speech segment {c['segment_id']}", c["at_sec"]))
-    for w in pm.get("words_lost", []):
-        defects.append(Defect("WORD_REMOVED", "error", f"Word '{w['word']}' removed by a pause cut", w["at_sec"]))
+        clipped.setdefault(float(c.get("word_start", c["at_sec"])), c)
+    for ws, c in sorted(clipped.items()):
+        defects.append(Defect("CUT_INSIDE_WORD", "error", f"Cut splits the word '{c['word']}'", ws))
+    seg_cuts = {c["segment_id"]: c for c in pm.get("cuts_inside_segments", [])}
+    for sid, c in sorted(seg_cuts.items()):
+        defects.append(Defect("CUT_INSIDE_SPEECH", "error", f"Cut inside speech segment {sid}", c["at_sec"]))
+    lost = {float(w.get("word_start", w["at_sec"])): w for w in pm.get("words_lost", []) if float(w.get("word_start", w["at_sec"])) not in clipped}
+    for ws, w in sorted(lost.items()):
+        defects.append(Defect("WORD_REMOVED", "error", f"Word '{w['word']}' removed by a pause cut", ws))
     for f in pm.get("flash_fragments", []):
         defects.append(Defect("FLASH_FRAGMENT", "warning", f"{f['duration_sec']:.2f}s sliver of speech between two cuts", f["at_sec"]))
     if silence_removal_requested:
@@ -60,11 +66,11 @@ def rough_cut_score(pm: dict[str, Any], *, silence_removal_requested: bool = Tru
     choppy = pm.get("edits_per_min", 0.0) > pm.get("ref_max_edits_per_min", 1e9) and pm.get("edited_sec", 0.0) >= 60.0
     if choppy:
         defects.append(Defect("EDIT_RATE_HIGH", "warning", f"{pm['edits_per_min']:.1f} pacing edits/min (reference {pm['ref_max_edits_per_min']:g}): choppy", None))
-    critical = len(pm.get("cuts_inside_words", [])) + len(pm.get("cuts_inside_segments", [])) + len(pm.get("words_lost", []))
+    critical = len(clipped) + len(seg_cuts) + len(lost)
     penalty = W_PROTECTED * (1.0 - float(pm.get("protected_retention", 1.0)))
     if silence_removal_requested:
         penalty += W_DEAD_AIR * (1.0 - float(pm.get("dead_air_removed_ratio", 1.0)))
-    penalty += min(0.36, P_CRITICAL * critical) + min(0.12, P_FLASH * len(pm.get("flash_fragments", []))) + (P_CHOPPY if choppy else 0.0)
+    penalty += min(0.8, P_CRITICAL * critical) + min(0.12, P_FLASH * len(pm.get("flash_fragments", []))) + (P_CHOPPY if choppy else 0.0)
     return round(max(0.0, 1.0 - penalty), 4), defects
 
 

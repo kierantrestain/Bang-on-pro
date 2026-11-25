@@ -67,7 +67,8 @@ _BOUNDS: dict[str, tuple[float, float]] = {
     "edge_guard_sec": (0.02, 0.3),
 }
 PROTECTED_KINDS: frozenset[str] = frozenset({"after_question", "before_punchline", "reaction_beat"})
-REACTION_MOMENTS: frozenset[str] = frozenset({"laughter", "applause", "reaction", "humour"})
+# Audible reactions only ("humour" spans the setup line itself, so it is not a reaction time)
+REACTION_MOMENTS: frozenset[str] = frozenset({"laughter", "applause", "reaction"})
 
 # Word-level disfluency vocabularies (conservative: only words that commonly stutter)
 _STUTTER_PRONE: frozenset[str] = frozenset(
@@ -494,6 +495,12 @@ def compute_pacing_plan(state: ProjectAnalysisState, common_duration: float, rul
     for _attempt in range(3):
         all_cuts = sorted(cuts + [{"start_sec": d["start_sec"], "end_sec": d["end_sec"], "kind": f"disfluency:{d['kind']}", "reason": f"removed {d['kind'].replace('_', ' ')} '{d['text']}'"} for d in disfl], key=lambda c: c["start_sec"])
         kept, merged = _kept_from_cuts(start_bound, end_bound, all_cuts)
+        # A sliver of silence between two cuts is a flash of room tone: drop it
+        if len(kept) > 1:
+            slivers = [k for k in kept if k.duration_sec < 0.3 and not any(e[0] < k.end_sec and e[1] > k.start_sec for e in evidence)]
+            if slivers and len(slivers) < len(kept):
+                extra = [{"start_sec": k.start_sec - 0.001, "end_sec": k.end_sec + 0.001, "kind": "sliver", "reason": "silent sliver between cuts"} for k in slivers]
+                kept, merged = _kept_from_cuts(start_bound, end_bound, all_cuts + extra)
         # A disfluency cut must not strand a sliver of speech (flash frame); cancel it instead
         bad = set()
         for k in kept:
@@ -589,7 +596,7 @@ def pacing_metrics(state: ProjectAnalysisState, kept: list[TimeInterval], *, dec
         for t in (out_pt, in_pt):
             w = et.inside_word(t, words)
             if w is not None:
-                inside_word.append({"at_sec": round(t, 3), "word": w["word"]})
+                inside_word.append({"at_sec": round(t, 3), "word": w["word"], "word_start": round(w["start_sec"], 3)})
                 continue
             for s in state.transcript_segments:
                 if s.start_sec + 0.08 < t < s.end_sec - 0.08 and not et.segment_words(s):
@@ -603,7 +610,7 @@ def pacing_metrics(state: ProjectAnalysisState, kept: list[TimeInterval], *, dec
         if mid < kept[0].start_sec - 1e-3 or mid > kept[-1].end_sec + 1e-3:
             continue  # setup/trailing trims are bounded separately
         if not any(k.start_sec - 1e-3 <= mid <= k.end_sec + 1e-3 for k in kept):
-            lost.append({"word": w["word"], "at_sec": round(mid, 3)})
+            lost.append({"word": w["word"], "at_sec": round(mid, 3), "word_start": round(w["start_sec"], 3)})
     edited = sum(k.duration_sec for k in kept)
     n_cuts = max(0, len(kept) - 1)
     return {
