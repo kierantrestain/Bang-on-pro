@@ -85,6 +85,11 @@ def _wrap_caption_text(
     if uppercase:
         cleaned = cleaned.upper()
     if max_chars_per_line > 0 and len(cleaned) > max_chars_per_line:
+        if len(cleaned) <= 2 * max_chars_per_line:
+            # V1.2.2: balanced two-line break (even lengths, never ending a line on an article)
+            from bangonpro.ai_engine.department.editorial_captions import balanced_wrap
+
+            return "\n".join(balanced_wrap(cleaned, max_chars_per_line, 2))
         return "\n".join(textwrap.wrap(cleaned, width=max_chars_per_line))
     return cleaned
 
@@ -416,7 +421,17 @@ def _split_segment_text_by_intervals(seg: Any, intervals: list[Any]) -> dict[int
 
 
 def _build_edited_captions(state: ProjectAnalysisState) -> list[CaptionCue]:
-    """Map diarised transcript segments onto the edited rough-cut or source master timeline."""
+    """Map diarised transcript segments onto the edited rough-cut or source master timeline.
+
+    V1.2.2: with a spoken (neural) transcript, cues are built word by word on the edited
+    timeline with terminology, punctuation/casing repair, speaker-change markers and the
+    profile readability limits (``editorial_captions``). Speech-like audio the ASR found no
+    words in is never captioned as speech. VAD-only transcripts keep the V1.2 placeholder path.
+    """
+    if any(s.is_neural_inference and (s.text or "").strip() for s in state.transcript_segments):
+        from bangonpro.ai_engine.department.editorial_captions import build_captions_v122
+
+        return build_captions_v122(state)
     target_speakers = state.intent.target_speakers
     time_range = state.intent.time_range_sec
     cues: list[CaptionCue] = []
@@ -993,6 +1008,10 @@ def prepare_captions(state: ProjectAnalysisState) -> list[CaptionCue]:
         ass_path.write_text(ass_text, encoding="utf-8")
         state.artifacts["captions_srt"] = str(srt_path)
         state.artifacts["captions_ass"] = str(ass_path)
+    if captions:
+        from bangonpro.ai_engine.department.editorial_captions import caption_readability
+
+        state.metadata["caption_report"] = caption_readability(captions, state.profile)
     return captions
 
 

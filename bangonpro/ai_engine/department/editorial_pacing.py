@@ -576,8 +576,11 @@ def pacing_metrics(state: ProjectAnalysisState, kept: list[TimeInterval], *, dec
             row = {"start_sec": round(g[0], 3), "end_sec": round(g[1], 3), "kind": kind, "original_sec": round(g[1] - g[0], 3), "kept_sec": round(_overlap(g, kept), 3)}
             (protected if kind in PROTECTED_KINDS else unprot).append(row)
     retained = [p for p in protected if p["kept_sec"] >= min(p["original_sec"], floor) - 0.05]
-    excess_possible = sum(max(0.0, p["original_sec"] - cap) for p in unprot)
-    excess = sum(max(0.0, p["kept_sec"] - cap) for p in unprot)
+    # Dead air counts only where trimming would save at least 0.3 s (worth an editor's edit point)
+    worth = [p for p in unprot if p["original_sec"] - cap >= 0.3]
+    excess_possible = sum(p["original_sec"] - cap for p in worth)
+    excess = sum(max(0.0, p["kept_sec"] - cap) for p in worth)
+    dead_air_kept = [p for p in worth if p["kept_sec"] - cap >= 0.3]
     # Cut safety
     words = [w for s in state.transcript_segments for w in et.segment_words(s)]
     declared = [(d["start_sec"], d["end_sec"]) for d in (declared_disfluencies or [])]
@@ -613,6 +616,9 @@ def pacing_metrics(state: ProjectAnalysisState, kept: list[TimeInterval], *, dec
         "dead_air_excess_possible_sec": round(excess_possible, 3),
         "dead_air_excess_kept_sec": round(excess, 3),
         "dead_air_removed_ratio": round(1.0 - excess / excess_possible, 4) if excess_possible > 1e-6 else 1.0,
+        "dead_air_kept": dead_air_kept,
+        "protected_lost": [p for p in protected if p not in retained],
+        "flash_fragments": [{"at_sec": round(k.start_sec, 3), "duration_sec": round(k.duration_sec, 3)} for k in kept if k.duration_sec < 0.3 and any(e[0] < k.end_sec and e[1] > k.start_sec for e in evidence)],
         "cuts_inside_words": inside_word,
         "cuts_inside_segments": inside_segment,
         "words_lost": lost,

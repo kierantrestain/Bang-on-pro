@@ -315,12 +315,32 @@ def shot_plan_metrics(state: Any, shots: list[dict[str, Any]], kept: list[Any] |
     }
 
 
+def provisional_shot_plan(st: Any) -> dict[str, Any] | None:
+    """Plan the rough cut's shots without emitting anything (pure; used by the Director assessor)."""
+    from bangonpro.ai_engine.agents import rough_cut_multicam as rcm
+    from bangonpro.ai_engine.department.editorial_pacing import compute_pacing_plan
+
+    if st.sync_result is None or not st.media_assets or not st.transcript_segments or not st.intent.multicam_switch:
+        return None
+    wide_cam, reaction_cam, speaker_to_cam = rcm._resolve_camera_roles(st)
+    ref = st.sync_result.reference_camera_id
+    ref_dur = st.media_assets[ref].duration_sec if ref in st.media_assets else max(a.duration_sec for a in st.media_assets.values())
+    common = st.sync_result.common_duration_sec or ref_dur
+    kept = compute_pacing_plan(st, common).kept
+    shots = rcm.plan_rough_cut_shots(
+        st, kept, wide_cam=wide_cam, reaction_cam=reaction_cam, speaker_to_cam=speaker_to_cam,
+        applause_times=rcm._detect_high_energy_applause_times(st, common),
+    )
+    return {"shots": shots, "kept": kept, "metrics": shot_plan_metrics(st, shots, kept)}
+
+
 __all__ = [
     "REF_MAX_CAMERA_CUTS_PER_MIN",
     "build_switch_context",
     "camera_availability",
     "listener_camera",
     "natural_cut_time",
+    "provisional_shot_plan",
     "rapid_exchange_indices",
     "reactor_camera",
     "refine_shot_plan",
