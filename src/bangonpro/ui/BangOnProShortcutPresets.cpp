@@ -4,6 +4,7 @@
 */
 
 #include "BangOnProShortcutPresets.h"
+#include "BangOnProTheme.h"
 
 #include <QAction>
 #include <QBrush>
@@ -480,7 +481,7 @@ void ShortcutPresetDialog::buildUi()
     m_keyEdit->setObjectName(QStringLiteral("shortcutKeySequenceEdit"));
     m_keyEdit->setEnabled(false);
 
-    m_applyKeyButton = new QPushButton(tr("Set Shortcut"), this);
+    m_applyKeyButton = new QPushButton(tr("Set shortcut"), this);
     m_applyKeyButton->setObjectName(QStringLiteral("applyShortcutKeyButton"));
     m_applyKeyButton->setEnabled(false);
 
@@ -488,7 +489,7 @@ void ShortcutPresetDialog::buildUi()
     m_clearKeyButton->setObjectName(QStringLiteral("clearShortcutKeyButton"));
     m_clearKeyButton->setEnabled(false);
 
-    m_resetActionButton = new QPushButton(tr("Reset Action"), this);
+    m_resetActionButton = new QPushButton(tr("Reset action"), this);
     m_resetActionButton->setObjectName(QStringLiteral("resetSelectedShortcutButton"));
     m_resetActionButton->setEnabled(false);
 
@@ -501,17 +502,17 @@ void ShortcutPresetDialog::buildUi()
 
     m_conflictLabel = new QLabel(this);
     m_conflictLabel->setObjectName(QStringLiteral("shortcutConflictLabel"));
-    m_conflictLabel->setStyleSheet(QStringLiteral("color: #E5A00D; font-size: 11px;"));
+    setTone(m_conflictLabel, "warning");
     m_conflictLabel->hide();
     root->addWidget(m_conflictLabel);
 
     // Footer buttons
     auto *footer = new QHBoxLayout();
-    m_resetPresetButton = new QPushButton(tr("Reset Preset to Defaults"), this);
+    m_resetPresetButton = new QPushButton(tr("Reset preset to defaults"), this);
     m_resetPresetButton->setObjectName(QStringLiteral("resetPresetDefaultsButton"));
 
     m_cancelButton = new QPushButton(tr("Cancel"), this);
-    m_okButton = new QPushButton(tr("Apply Preset && Close"), this);
+    m_okButton = new QPushButton(tr("Apply preset && close"), this);
     m_okButton->setObjectName(QStringLiteral("applyPresetDialogButton"));
     m_okButton->setProperty("bangOnProPrimary", true);
     m_okButton->setDefault(true);

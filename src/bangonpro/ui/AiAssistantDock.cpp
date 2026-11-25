@@ -81,7 +81,6 @@ AiAssistantDock::AiAssistantDock(QWidget *parent)
 
     buildUi();
     populateDefaultProfiles();
-    setStyleSheet(brandStyleSheet());
     updateActionButtonStates();
     setStatusBadge(tr("Ready"), QStringLiteral("idle"));
     appendActivityLog(QStringLiteral("System"), tr("Bang On Pro AI Assistant initialized. Manual timeline editing remains fully active."),
@@ -109,7 +108,8 @@ void AiAssistantDock::buildUi()
     m_brandTitleLabel = new QLabel(QString::fromLatin1(kAppDisplayName), m_headerFrame);
     m_brandTitleLabel->setObjectName(QStringLiteral("bangOnProTitle"));
 
-    m_brandBadgeLabel = new QLabel(tr("AI PRO"), m_headerFrame);
+    m_brandBadgeLabel = new QLabel(m_headerFrame); // V1.2.1: "AI PRO" badge removed (Unslop: no PRO badges)
+    m_brandBadgeLabel->setVisible(false);
     m_brandBadgeLabel->setObjectName(QStringLiteral("bangOnProBadge"));
 
     m_statusBadgeLabel = new QLabel(tr("Ready"), m_headerFrame);
@@ -123,7 +123,7 @@ void AiAssistantDock::buildUi()
     auto *headerSubRow = new QHBoxLayout();
     headerSubRow->setSpacing(6);
 
-    auto *manualNoteLabel = new QLabel(tr("Non-destructive proposals • Full manual control preserved"), m_headerFrame);
+    auto *manualNoteLabel = new QLabel(tr("Proposals stay reversible until you approve them"), m_headerFrame);
     manualNoteLabel->setObjectName(QStringLiteral("bangOnProSubtitle"));
 
     m_revisionLabel = new QLabel(tr("Rev #0"), m_headerFrame);
@@ -160,11 +160,11 @@ void AiAssistantDock::buildUi()
     m_loadProfileButton->setObjectName(QStringLiteral("loadProfileButton"));
     m_loadProfileButton->setToolTip(tr("Load a custom Show Profile v1 JSON file"));
 
-    m_editProfileButton = new QPushButton(tr("Edit Profile…"), this);
+    m_editProfileButton = new QPushButton(tr("Edit profile…"), this);
     m_editProfileButton->setObjectName(QStringLiteral("editProfileButton"));
     m_editProfileButton->setToolTip(tr("Create or customize a Show Profile (pacing, cameras, audio, graphics)"));
 
-    m_providerSettingsButton = new QPushButton(tr("AI Providers…"), this);
+    m_providerSettingsButton = new QPushButton(tr("AI providers…"), this);
     m_providerSettingsButton->setObjectName(QStringLiteral("providerSettingsButton"));
     m_providerSettingsButton->setToolTip(tr("Configure local AI models or consent-gated external AI providers"));
 
@@ -186,7 +186,7 @@ void AiAssistantDock::buildUi()
     auto *promptHeaderRow = new QHBoxLayout();
     auto *promptLabel = new QLabel(tr("Director Instruction"), this);
     promptLabel->setObjectName(QStringLiteral("bangOnProSectionLabel"));
-    m_useBinMediaButton = new QPushButton(tr("Use Bin Media"), this);
+    m_useBinMediaButton = new QPushButton(tr("Use bin media"), this);
     m_useBinMediaButton->setObjectName(QStringLiteral("useBinMediaButton"));
     m_useBinMediaButton->setCheckable(true);
     m_useBinMediaButton->setChecked(true);
@@ -211,11 +211,10 @@ void AiAssistantDock::buildUi()
         QString prompt;
     };
     const QVector<QuickChipSpec> chips = {
-        {tr("4-Cam Sync + First Cut + Graphics"),
-         QStringLiteral("Sync all four cameras, remove setup delays, build a first cut and add our standard graphics")},
-        {tr("Remove Setup Delays && Dead Air"), QStringLiteral("Remove setup delays and silence pauses while preserving natural pacing")},
-        {tr("Active-Speaker Multicam Cut"), QStringLiteral("Build a multicam edit switching on active speaker with reaction shots")},
-        {tr("Dialogue Polish + Captions"), QStringLiteral("Normalize dialogue loudness, clean background noise, and add captions and lower thirds")},
+        {tr("Sync, first cut and graphics"), QStringLiteral("Sync all four cameras, remove setup delays, build a first cut and add our standard graphics")},
+        {tr("Remove setup delays and dead air"), QStringLiteral("Remove setup delays and silence pauses while preserving natural pacing")},
+        {tr("Active-speaker multicam cut"), QStringLiteral("Build a multicam edit switching on active speaker with reaction shots")},
+        {tr("Dialogue polish and captions"), QStringLiteral("Normalize dialogue loudness, clean background noise, and add captions and lower thirds")},
     };
 
     auto *chipsGrid = new QGridLayout();
@@ -243,8 +242,6 @@ void AiAssistantDock::buildUi()
     m_clarificationBanner = new QFrame(this);
     m_clarificationBanner->setObjectName(QStringLiteral("clarificationBanner"));
     m_clarificationBanner->setFrameShape(QFrame::StyledPanel);
-    m_clarificationBanner->setStyleSheet(
-        QStringLiteral("QFrame#clarificationBanner { background-color: #2b2416; border: 1px solid #d4a72c; border-radius: 4px; }"));
     auto *clarLayout = new QVBoxLayout(m_clarificationBanner);
     clarLayout->setContentsMargins(8, 6, 8, 6);
     m_clarificationLabel = new QLabel(m_clarificationBanner);
@@ -258,7 +255,6 @@ void AiAssistantDock::buildUi()
     m_staleBanner = new QFrame(this);
     m_staleBanner->setObjectName(QStringLiteral("staleProposalBanner"));
     m_staleBanner->setFrameShape(QFrame::StyledPanel);
-    m_staleBanner->setStyleSheet(QStringLiteral("QFrame#staleProposalBanner { background-color: #321b1b; border: 1px solid #d9534f; border-radius: 4px; }"));
     auto *staleLayout = new QVBoxLayout(m_staleBanner);
     staleLayout->setContentsMargins(8, 6, 8, 6);
     staleLayout->setSpacing(4);
@@ -266,9 +262,9 @@ void AiAssistantDock::buildUi()
     m_staleLabel->setObjectName(QStringLiteral("staleProposalLabel"));
     m_staleLabel->setWordWrap(true);
     auto *staleBtnRow = new QHBoxLayout();
-    m_rebaseApplyButton = new QPushButton(tr("Rebase && Apply"), m_staleBanner);
+    m_rebaseApplyButton = new QPushButton(tr("Rebase && apply"), m_staleBanner);
     m_rebaseApplyButton->setObjectName(QStringLiteral("rebaseApproveButton"));
-    m_regenerateButton = new QPushButton(tr("Regenerate Proposal"), m_staleBanner);
+    m_regenerateButton = new QPushButton(tr("Regenerate proposal"), m_staleBanner);
     m_regenerateButton->setObjectName(QStringLiteral("regenerateProposalButton"));
     staleBtnRow->addWidget(m_rebaseApplyButton);
     staleBtnRow->addWidget(m_regenerateButton);
@@ -314,10 +310,10 @@ void AiAssistantDock::buildUi()
 
     auto *diffSelectRow = new QHBoxLayout();
     diffSelectRow->setSpacing(4);
-    m_selectAllOpsButton = new QPushButton(tr("Select All"), this);
+    m_selectAllOpsButton = new QPushButton(tr("Select all"), this);
     m_selectAllOpsButton->setObjectName(QStringLiteral("selectAllOpsButton"));
     m_selectAllOpsButton->setEnabled(false);
-    m_uncheckLowConfButton = new QPushButton(tr("Uncheck Low-Confidence"), this);
+    m_uncheckLowConfButton = new QPushButton(tr("Uncheck low-confidence"), this);
     m_uncheckLowConfButton->setObjectName(QStringLiteral("uncheckLowConfButton"));
     m_uncheckLowConfButton->setEnabled(false);
     diffSelectRow->addWidget(m_selectAllOpsButton);
@@ -353,11 +349,11 @@ void AiAssistantDock::buildUi()
     auto *actionGrid = new QGridLayout();
     actionGrid->setSpacing(6);
 
-    m_generateButton = new QPushButton(tr("Generate Proposal"), this);
+    m_generateButton = new QPushButton(tr("Generate proposal"), this);
     m_generateButton->setObjectName(QStringLiteral("generateProposalButton"));
     m_generateButton->setProperty("bangOnProPrimary", true);
 
-    m_acceptButton = new QPushButton(tr("Accept && Apply"), this);
+    m_acceptButton = new QPushButton(tr("Accept && apply"), this);
     m_acceptButton->setObjectName(QStringLiteral("acceptProposalButton"));
     m_acceptButton->setProperty("bangOnProAccept", true);
 
@@ -374,7 +370,7 @@ void AiAssistantDock::buildUi()
     m_refineButton->setObjectName(QStringLiteral("refineProposalButton"));
     m_refineButton->setToolTip(tr("Request a refined proposal using your updated instructions"));
 
-    m_undoButton = new QPushButton(tr("Undo Last AI Batch"), this);
+    m_undoButton = new QPushButton(tr("Undo last AI batch"), this);
     m_undoButton->setObjectName(QStringLiteral("undoBatchButton"));
     m_undoButton->setToolTip(tr("Atomically revert the last applied AI batch transaction"));
 
@@ -445,10 +441,10 @@ void AiAssistantDock::buildUi()
     auto *storageRow = new QHBoxLayout();
     m_storageSummaryLabel = new QLabel(tr("Local AI • Cache bounded"), m_activityContainer);
     m_storageSummaryLabel->setObjectName(QStringLiteral("bangOnProMutedLabel"));
-    m_manageModelsButton = new QPushButton(tr("Manage Models…"), m_activityContainer);
+    m_manageModelsButton = new QPushButton(tr("Manage models…"), m_activityContainer);
     m_manageModelsButton->setObjectName(QStringLiteral("manageModelsButton"));
     m_manageModelsButton->setToolTip(tr("Inspect hardware tier and install or remove local Whisper & SAM AI models"));
-    m_clearCacheButton = new QPushButton(tr("Clear Cache"), m_activityContainer);
+    m_clearCacheButton = new QPushButton(tr("Clear cache"), m_activityContainer);
     m_clearCacheButton->setObjectName(QStringLiteral("clearCacheButton"));
     m_clearCacheButton->setToolTip(tr("Clear temporary proxy & render caches without touching source media"));
     storageRow->addWidget(m_storageSummaryLabel, 1);
@@ -469,13 +465,13 @@ void AiAssistantDock::populateDefaultProfiles()
     m_profileCombo->blockSignals(true);
     m_profileCombo->clear();
     // Data values must be real bangonpro/show_profiles IDs (V1.2 fix: "podcast"/"gameshow" did not resolve).
-    m_profileCombo->addItem(tr("Podcast Multicam"), QStringLiteral("podcast_multicam"));
-    m_profileCombo->addItem(tr("Gameshow Multicam"), QStringLiteral("gameshow_multicam"));
-    m_profileCombo->addItem(tr("Sports Discussion"), QStringLiteral("sports_discussion"));
-    m_profileCombo->addItem(tr("Daily News"), QStringLiteral("daily_news"));
-    m_profileCombo->addItem(tr("Interview (2-Camera)"), QStringLiteral("interview_two_camera"));
-    m_profileCombo->addItem(tr("Social Short (9:16)"), QStringLiteral("social_short"));
-    m_profileCombo->addItem(tr("Custom JSON Profile…"), QStringLiteral("custom"));
+    m_profileCombo->addItem(tr("Podcast multicam"), QStringLiteral("podcast_multicam"));
+    m_profileCombo->addItem(tr("Gameshow multicam"), QStringLiteral("gameshow_multicam"));
+    m_profileCombo->addItem(tr("Sports discussion"), QStringLiteral("sports_discussion"));
+    m_profileCombo->addItem(tr("Daily news"), QStringLiteral("daily_news"));
+    m_profileCombo->addItem(tr("Interview, 2 cameras"), QStringLiteral("interview_two_camera"));
+    m_profileCombo->addItem(tr("Social short 9:16"), QStringLiteral("social_short"));
+    m_profileCombo->addItem(tr("Custom JSON profile…"), QStringLiteral("custom"));
     m_profileCombo->setCurrentIndex(0);
     m_profileCombo->blockSignals(false);
 }

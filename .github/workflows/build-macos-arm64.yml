@@ -13,9 +13,9 @@ on:
   workflow_dispatch:
     inputs:
       release_version:
-        description: "Release version label (defaults to 1.2.0 or git tag)"
+        description: "Release version label (defaults to 1.2.1 or git tag)"
         required: false
-        default: "1.2.0"
+        default: "1.2.1"
       build_mode:
         description: "Dependency resolution mode (craft uses KDE CraftMaster Qt6/KF6 binary cache)"
         required: false
@@ -68,7 +68,7 @@ jobs:
           elif [[ -n "${INPUT_RELEASE_VERSION:-}" ]]; then
             VER="${INPUT_RELEASE_VERSION}"
           else
-            VER="1.2.0"
+            VER="1.2.1"
           fi
           echo "app_version=${VER}" >> "$GITHUB_OUTPUT"
           echo "Resolved Bang On Pro version: ${VER}"

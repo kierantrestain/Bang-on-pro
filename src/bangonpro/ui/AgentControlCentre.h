@@ -109,6 +109,11 @@ private:
     QTreeWidget *m_agentTree{nullptr};
     QProgressBar *m_progress{nullptr};
     QLabel *m_statusLabel{nullptr};
+    QLabel *m_jobMetaLabel{nullptr};
+    QLabel *m_reviewTitle{nullptr};
+    QWidget *m_setupSection{nullptr};
+    QPushButton *m_newJobBtn{nullptr};
+    bool m_setupAutoCollapsed{false};
     QListWidget *m_reviewList{nullptr};
     QPlainTextEdit *m_summaryView{nullptr};
     QTimer *m_pollTimer{nullptr};

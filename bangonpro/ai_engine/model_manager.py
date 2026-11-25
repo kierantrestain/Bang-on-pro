@@ -690,7 +690,7 @@ class ModelManager:
                     )
                 req = urllib.request.Request(
                     url,
-                    headers={"User-Agent": "BangOnPro-ModelManager/1.2.0"},
+                    headers={"User-Agent": "BangOnPro-ModelManager/1.2.1"},
                 )
                 with urllib.request.urlopen(req, timeout=timeout_sec) as resp:  # noqa: S310
                     content_len = resp.headers.get("Content-Length")
@@ -790,7 +790,7 @@ class ModelManager:
                     if urllib.parse.urlparse(url).scheme != "https":
                         missing.append(name)
                         continue
-                    req = urllib.request.Request(url, headers={"User-Agent": "BangOnPro-ModelManager/1.2.0"})
+                    req = urllib.request.Request(url, headers={"User-Agent": "BangOnPro-ModelManager/1.2.1"})
                     with urllib.request.urlopen(req, timeout=timeout_sec) as resp:  # noqa: S310 - https enforced above
                         dest.write_bytes(resp.read())
                 if dest.stat().st_size <= 0:

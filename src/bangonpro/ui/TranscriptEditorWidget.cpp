@@ -80,7 +80,7 @@ void TranscriptEditorWidget::buildUi()
     m_speakerFilterCombo->setObjectName(QStringLiteral("speakerFilterCombo"));
     m_speakerFilterCombo->addItem(tr("All Speakers"), QString());
 
-    m_renameSpeakerButton = new QPushButton(tr("Rename Speaker…"), this);
+    m_renameSpeakerButton = new QPushButton(tr("Rename speaker…"), this);
     m_renameSpeakerButton->setObjectName(QStringLiteral("renameSpeakerButton"));
     m_renameSpeakerButton->setToolTip(tr("Rename all segments for the selected speaker"));
 
@@ -115,11 +115,11 @@ void TranscriptEditorWidget::buildUi()
     m_loadButton = new QPushButton(tr("Load JSON…"), this);
     m_loadButton->setObjectName(QStringLiteral("loadTranscriptButton"));
 
-    m_toggleCutButton = new QPushButton(tr("Cut / Restore Segment"), this);
+    m_toggleCutButton = new QPushButton(tr("Cut / restore segment"), this);
     m_toggleCutButton->setObjectName(QStringLiteral("toggleCutButton"));
     m_toggleCutButton->setToolTip(tr("Mark or restore the selected transcript segment for text-based rough cutting"));
 
-    m_applyEditsButton = new QPushButton(tr("Apply Transcript Edits to Timeline"), this);
+    m_applyEditsButton = new QPushButton(tr("Apply transcript edits to timeline"), this);
     m_applyEditsButton->setObjectName(QStringLiteral("applyTranscriptButton"));
     m_applyEditsButton->setProperty("bangOnProPrimary", true);
 

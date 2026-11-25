@@ -163,6 +163,7 @@ add_test(NAME bangonpro_test_roto_studio COMMAND bangonpro_test_roto_studio)
 # 6. V1.2 Agent Control Centre (AI Production Department UI)
 add_executable(bangonpro_test_agent_control_centre
     ${CMAKE_CURRENT_SOURCE_DIR}/../ui/AgentControlCentre.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../ui/BangOnProTheme.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/test_agent_control_centre.cpp
 )
 set_target_properties(bangonpro_test_agent_control_centre PROPERTIES

@@ -29,7 +29,7 @@ RotoStudioDock::RotoStudioDock(QWidget *parent)
     : QWidget(parent)
 {
     setObjectName(QStringLiteral("bangonproRotoStudioWidget"));
-    setWindowTitle(QStringLiteral("Bang On Pro — Roto, Masking & 2D Studio"));
+    setWindowTitle(QStringLiteral("Roto and 2D"));
     buildUi();
 
     // Seed an initial editable mask, 2D plate layer, and opening storyboard shot
