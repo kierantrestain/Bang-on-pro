@@ -16,6 +16,10 @@ on:
         description: "Release version label (defaults to 1.2.0 or git tag)"
         required: false
         default: "1.2.0"
+      publish_tag:
+        description: "Publish a GitHub Release for this tag after the gated build passes (e.g. v1.2.0); empty = build only"
+        required: false
+        default: ""
       build_mode:
         description: "Dependency resolution mode (craft uses KDE CraftMaster Qt6/KF6 binary cache)"
         required: false
@@ -321,7 +325,7 @@ jobs:
   publish-release:
     name: Publish Versioned GitHub Release with arm64 DMG (Tags Only)
     needs: build-macos-arm64
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && startsWith(inputs.publish_tag, 'v'))
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -336,11 +340,15 @@ jobs:
       - name: Publish GitHub Release with arm64 DMG, SHA-256, benchmarks & signing status
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ inputs.publish_tag || github.ref_name }}
+          target_commitish: ${{ github.sha }}
           draft: false
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          prerelease: ${{ contains(inputs.publish_tag || github.ref_name, '-') }}
           generate_release_notes: true
           body: |
             ## Bang On Pro — Apple Silicon (`arm64`) Native macOS Installer
+
+            **V1.2 highlights:** 14-agent AI Production Department, Agent Control Centre, automation modes with isolated drafts and approval-gated promotion, bundled local AI runtime (faster-whisper + onnxruntime; weights on demand), and real-app Kdenlive compatibility fixes. Release report: `docs/V1.2_RELEASE_REPORT.md`; packaged-app neural verification: `department_verification.json`. The 60–85 % editing-time target is **not yet measured** (needs paired human editing sessions).
 
             Self-contained `.app` bundle packaged as a native Apple Silicon `.dmg` (includes Qt 6, KDE Frameworks 6, MLT 7, frei0r plugins, FFmpeg with Apple VideoToolbox acceleration, Breeze icons, and embedded Python 3.12 AI runtime — zero manual terminal setup required).
 
