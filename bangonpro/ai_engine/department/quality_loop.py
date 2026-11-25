@@ -33,6 +33,8 @@ MAX_ATTEMPTS_PER_AGENT = 2
 MAX_ATTEMPTS_PER_JOB = 6
 MIN_IMPROVEMENT = 0.02
 LOW_CONFIDENCE_REVIEW = 0.6
+CRITICAL_SEVERITIES = frozenset({"error", "critical"})
+DEFECT_MATCH_TOLERANCE_SEC = 0.5
 
 # Modules that register hooks on import. Each is owned by one specialist domain.
 EXTENSION_MODULES: tuple[str, ...] = (
@@ -122,11 +124,83 @@ def assess(agent_id: str, ctx: Any, outcome: Any) -> Assessment | None:
     return fn(ctx, outcome)
 
 
-def accept_correction(before: Assessment, after: Assessment, min_improvement: float = MIN_IMPROVEMENT) -> tuple[bool, str]:
-    """A correction is kept only when it is measurably better and introduces no new errors."""
+def _same_defect(a: Defect, b: Defect, tol: float = DEFECT_MATCH_TOLERANCE_SEC) -> bool:
+    if a.code != b.code or a.severity != b.severity:
+        return False
+    if a.at_sec is None or b.at_sec is None:
+        return a.at_sec is None and b.at_sec is None
+    return abs(float(a.at_sec) - float(b.at_sec)) <= tol
+
+
+def new_critical_defects(before: Assessment, after: Assessment) -> list[Defect]:
+    """Critical defects present after a correction that did not exist before it.
+
+    Matched by code, severity and master-clock location (+/- 0.5 s), so swapping one
+    critical defect for another is detected even when the error count is unchanged.
+    """
+    unmatched = list(before.defects)
+    new: list[Defect] = []
+    for d in after.defects:
+        hit = next((b for b in unmatched if _same_defect(b, d)), None)
+        if hit is not None:
+            unmatched.remove(hit)
+        elif d.severity in CRITICAL_SEVERITIES:
+            new.append(d)
+    return new
+
+
+def guard_issues(st: Any) -> list[Any]:
+    """Independent cheap QC guard: built-in department checks plus registered QC checks.
+
+    Runs on any intermediate state (checks must tolerate agents that have not run yet).
+    """
+    from bangonpro.ai_engine.department.agents import department_qc_checks
+
+    issues: list[Any] = []
+    try:
+        issues.extend(department_qc_checks(st))
+    except Exception:  # noqa: BLE001 - a guard must never crash the job
+        pass
+    hooked, _errors = run_qc_checks(st)
+    return issues + hooked
+
+
+def new_critical_guard_issues(before: list[Any], after: list[Any]) -> list[str]:
+    """Per-code increase of critical QC findings (timeline positions move with a re-cut)."""
+    def _counts(items: list[Any]) -> dict[str, int]:
+        out: dict[str, int] = {}
+        for i in items:
+            if getattr(i, "severity", "") in CRITICAL_SEVERITIES:
+                out[i.code] = out.get(i.code, 0) + 1
+        return out
+
+    b, a = _counts(before), _counts(after)
+    return sorted(f"{code} {b.get(code, 0)}->{n}" for code, n in a.items() if n > b.get(code, 0))
+
+
+def accept_correction(
+    before: Assessment,
+    after: Assessment,
+    min_improvement: float = MIN_IMPROVEMENT,
+    *,
+    guard_before: list[Any] | None = None,
+    guard_after: list[Any] | None = None,
+) -> tuple[bool, str]:
+    """Keep a correction only when it is measurably better and introduces no new critical defect.
+
+    Three independent conditions, all required:
+    1. no new critical defect in the agent's own assessment (identity, not count);
+    2. no increase of any critical finding in the independent QC guard;
+    3. the agent's objective score improves by at least ``min_improvement``.
+    """
+    new = new_critical_defects(before, after)
+    if new:
+        return False, "rejected: new critical defect(s) " + ", ".join(f"{d.code}@{d.at_sec}" for d in new)
+    if guard_before is not None and guard_after is not None:
+        worse = new_critical_guard_issues(guard_before, guard_after)
+        if worse:
+            return False, "rejected: independent QC guard found new critical issue(s) " + ", ".join(worse)
     gain = round(after.score - before.score, 4)
-    if after.error_count > before.error_count:
-        return False, f"rejected: errors {before.error_count} -> {after.error_count}"
     if gain < min_improvement:
         return False, f"rejected: {before.metric} {before.score:.3f} -> {after.score:.3f} (gain {gain:+.3f} < {min_improvement})"
     return True, f"accepted: {before.metric} {before.score:.3f} -> {after.score:.3f} (gain {gain:+.3f})"
@@ -158,6 +232,7 @@ def run_final_verifiers(st: Any, job_doc: dict[str, Any]) -> dict[str, Any]:
 
 __all__ = [
     "ASSESSORS",
+    "CRITICAL_SEVERITIES",
     "EXTENSION_MODULES",
     "FINAL_VERIFIERS",
     "LOW_CONFIDENCE_REVIEW",
@@ -170,6 +245,9 @@ __all__ = [
     "accept_correction",
     "assess",
     "ensure_extensions_loaded",
+    "guard_issues",
+    "new_critical_defects",
+    "new_critical_guard_issues",
     "register_assessor",
     "register_final_verifier",
     "register_qc_check",

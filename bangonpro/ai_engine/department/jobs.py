@@ -483,28 +483,49 @@ class ProductionJob:
         outcome: AgentOutcome,
         pre_snapshot: dict[str, Any],
     ) -> tuple[AgentOutcome, dict[str, Any] | None]:
-        """Assess -> correct -> verify, bounded; keep a correction only if measurably better."""
+        """Assess -> correct -> verify, bounded; keep a correction only if measurably better.
+
+        Every attempt, accepted or rejected, is charged to the job: its machine time goes into
+        ``quality_loop_processing_sec`` (and the agent's ``duration_sec`` / job
+        ``processing_elapsed_sec``), its external cost into the budget. An attempt is skipped
+        when its projected external cost would exceed the job budget.
+        """
         st = ctx.state
         first = ql.assess(agent_id, ctx, outcome)
         if first is None:
             return outcome, None
-        log: dict[str, Any] = {"metric": first.metric, "initial_score": first.score, "initial": first.to_dict(), "attempts": []}
+        first_cost = float(outcome.est_external_cost_usd or 0.0)
+        guard_best = ql.guard_issues(st)
+        log: dict[str, Any] = {
+            "metric": first.metric,
+            "initial_score": first.score,
+            "initial": first.to_dict(),
+            "initial_guard_critical": sorted({i.code for i in guard_best if i.severity in ql.CRITICAL_SEVERITIES}),
+            "attempts": [],
+        }
         best, best_outcome, current = first, outcome, first
         tried: list[str] = []
         attempts = 0
+        attempt_cost_total = 0.0
+        attempt_time_total = 0.0
         handler = HANDLERS[agent_id]
+        budget = self.doc["budget"]
         while current.correction and attempts < ql.MAX_ATTEMPTS_PER_AGENT and int(self.doc.get("quality_loop_attempts", 0)) < ql.MAX_ATTEMPTS_PER_JOB:
             key = json.dumps(current.correction, sort_keys=True, default=str)
             if key in tried:
                 break
             tried.append(key)
+            projected = float(budget.get("spent_usd", 0.0)) + first_cost + attempt_cost_total + first_cost
+            if first_cost > 0 and projected > float(budget.get("limit_usd", 0.0)):
+                log["attempts"].append({"attempt": attempts + 1, "correction": current.correction, "accepted": False, "duration_sec": 0.0, "est_external_cost_usd": 0.0, "verdict": f"skipped: projected external cost ${projected:.2f} exceeds the job budget ${float(budget.get('limit_usd', 0.0)):.2f}"})
+                break
             ctx.token.check(f"quality loop {agent_id}")
             attempts += 1
             self.doc["quality_loop_attempts"] = int(self.doc.get("quality_loop_attempts", 0)) + 1
             try:
                 overlay = validate_overlay(current.correction)
             except ValueError as exc:
-                log["attempts"].append({"attempt": attempts, "correction": current.correction, "accepted": False, "verdict": f"rejected: invalid correction ({exc})"})
+                log["attempts"].append({"attempt": attempts, "correction": current.correction, "accepted": False, "duration_sec": 0.0, "est_external_cost_usd": 0.0, "verdict": f"rejected: invalid correction ({exc})"})
                 break
             trial = deserialize_state(pre_snapshot)
             trial.profile = deep_merge(trial.profile, overlay)
@@ -513,22 +534,61 @@ class ProductionJob:
             trial.output_dir = str(attempt_dir)
             tctx = AgentContext(agent_id=agent_id, state=trial, token=ctx.token, progress=ctx.progress, cache=ctx.cache, options=ctx.options, plan=ctx.plan)
             ctx.progress(0.95, f"Verifying correction {attempts}: {current.correction_reason or 'profile adjustment'}")
-            t_outcome = handler(tctx)
-            after = ql.assess(agent_id, tctx, t_outcome)
-            if after is None:
+            t_attempt = time.perf_counter()
+            try:
+                t_outcome = handler(tctx)
+                after = ql.assess(agent_id, tctx, t_outcome)
+                guard_after = ql.guard_issues(trial)
+            except (PipelineCancelledError, InsufficientStorageError):
+                attempt_time_total += time.perf_counter() - t_attempt
+                self.doc["quality_loop_processing_sec"] = round(float(self.doc.get("quality_loop_processing_sec", 0.0)) + attempt_time_total, 3)
+                raise
+            except Exception as exc:  # noqa: BLE001 - a failed correction keeps the original output
+                dt = time.perf_counter() - t_attempt
+                attempt_time_total += dt
+                log["attempts"].append({"attempt": attempts, "correction": overlay, "accepted": False, "duration_sec": round(dt, 3), "est_external_cost_usd": 0.0, "verdict": f"rejected: correction run failed ({type(exc).__name__}: {exc})"})
+                self._event(agent_id, "quality_correction_failed", {"attempt": attempts, "error": f"{type(exc).__name__}: {exc}"})
                 break
-            ok, verdict = ql.accept_correction(best, after)
-            log["attempts"].append({"attempt": attempts, "correction": overlay, "reason": current.correction_reason, "score": after.score, "defects": [asdict(d) for d in after.defects], "accepted": ok, "verdict": verdict})
-            self._event(agent_id, "quality_correction_" + ("accepted" if ok else "rejected"), {"attempt": attempts, "verdict": verdict, "correction": overlay})
+            dt = time.perf_counter() - t_attempt
+            attempt_time_total += dt
+            a_cost = float(t_outcome.est_external_cost_usd or 0.0)
+            attempt_cost_total += a_cost
+            if after is None:
+                log["attempts"].append({"attempt": attempts, "correction": overlay, "accepted": False, "duration_sec": round(dt, 3), "est_external_cost_usd": a_cost, "verdict": "rejected: assessor returned no assessment"})
+                break
+            ok, verdict = ql.accept_correction(best, after, guard_before=guard_best, guard_after=guard_after)
+            log["attempts"].append(
+                {
+                    "attempt": attempts,
+                    "correction": overlay,
+                    "reason": current.correction_reason,
+                    "score": after.score,
+                    "defects": [asdict(d) for d in after.defects],
+                    "guard_critical": sorted({i.code for i in guard_after if i.severity in ql.CRITICAL_SEVERITIES}),
+                    "accepted": ok,
+                    "verdict": verdict,
+                    "duration_sec": round(dt, 3),
+                    "est_external_cost_usd": round(a_cost, 4),
+                    "neural_inference": t_outcome.neural_inference,
+                    "cache_hits": list(t_outcome.cache_hits),
+                }
+            )
+            self._event(agent_id, "quality_correction_" + ("accepted" if ok else "rejected"), {"attempt": attempts, "verdict": verdict, "correction": overlay, "duration_sec": round(dt, 3)})
             if ok:
                 _relocate_attempt_outputs(attempt_dir, Path(st.output_dir), trial, t_outcome)
                 trial.output_dir = st.output_dir
                 st.__dict__.update(trial.__dict__)
-                best, best_outcome = after, t_outcome
+                best, best_outcome, guard_best = after, t_outcome, guard_after
             current = after
+        # Everything that ran is charged: the kept outcome reports the job's total spend for this agent.
+        best_outcome.est_external_cost_usd = round(first_cost + attempt_cost_total, 4)
+        self.doc["quality_loop_processing_sec"] = round(float(self.doc.get("quality_loop_processing_sec", 0.0)) + attempt_time_total, 3)
+        self.doc["quality_loop_cost_usd"] = round(float(self.doc.get("quality_loop_cost_usd", 0.0)) + attempt_cost_total, 4)
         log["final_score"] = best.score
         log["final_defects"] = [asdict(d) for d in best.defects]
         log["corrections_applied"] = sum(1 for a in log["attempts"] if a.get("accepted"))
+        log["attempt_processing_sec"] = round(attempt_time_total, 3)
+        log["attempt_cost_usd"] = round(attempt_cost_total, 4)
         review = list(best_outcome.review_items)
         for d in best.defects:
             if d.severity in ("warning", "error") or d.subjective:
@@ -764,6 +824,8 @@ class ProductionJob:
             "approvals_required": ["Replace an existing edit (promote --approve)", "Publish deliverables"],
             "final_verification": self.doc.get("final_verification", {}),
             "quality_loop_attempts": int(self.doc.get("quality_loop_attempts", 0)),
+            "quality_loop_processing_sec": float(self.doc.get("quality_loop_processing_sec", 0.0)),
+            "quality_loop_cost_usd": float(self.doc.get("quality_loop_cost_usd", 0.0)),
         }
 
 
