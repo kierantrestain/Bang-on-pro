@@ -101,7 +101,9 @@
     "enable_captions": true,
     "enable_lower_thirds": true,
     "lower_third_duration_sec": 3.5,
-    "brand_accent_hex": "#FFB800"
+    "brand_accent_hex": "#FFB800",
+    "enable_title_card": true,
+    "title_card_duration_sec": 3.0
   },
   "graphics_templates": {
     "lower_third_template": "gameshow_scoreboard_banner",
@@ -121,7 +123,8 @@
     "alignment": "bottom_center",
     "max_chars_per_line": 36,
     "uppercase": true,
-    "burn_in": false
+    "burn_in": false,
+    "max_chars_per_sec": 20.0
   },
   "delivery_spec": {
     "container": "mp4",
@@ -156,5 +159,34 @@
       "video_bitrate": "8M",
       "audio_bitrate": "160k"
     }
-  ]
+  ],
+  "agent_config": {
+    "disabled_agents": [],
+    "default_mode": "full_production_draft"
+  },
+  "colour_rules": {
+    "enabled": true,
+    "reference_camera": null,
+    "correct_exposure": true,
+    "target_luma": 0.5,
+    "max_channel_gain": 1.33,
+    "lut_path": null,
+    "treatment": "bright_entertainment"
+  },
+  "vfx_rules": {
+    "tasks": [],
+    "blur_strength": 12
+  },
+  "distribution_rules": {
+    "social_versions": true,
+    "highlight_reel": true,
+    "highlight_count": 10,
+    "social_aspect": "9:16",
+    "loudness_tolerance_lu": 1.5
+  },
+  "series": {
+    "series_id": null,
+    "episode_number_format": "Ep {n:03d}",
+    "consistent_standards": true
+  }
 }

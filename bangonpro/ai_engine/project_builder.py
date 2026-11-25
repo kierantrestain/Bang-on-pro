@@ -12,6 +12,7 @@ SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -25,7 +26,9 @@ from typing import Any
 
 import opentimelineio as otio
 
-from bangonpro.ai_engine.agents.audio_graphics_qc import generate_kdenlive_lower_third_xml
+from bangonpro.ai_engine.agents.audio_graphics_qc import (
+    generate_kdenlive_lower_third_xml,
+)
 from bangonpro.ai_engine.agents.ingest_sync import probe_media_file
 from bangonpro.ai_engine.commands import (
     TimelineCommandBuilder,
@@ -66,6 +69,9 @@ class CompiledClip:
     params: dict[str, Any] = field(default_factory=dict)
     confidence: float = 1.0
     rationale: str = ""
+    # Native per-clip MLT filters (V1.2 Colourist / VFX agents) emitted as editable
+    # Kdenlive effect-stack ``<filter>`` elements inside the clip's playlist entry.
+    filters: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def duration_frames(self) -> int:
@@ -98,6 +104,7 @@ class CompiledTimeline:
     ass_subtitle_path: str | None = None
     srt_subtitle_path: str | None = None
     markers: list[dict[str, Any]] = field(default_factory=list)
+    unresolved_effects: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def fps(self) -> float:
@@ -168,6 +175,14 @@ def compile_command_batches(command_batches: list[dict[str, Any]]) -> CompiledTi
                     compiled.a1_clips.append(clip)
                 elif track_id == "A2":
                     compiled.a2_clips.append(clip)
+
+            elif op_type in ("add_effect", "apply_mask"):
+                target_id = op.get("clip_id")
+                target = _find_compiled_clip(compiled, target_id) if target_id else None
+                if target is not None:
+                    target.filters.extend(_effect_op_to_filters(op_type, params))
+                else:
+                    compiled.unresolved_effects.append(dict(op))
 
             elif op_type == "add_lower_third":
                 dur_f = max(
@@ -260,6 +275,92 @@ def compile_command_batches(command_batches: list[dict[str, Any]]) -> CompiledTi
     return compiled
 
 
+def kdenlive_file_hash(path: str | Path) -> tuple[str, int] | None:
+    """Replicate Kdenlive ``ProjectClip::calculateHash``: MD5 of the whole file when <= 2 MB,
+    otherwise MD5 of the first 1 MB + last 1 MB; returns ``(hex digest, file size)``."""
+    try:
+        p = Path(path)
+        size = p.stat().st_size
+        md5 = hashlib.md5()  # noqa: S324 - identity hash mandated by Kdenlive's project format, not security
+        with p.open("rb") as fh:
+            if size > 2_000_000:
+                md5.update(fh.read(1_000_000))
+                fh.seek(size - 1_000_000)
+                md5.update(fh.read())
+            else:
+                md5.update(fh.read())
+        return md5.hexdigest(), size
+    except OSError:
+        return None
+
+
+def _find_compiled_clip(compiled: CompiledTimeline, clip_id: str) -> CompiledClip | None:
+    for lst in (compiled.v1_clips, compiled.v2_clips, compiled.a1_clips, compiled.a2_clips):
+        for clip in lst:
+            if clip.clip_id == clip_id:
+                return clip
+    return None
+
+
+def _effect_op_to_filters(op_type: str, params: dict[str, Any]) -> list[dict[str, Any]]:
+    """Translate ``add_effect`` / ``apply_mask`` params into native MLT filter specs.
+
+    ``add_effect`` params: ``mlt_service``, optional ``kdenlive_id`` and ``properties``.
+    ``apply_mask`` with a ``matte_path`` becomes Kdenlive's native mask workflow:
+    ``mask_start`` (shape matte) -> optional masked effect -> ``mask_apply``.
+    """
+    if op_type == "add_effect":
+        # Accept both the native C++ bridge keys (effect_id / parameters) and MLT keys.
+        service = str(params.get("mlt_service") or params.get("effect_id") or "")
+        if not service:
+            return []
+        return [
+            {
+                "mlt_service": service,
+                "kdenlive_id": str(params.get("kdenlive_id") or params.get("effect_id") or service),
+                "properties": dict(params.get("properties") or params.get("parameters") or {}),
+                "agent_id": params.get("agent_id"),
+            }
+        ]
+    matte = params.get("matte_path")
+    if not matte:
+        return []
+    filters: list[dict[str, Any]] = [
+        {
+            "mlt_service": "mask_start",
+            "kdenlive_id": "mask_start-shape",
+            "properties": {
+                "filter": "shape",
+                "filter.resource": str(matte),
+                "filter.mix": 100,
+                "filter.softness": round(min(1.0, max(0.0, float(params.get("feather", 0.0)) / 100.0)), 3),
+                "filter.invert": 1 if params.get("invert") else 0,
+                "filter.use_luminance": 1,
+            },
+            "agent_id": params.get("agent_id"),
+        }
+    ]
+    masked = params.get("masked_effect") or {}
+    if masked.get("mlt_service"):
+        filters.append(
+            {
+                "mlt_service": str(masked["mlt_service"]),
+                "kdenlive_id": str(masked.get("kdenlive_id") or masked["mlt_service"]),
+                "properties": dict(masked.get("properties") or {}),
+                "agent_id": params.get("agent_id"),
+            }
+        )
+    filters.append(
+        {
+            "mlt_service": "mask_apply",
+            "kdenlive_id": "mask_apply",
+            "properties": {"transition": "frei0r.composition"},
+            "agent_id": params.get("agent_id"),
+        }
+    )
+    return filters
+
+
 def _add_prop(parent: ET.Element, name: str, value: Any) -> ET.Element:
     prop = ET.SubElement(parent, "property", {"name": name})
     prop.text = str(value)
@@ -299,6 +400,18 @@ def _populate_playlist_with_clips(
             },
         )
         _add_prop(entry, "kdenlive:id", k_id)
+        for f_idx, flt in enumerate(clip.filters):
+            f_el = ET.SubElement(
+                entry,
+                "filter",
+                {"id": f"{clip.clip_id}_fx{f_idx}", "in": str(clip.in_frame), "out": str(clip.out_frame)},
+            )
+            _add_prop(f_el, "mlt_service", flt["mlt_service"])
+            _add_prop(f_el, "kdenlive_id", flt.get("kdenlive_id") or flt["mlt_service"])
+            for p_name, p_val in (flt.get("properties") or {}).items():
+                _add_prop(f_el, str(p_name), p_val)
+            if flt.get("agent_id"):
+                _add_prop(f_el, "kdenlive:bangonpro_agent", flt["agent_id"])
         cursor = clip.timeline_start + clip.duration_frames
 
 
@@ -379,8 +492,14 @@ def emit_kdenlive_xml(
             _add_prop(chain, "kdenlive:clipname", meta.get("camera_id", media_ref))
             _add_prop(chain, "kdenlive:folderid", -1)
             _add_prop(chain, "kdenlive:clip_type", 1 if is_audio_only else 0)
+            k_hash = kdenlive_file_hash(file_path)
+            if k_hash is not None:
+                # Kdenlive's own clip identity (ProjectClip::calculateHash); a SHA-256 here made Kdenlive
+                # flag every generated clip as "changed - reload" when the project was opened (V1.2 fix).
+                _add_prop(chain, "kdenlive:file_hash", k_hash[0])
+                _add_prop(chain, "kdenlive:file_size", k_hash[1])
             if meta.get("sha256"):
-                _add_prop(chain, "kdenlive:file_hash", meta["sha256"])
+                _add_prop(chain, "kdenlive:bangonpro_sha256", meta["sha256"])
             if kind == "audio":
                 _add_prop(chain, "video_index", -1)
                 _add_prop(chain, "set.test_audio", 0)
@@ -449,6 +568,7 @@ def emit_kdenlive_xml(
         if flt["track_id"] == "A2" and flt["mlt_service"]:
             f_el = ET.SubElement(tr_a2, "filter", {"id": flt["filter_id"]})
             _add_prop(f_el, "mlt_service", flt["mlt_service"])
+            _add_prop(f_el, "kdenlive_id", flt["mlt_service"])
             for k, v in flt["mlt_params"].items():
                 _add_prop(f_el, k, v)
 
@@ -470,6 +590,7 @@ def emit_kdenlive_xml(
         if flt["track_id"] == "A1" and flt["mlt_service"]:
             f_el = ET.SubElement(tr_a1, "filter", {"id": flt["filter_id"]})
             _add_prop(f_el, "mlt_service", flt["mlt_service"])
+            _add_prop(f_el, "kdenlive_id", flt["mlt_service"])
             for k, v in flt["mlt_params"].items():
                 _add_prop(f_el, k, v)
 

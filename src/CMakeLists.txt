@@ -91,6 +91,7 @@ list(APPEND kdenlive_SRCS
     bangonpro/timeline_api/KdenliveTimelineBridge.cpp
     bangonpro/effects_browser/PremierePresetBrowser.cpp
     bangonpro/ui/AiAssistantDock.cpp
+    bangonpro/ui/AgentControlCentre.cpp
     bangonpro/ui/BangOnProWorkspace.cpp
     bangonpro/ui/BangOnProTheme.cpp
     bangonpro/ui/BangOnProShortcutPresets.cpp
@@ -146,6 +147,7 @@ set_source_files_properties(
     bangonpro/timeline_api/KdenliveTimelineBridge.cpp
     bangonpro/effects_browser/PremierePresetBrowser.cpp
     bangonpro/ui/AiAssistantDock.cpp
+    bangonpro/ui/AgentControlCentre.cpp
     bangonpro/ui/BangOnProWorkspace.cpp
     bangonpro/ui/BangOnProTheme.cpp
     bangonpro/ui/BangOnProShortcutPresets.cpp

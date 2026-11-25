@@ -25,7 +25,7 @@ CRAFT_ROOT="${CRAFT_ROOT:-${HOME}/CraftRoot}"
 CRAFT_PREFIX=""
 APP_NAME="Bang On Pro"
 DMG_BASENAME="BangOnPro"
-APP_VERSION="${BANGONPRO_VERSION:-1.1.0}"
+APP_VERSION="${BANGONPRO_VERSION:-1.2.0}"
 MIN_MACOS="${MACOSX_DEPLOYMENT_TARGET:-13.0}"
 SIGN_IDENTITY="${APPLE_SIGNING_IDENTITY:-${MACOS_SIGNING_IDENTITY:-}}"
 NOTARY_PROFILE="${MACOS_NOTARY_PROFILE:-}"
@@ -73,7 +73,7 @@ Options:
   --output-dir <path>           Output directory for .app/.dmg/logs (default: ./dist/macos-arm64)
   --craft-root <path>           KDE Craft root or CraftMaster target prefix
                                 (auto-detects <root>/macos-arm-clang if present)
-  --version <ver>               Release version string (default: 1.1.0)
+  --version <ver>               Release version string (default: 1.2.0)
   --min-macos <ver>             MACOSX_DEPLOYMENT_TARGET (default: 13.0)
   --sign-identity <id>          Developer ID Application signing identity
                                 (omit to fall back cleanly to ad-hoc signing)
@@ -345,6 +345,7 @@ build_application() {
             bangonpro_test_premiere_preset_browser
             bangonpro_test_pro_workspace
             bangonpro_test_roto_studio
+            bangonpro_test_agent_control_centre
         )
     fi
     log "Compiling ${build_targets[*]} with ${JOBS} parallel Ninja jobs..."
@@ -764,9 +765,18 @@ assemble_app_bundle() {
             py_req_file="${SOURCE_DIR}/requirements-bangonpro.txt"
         fi
         log "Building self-contained Python 3.12 runtime inside Contents/Resources/python-env/ using $(basename "${py_req_file}")..."
+        # V1.2 managed AI runtime: bundle the faster-whisper (CTranslate2) + onnxruntime packages so genuine
+        # local Whisper / MobileSAM inference works out of the box; model WEIGHTS stay on-demand via the
+        # in-app Model Manager (consent + SHA-256 verified). Override with BANGONPRO_BUNDLE_AI_TIER=none.
+        local ai_tier="${BANGONPRO_BUNDLE_AI_TIER:-tier1}"
+        local tier_args=()
+        if [[ "${ai_tier}" != "none" ]]; then
+            tier_args=(--tier "${ai_tier}")
+        fi
         "${SCRIPT_DIR}/bootstrap_ai_runtime.sh" \
             --venv-dir "${resources_dir}/python-env" \
-            --requirements "${py_req_file}"
+            --requirements "${py_req_file}" \
+            ${tier_args[@]+"${tier_args[@]}"}
     else
         warn "Skipping bundled Python 3.12 virtualenv (--skip-python-venv specified)."
     fi

@@ -159,3 +159,31 @@ target_link_libraries(bangonpro_test_roto_studio PRIVATE
     Qt${QT_MAJOR_VERSION}::Test
 )
 add_test(NAME bangonpro_test_roto_studio COMMAND bangonpro_test_roto_studio)
+
+# 6. V1.2 Agent Control Centre (AI Production Department UI)
+add_executable(bangonpro_test_agent_control_centre
+    ${CMAKE_CURRENT_SOURCE_DIR}/../ui/AgentControlCentre.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_agent_control_centre.cpp
+)
+set_target_properties(bangonpro_test_agent_control_centre PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+    AUTOMOC ON
+)
+target_include_directories(bangonpro_test_agent_control_centre PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${CMAKE_CURRENT_SOURCE_DIR}/../ui
+)
+target_compile_definitions(bangonpro_test_agent_control_centre PRIVATE
+    QT_NO_CAST_FROM_ASCII
+    QT_NO_CAST_TO_ASCII
+    QT_NO_URL_CAST_FROM_STRING
+    QT_NO_KEYWORDS
+)
+target_link_libraries(bangonpro_test_agent_control_centre PRIVATE
+    Qt${QT_MAJOR_VERSION}::Core
+    Qt${QT_MAJOR_VERSION}::Widgets
+    Qt${QT_MAJOR_VERSION}::Test
+)
+add_test(NAME bangonpro_test_agent_control_centre COMMAND bangonpro_test_agent_control_centre)

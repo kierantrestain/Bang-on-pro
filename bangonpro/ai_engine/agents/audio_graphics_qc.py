@@ -143,13 +143,22 @@ def build_audio_restoration_chain(
         else:
             filters.append(
                 AudioFilterSpec(
-                    filter_id=f"flt_{track_slug}_afftdn",
-                    mlt_service="avfilter.afftdn",
-                    mlt_params={"av.noise_reduction": 10.0, "av.nf": -35.0},
-                    ffmpeg_filter="afftdn=nr=10:nf=-35",
+                    filter_id=f"flt_{track_slug}_denoise",
+                    # V1.2: spectral avfilter.afftdn is excluded by Kdenlive and avfilter.afwtdn buffers frames
+                    # (MLT "Unexpected return format"). Without an RNNoise model we use a frame-accurate
+                    # downward expander (avfilter.compand) that lowers the room-noise floor between words.
+                    mlt_service="avfilter.compand",
+                    mlt_params={
+                        "av.attacks": 0.005,
+                        "av.decays": 0.25,
+                        "av.points": "-90/-110|-55/-75|-45/-45|0/0",
+                        "av.soft-knee": 6.0,
+                        "av.gain": 0.0,
+                    },
+                    ffmpeg_filter="compand=attacks=0.005:decays=0.25:points=-90/-110|-55/-75|-45/-45|0/0:soft-knee=6",
                     track_id=target_track_id,
                     enabled=True,
-                    rationale="Apply FFT spectral noise reduction (deterministic CPU fallback for RNNoise)",
+                    rationale="Reduce room-noise floor between words with a downward expander (non-neural; configure an RNNoise model for neural denoise)",
                 )
             )
 
@@ -157,15 +166,17 @@ def build_audio_restoration_chain(
         filters.append(
             AudioFilterSpec(
                 filter_id=f"flt_{track_slug}_compressor",
-                mlt_service="avfilter.acompressor",
+                # V1.2: avfilter.acompressor is excluded by Kdenlive; avfilter.compand is supported & editable.
+                # ~3:1 above -24 dBFS with +3 dB makeup, 10 ms attack / 120 ms release.
+                mlt_service="avfilter.compand",
                 mlt_params={
-                    "av.threshold": 0.125,
-                    "av.ratio": 3.0,
-                    "av.attack": 10.0,
-                    "av.release": 120.0,
-                    "av.makeup": 1.5,
+                    "av.attacks": 0.01,
+                    "av.decays": 0.12,
+                    "av.points": "-80/-80|-24/-24|0/-16",
+                    "av.soft-knee": 6.0,
+                    "av.gain": 3.0,
                 },
-                ffmpeg_filter="acompressor=threshold=0.125:ratio=3:attack=10:release=120:makeup=1.5",
+                ffmpeg_filter="compand=attacks=0.01:decays=0.12:points=-80/-80|-24/-24|0/-16:soft-knee=6:gain=3",
                 track_id=target_track_id,
                 enabled=True,
                 rationale="Level studio vocal dynamics across multiple microphones",
@@ -175,11 +186,16 @@ def build_audio_restoration_chain(
     filters.append(
         AudioFilterSpec(
             filter_id=f"flt_{track_slug}_loudnorm",
-            mlt_service="avfilter.loudnorm",
+            # V1.2: avfilter.loudnorm is excluded by Kdenlive; MLT dynamic_loudness is the supported,
+            # editable EBU R128 equivalent. Distribution verifies the rendered master and applies a
+            # measured second-pass gain when needed.
+            mlt_service="dynamic_loudness",
             mlt_params={
-                "av.I": target_lufs,
-                "av.TP": true_peak,
-                "av.LRA": 7.0,
+                "target_loudness": target_lufs,
+                "window": 3.0,
+                "max_gain": 15.0,
+                "min_gain": -15.0,
+                "max_rate": 3.0,
             },
             ffmpeg_filter=f"loudnorm=I={target_lufs:.1f}:TP={true_peak:.1f}:LRA=7",
             track_id=target_track_id,
@@ -360,6 +376,45 @@ def _speaker_matches_filter(speaker: str, target_speakers: list[str]) -> bool:
     return any(t.strip().lower() in spk_low or spk_low in t.strip().lower() for t in target_speakers)
 
 
+def _split_segment_text_by_intervals(seg: Any, intervals: list[Any]) -> dict[int, str]:
+    """Distribute a segment's words over the kept intervals it overlaps (each word exactly once).
+
+    V1.2 fix: when the rough cut removed a pause inside a sentence, the full sentence was
+    emitted once per kept interval (duplicated captions). Word timestamps (neural ASR) assign
+    each word to the interval containing its midpoint; without them words are split in
+    proportion to each interval's overlap.
+    """
+    overlaps: dict[int, float] = {}
+    for idx, iv in enumerate(intervals):
+        ov = min(seg.end_sec, iv.end_sec) - max(seg.start_sec, iv.start_sec)
+        if ov >= 0.20:
+            overlaps[idx] = ov
+    if not overlaps:
+        return {}
+    if len(overlaps) == 1:
+        return {next(iter(overlaps)): seg.text}
+    buckets: dict[int, list[str]] = {idx: [] for idx in overlaps}
+    words = [w for w in (seg.words or []) if str(w.get("word", "")).strip()]
+    if words:
+        for w in words:
+            mid = (float(w.get("start_sec", seg.start_sec)) + float(w.get("end_sec", seg.end_sec))) / 2.0
+            best = min(
+                overlaps,
+                key=lambda i: 0.0 if intervals[i].start_sec <= mid <= intervals[i].end_sec else min(abs(mid - intervals[i].start_sec), abs(mid - intervals[i].end_sec)),
+            )
+            buckets[best].append(str(w["word"]).strip())
+    else:
+        tokens = seg.text.split()
+        total = sum(overlaps.values()) or 1.0
+        pos = 0
+        ordered = sorted(overlaps)
+        for n, idx in enumerate(ordered):
+            take = len(tokens) - pos if n == len(ordered) - 1 else round(len(tokens) * overlaps[idx] / total)
+            buckets[idx] = tokens[pos: pos + take]
+            pos += take
+    return {idx: " ".join(ws) for idx, ws in buckets.items() if ws}
+
+
 def _build_edited_captions(state: ProjectAnalysisState) -> list[CaptionCue]:
     """Map diarised transcript segments onto the edited rough-cut or source master timeline."""
     target_speakers = state.intent.target_speakers
@@ -372,7 +427,8 @@ def _build_edited_captions(state: ProjectAnalysisState) -> list[CaptionCue]:
             if not _speaker_matches_filter(seg.speaker_id, target_speakers):
                 continue
             cursor = 0.0
-            for iv in state.kept_master_intervals:
+            pieces = _split_segment_text_by_intervals(seg, state.kept_master_intervals)
+            for iv_idx, iv in enumerate(state.kept_master_intervals):
                 ov_start = max(seg.start_sec, iv.start_sec)
                 ov_end = min(seg.end_sec, iv.end_sec)
                 if ov_end - ov_start >= 0.20:
@@ -381,7 +437,8 @@ def _build_edited_captions(state: ProjectAnalysisState) -> list[CaptionCue]:
                     if time_range is not None:
                         ed_start = max(ed_start, time_range[0])
                         ed_end = min(ed_end, time_range[1])
-                    if ed_end - ed_start >= 0.15:
+                    piece = pieces.get(iv_idx, "")
+                    if ed_end - ed_start >= 0.15 and piece:
                         if cues and ed_start < cues[-1].end_sec:
                             ed_start = cues[-1].end_sec
                         if ed_end > ed_start + 0.10:
@@ -391,7 +448,7 @@ def _build_edited_captions(state: ProjectAnalysisState) -> list[CaptionCue]:
                                     start_sec=round(ed_start, 3),
                                     end_sec=round(ed_end, 3),
                                     speaker_id=seg.speaker_id,
-                                    text=seg.text,
+                                    text=piece,
                                     confidence=seg.confidence,
                                 )
                             )
@@ -809,40 +866,24 @@ def run_technical_qc(state: ProjectAnalysisState) -> QCReport:
     return QCReport(passed=not has_error, issues=issues, metrics=metrics)
 
 
-def run_audio_graphics_qc_agent(
-    state: ProjectAnalysisState,
-    token: CancellationToken,
-    report_progress: Callable[[float, str], None],
-) -> dict[str, Any] | None:
-    """Generate audio restoration chain, captions, lower-thirds, and run technical QC strictly per intent."""
-    token.check("audio_graphics_qc start")
+def _audio_target_tracks(state: ProjectAnalysisState) -> list[str]:
+    return [t for t in state.intent.target_tracks if t.startswith("A")] or ["A1"]
 
-    needs_stage = any(
-        (
-            state.intent.restore_audio,
-            state.intent.add_captions,
-            state.intent.add_lower_thirds,
-            state.intent.run_qc,
-        )
-    )
-    if not needs_stage:
-        report_progress(1.0, "Skipping audio/graphics/QC (not requested by instruction scope)")
-        return None
 
-    out_dir = Path(state.output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+def _loudness_target(state: ProjectAnalysisState) -> float:
     effective = get_effective_profile_settings(state.profile)
-
-    # 1. Build audio restoration filter chain ONLY if restore_audio is enabled
-    report_progress(0.15, "Configuring MLT/FFmpeg audio restoration chain")
-    audio_rules = state.profile.get("audio_rules", {})
-    audio_target_tracks = [t for t in state.intent.target_tracks if t.startswith("A")] or ["A1"]
-    loudness_override = (
+    return (
         state.intent.loudness_target_lufs
         if state.intent.loudness_target_lufs is not None
         else float(effective["loudness_target_lufs"])
     )
 
+
+def prepare_audio_restoration(state: ProjectAnalysisState) -> list[AudioFilterSpec]:
+    """Audio Engineer: build the MLT/FFmpeg restoration chain (only when ``restore_audio``)."""
+    audio_rules = state.profile.get("audio_rules", {})
+    audio_target_tracks = _audio_target_tracks(state)
+    loudness_override = _loudness_target(state)
     audio_filters: list[AudioFilterSpec] = []
     ffmpeg_chains: list[str] = []
     if state.intent.restore_audio:
@@ -859,9 +900,77 @@ def run_audio_graphics_qc_agent(
                 ffmpeg_chains.append(chain_str)
     state.audio_filters = audio_filters
     state.ffmpeg_audio_filtergraph = ";".join(ffmpeg_chains)
+    return audio_filters
 
-    # 2. Generate .srt & .ass captions ONLY if add_captions is enabled
-    report_progress(0.40, "Generating .srt and .ass captions")
+
+def emit_audio_ops(state: ProjectAnalysisState, builder: TimelineCommandBuilder) -> int:
+    """Emit audio restoration, microphone level-matching and music-duck operations."""
+    if not state.intent.restore_audio:
+        return 0
+    before = builder.operation_count
+    audio_rules = state.profile.get("audio_rules", {})
+    audio_target_tracks = _audio_target_tracks(state)
+    loudness_override = _loudness_target(state)
+    for flt in state.audio_filters:
+        if not flt.enabled:
+            continue
+        builder.add_operation(
+            "add_audio_filter",
+            track_id=flt.track_id,
+            params={
+                "filter_id": flt.filter_id,
+                "mlt_service": flt.mlt_service,
+                "mlt_params": flt.mlt_params,
+                "ffmpeg_filter": flt.ffmpeg_filter,
+            },
+            confidence=0.98,
+            rationale=flt.rationale,
+        )
+
+    per_cam_trim_db = state.metadata.get("per_camera_gain_trim_db", {})
+    if per_cam_trim_db and state.rough_cut_shots:
+        for shot in state.rough_cut_shots:
+            src_cam = shot.camera_id
+            for cid, asset in state.media_assets.items():
+                if asset.media_ref == shot.audio_media_ref:
+                    src_cam = cid
+                    break
+            trim_db = per_cam_trim_db.get(src_cam)
+            if trim_db is not None and abs(trim_db) >= 2.5:
+                builder.add_operation(
+                    "set_audio_level",
+                    clip_id=f"{shot.shot_id}_a",
+                    track_id=audio_target_tracks[0],
+                    params={
+                        "gain_db": float(trim_db),
+                        "camera_id": src_cam,
+                        "level_matching": True,
+                    },
+                    confidence=0.92,
+                    rationale=f"Level-match microphone '{src_cam}' by {trim_db:+.1f} dB prior to master loudnorm",
+                )
+
+    if "A1" in audio_target_tracks and len(audio_target_tracks) == 1:
+        builder.add_operation(
+            "set_audio_level",
+            track_id="A2",
+            params={
+                "gain_db": float(audio_rules.get("music_duck_db", -18.0)),
+                "target_lufs": loudness_override,
+                "true_peak_dbtp": float(audio_rules.get("true_peak_dbtp", -1.5)),
+                "duck_under_dialogue": True,
+            },
+            confidence=0.96,
+            rationale="Configure music bed ducking level relative to dialogue master A1",
+        )
+    return builder.operation_count - before
+
+
+def prepare_captions(state: ProjectAnalysisState) -> list[CaptionCue]:
+    """Captions Agent: build edited caption cues and write ``.srt`` / ``.ass`` sidecars."""
+    out_dir = Path(state.output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    effective = get_effective_profile_settings(state.profile)
     graphics_rules = state.profile.get("graphics_rules", {})
     caption_style = effective["caption_style"]
     enable_captions = bool(graphics_rules.get("enable_captions", True)) and state.intent.add_captions
@@ -884,94 +993,13 @@ def run_audio_graphics_qc_agent(
         ass_path.write_text(ass_text, encoding="utf-8")
         state.artifacts["captions_srt"] = str(srt_path)
         state.artifacts["captions_ass"] = str(ass_path)
+    return captions
 
-    # 3. Generate lower-third graphics ONLY if add_lower_thirds is enabled
-    token.check("generate lower thirds")
-    report_progress(0.60, "Generating Kdenlive lower-third graphics")
-    lower_thirds = _build_lower_thirds(state)
-    state.lower_thirds = lower_thirds
 
-    # 4. Run technical QC ONLY if run_qc is enabled
-    token.check("run technical qc")
-    report_progress(0.78, "Running technical QC checks")
-    qc_report = run_technical_qc(state) if state.intent.run_qc else QCReport(passed=True)
-    state.qc_report = qc_report
-
-    if state.intent.run_qc:
-        qc_path = out_dir / "qc_report.json"
-        qc_path.write_text(json.dumps(asdict(qc_report), indent=2), encoding="utf-8")
-        state.artifacts["qc_report_json"] = str(qc_path)
-
-    # 5. Emit validated Timeline Command API v1 batch
-    report_progress(0.90, "Building Timeline Command API v1 batch for audio, graphics & QC")
-    builder = TimelineCommandBuilder(
-        project_id=state.project_id,
-        sequence_id=state.sequence_id,
-        expected_revision=state.revision,
-        agent_id="audio_graphics_qc_agent",
-        agent_role="audio_finishing_graphics_and_qc",
-        transaction_label="Apply Audio Restoration, Captions, Lower Thirds & QC",
-        requires_approval=False,
-        dry_run=state.dry_run,
-        fps_num=state.fps_num,
-        fps_den=state.fps_den,
-    )
-
-    if state.intent.restore_audio:
-        for flt in audio_filters:
-            if not flt.enabled:
-                continue
-            builder.add_operation(
-                "add_audio_filter",
-                track_id=flt.track_id,
-                params={
-                    "filter_id": flt.filter_id,
-                    "mlt_service": flt.mlt_service,
-                    "mlt_params": flt.mlt_params,
-                    "ffmpeg_filter": flt.ffmpeg_filter,
-                },
-                confidence=0.98,
-                rationale=flt.rationale,
-            )
-
-        per_cam_trim_db = state.metadata.get("per_camera_gain_trim_db", {})
-        if per_cam_trim_db and state.rough_cut_shots:
-            for shot in state.rough_cut_shots:
-                src_cam = shot.camera_id
-                for cid, asset in state.media_assets.items():
-                    if asset.media_ref == shot.audio_media_ref:
-                        src_cam = cid
-                        break
-                trim_db = per_cam_trim_db.get(src_cam)
-                if trim_db is not None and abs(trim_db) >= 2.5:
-                    builder.add_operation(
-                        "set_audio_level",
-                        clip_id=f"{shot.shot_id}_a",
-                        track_id=audio_target_tracks[0],
-                        params={
-                            "gain_db": float(trim_db),
-                            "camera_id": src_cam,
-                            "level_matching": True,
-                        },
-                        confidence=0.92,
-                        rationale=f"Level-match microphone '{src_cam}' by {trim_db:+.1f} dB prior to master loudnorm",
-                    )
-
-        if "A1" in audio_target_tracks and len(audio_target_tracks) == 1:
-            builder.add_operation(
-                "set_audio_level",
-                track_id="A2",
-                params={
-                    "gain_db": float(audio_rules.get("music_duck_db", -18.0)),
-                    "target_lufs": loudness_override,
-                    "true_peak_dbtp": float(audio_rules.get("true_peak_dbtp", -1.5)),
-                    "duck_under_dialogue": True,
-                },
-                confidence=0.96,
-                rationale="Configure music bed ducking level relative to dialogue master A1",
-            )
-
-    for cue in captions:
+def emit_caption_ops(state: ProjectAnalysisState, builder: TimelineCommandBuilder) -> int:
+    before = builder.operation_count
+    caption_style = get_effective_profile_settings(state.profile)["caption_style"]
+    for cue in state.captions:
         in_f = state.sec_to_frame(cue.start_sec)
         out_f = max(in_f, state.sec_to_frame(cue.end_sec))
         builder.add_operation(
@@ -991,8 +1019,18 @@ def run_audio_graphics_qc_agent(
             confidence=cue.confidence,
             rationale=f"Add caption cue #{cue.index} ({cue.speaker_id})",
         )
+    return builder.operation_count - before
 
-    for lt in lower_thirds:
+
+def prepare_lower_thirds(state: ProjectAnalysisState) -> list[LowerThirdSpec]:
+    """Graphics Agent: build branded lower-third specifications (scoped by intent)."""
+    state.lower_thirds = _build_lower_thirds(state)
+    return state.lower_thirds
+
+
+def emit_lower_third_ops(state: ProjectAnalysisState, builder: TimelineCommandBuilder) -> int:
+    before = builder.operation_count
+    for lt in state.lower_thirds:
         builder.add_operation(
             "place_clip",
             clip_id=lt.graphic_id,
@@ -1012,8 +1050,29 @@ def run_audio_graphics_qc_agent(
             confidence=0.95,
             rationale=f"Place lower-third graphic for '{lt.title}' ({lt.template}) on V2",
         )
+    return builder.operation_count - before
 
-    for issue in qc_report.issues:
+
+def prepare_qc(state: ProjectAnalysisState) -> QCReport:
+    """Quality Control Agent: run technical QC (only when ``run_qc``) and persist the report."""
+    qc_report = run_technical_qc(state) if state.intent.run_qc else QCReport(passed=True)
+    state.qc_report = qc_report
+    if state.intent.run_qc:
+        out_dir = Path(state.output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        qc_path = out_dir / "qc_report.json"
+        qc_path.write_text(json.dumps(asdict(qc_report), indent=2), encoding="utf-8")
+        state.artifacts["qc_report_json"] = str(qc_path)
+    return qc_report
+
+
+def emit_qc_ops(
+    state: ProjectAnalysisState,
+    builder: TimelineCommandBuilder,
+    issues: list[QCIssue] | None = None,
+) -> int:
+    before = builder.operation_count
+    for issue in state.qc_report.issues if issues is None else issues:
         cat = "qc_error" if issue.severity == "error" else "qc_warning"
         marker = state.add_review_marker(
             timeline_sec=issue.timeline_sec,
@@ -1038,6 +1097,79 @@ def run_audio_graphics_qc_agent(
             confidence=0.95,
             rationale=issue.message,
         )
+    return builder.operation_count - before
+
+
+def new_agent_builder(
+    state: ProjectAnalysisState,
+    *,
+    agent_id: str,
+    agent_role: str,
+    transaction_label: str,
+    requires_approval: bool = False,
+) -> TimelineCommandBuilder:
+    """Create a Timeline Command API v1 builder bound to the state's current revision."""
+    return TimelineCommandBuilder(
+        project_id=state.project_id,
+        sequence_id=state.sequence_id,
+        expected_revision=state.revision,
+        agent_id=agent_id,
+        agent_role=agent_role,
+        transaction_label=transaction_label,
+        requires_approval=requires_approval,
+        dry_run=state.dry_run,
+        fps_num=state.fps_num,
+        fps_den=state.fps_den,
+    )
+
+
+def run_audio_graphics_qc_agent(
+    state: ProjectAnalysisState,
+    token: CancellationToken,
+    report_progress: Callable[[float, str], None],
+) -> dict[str, Any] | None:
+    """Generate audio restoration chain, captions, lower-thirds, and run technical QC strictly per intent."""
+    token.check("audio_graphics_qc start")
+
+    needs_stage = any(
+        (
+            state.intent.restore_audio,
+            state.intent.add_captions,
+            state.intent.add_lower_thirds,
+            state.intent.run_qc,
+        )
+    )
+    if not needs_stage:
+        report_progress(1.0, "Skipping audio/graphics/QC (not requested by instruction scope)")
+        return None
+
+    Path(state.output_dir).mkdir(parents=True, exist_ok=True)
+
+    report_progress(0.15, "Configuring MLT/FFmpeg audio restoration chain")
+    prepare_audio_restoration(state)
+
+    report_progress(0.40, "Generating .srt and .ass captions")
+    prepare_captions(state)
+
+    token.check("generate lower thirds")
+    report_progress(0.60, "Generating Kdenlive lower-third graphics")
+    prepare_lower_thirds(state)
+
+    token.check("run technical qc")
+    report_progress(0.78, "Running technical QC checks")
+    qc_report = prepare_qc(state)
+
+    report_progress(0.90, "Building Timeline Command API v1 batch for audio, graphics & QC")
+    builder = new_agent_builder(
+        state,
+        agent_id="audio_graphics_qc_agent",
+        agent_role="audio_finishing_graphics_and_qc",
+        transaction_label="Apply Audio Restoration, Captions, Lower Thirds & QC",
+    )
+    emit_audio_ops(state, builder)
+    emit_caption_ops(state, builder)
+    emit_lower_third_ops(state, builder)
+    emit_qc_ops(state, builder)
 
     if builder.operation_count == 0:
         report_progress(0.98, "No audio/graphics/QC operations emitted for current scope")

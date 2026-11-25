@@ -9,6 +9,8 @@ It preserves Kdenlive's complete manual editing workflow, `.kdenlive` project co
 - **Autonomous Multi-Agent Production Pipeline** (`bangonpro/ai_engine/`, `bangonpro/show_profiles/`): FFprobe verification, SHA-256 source-media immutability, GCC-PHAT audio cross-correlation multicamera sync, pluggable WhisperX/faster-whisper + deterministic VAD/multi-mic diarisation, rough-cut & speaker-aware camera switching, FFmpeg/MLT audio restoration, SRT/ASS captions & lower thirds, technical QC, OpenTimelineIO (`.otio`) & editable `.kdenlive` project emission, and 4 validated Show Profiles (`podcast_multicam`, `gameshow_multicam`, `sports_discussion`, `daily_news`).
 - **Professional UI & Apple Silicon macOS Toolkit** (`src/bangonpro/ui/`, `bangonpro/macos/`): collapsible AI Assistant Dock (proposed timeline diff tree, Accept/Reject/Compare/Refine/Undo, live Agent Activity Log), Premiere-style workspace layout, VideoToolbox/ProRes profiles with CPU fallback, automatic proxy generator, low-storage LRU cache manager, consent-gated TLS remote GPU protocol, and `melt`/`ffmpeg` benchmark runner.
 
+- **V1.2 AI Production Department** (`bangonpro/ai_engine/department/`, `src/bangonpro/ui/AgentControlCentre.*`): 14 specialist production agents (Executive, Learning, Media Ingest, Synchronisation, Editorial Intelligence, Multicamera Director, Rough Cut, Audio Engineer, Colourist, Captions, Graphics, VFX, Quality Control, Distribution) sharing one project state and analysis cache; manual / assisted / autonomous first cut / full production draft modes with isolated drafts, checkpoints, resume, rerun, accept/reject and approval-gated promotion; Agent Control Centre dock; versioned, human-approved series preferences; editing-time measurement. See [AI Production Department](docs/AI_PRODUCTION_DEPARTMENT.md) and the [V1.2 Release Report](docs/V1.2_RELEASE_REPORT.md).
+
 ## Quick Commands
 
 ```bash
@@ -30,7 +32,12 @@ python3 -m bangonpro.ai_engine.cli \
   --output-dir ./first_cut_out \
   --export
 
-# 4. Run the full automated QA, security, licence & integration suite
+# 4. Run a full production draft with the V1.2 production department
+python3 -m bangonpro.ai_engine.department run "Tight cut, match cameras, captions, social clips" \
+  --mode full_production_draft --profile podcast_multicam \
+  --inputs cam_wide=wide.mp4 cam_host=host.mp4 cam_guest=guest.mp4 --export
+
+# 5. Run the full automated QA, security, licence & integration suite
 python3 tests/bangonpro/run_all_checks.py
 ```
 

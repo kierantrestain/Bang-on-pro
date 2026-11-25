@@ -17,8 +17,11 @@
 #include <QList>
 #include <QMainWindow>
 #include <QMenu>
+#include <QPointer>
 #include <QPushButton>
+#include <QScreen>
 #include <QSettings>
+#include <QTimer>
 #include <QToolButton>
 #include <QUrl>
 #include <utility>
@@ -66,6 +69,7 @@ struct ResolvedDocks
     QDockWidget *premiereBrowser = nullptr;
     QDockWidget *audioMixer = nullptr;
     QDockWidget *aiAssistant = nullptr;
+    QDockWidget *agentControlCentre = nullptr;
     QDockWidget *rotoStudio = nullptr;
     QDockWidget *transcriptDock = nullptr;
     QDockWidget *subtitleDock = nullptr;
@@ -92,9 +96,9 @@ struct ResolvedDocks
     QList<QDockWidget *> allKnownDocks() const
     {
         QList<QDockWidget *> all;
-        const QList<QDockWidget *> candidates = {clipMonitor, projectMonitor, projectBin, effectList,  effectStack, compositionList, premiereBrowser,
-                                                 audioMixer,  aiAssistant,    rotoStudio, transcriptDock, subtitleDock, colorScopes,     vectorscope,
-                                                 waveform,    rgbParade,      histogram,  renderDock,  undoHistory};
+        const QList<QDockWidget *> candidates = {clipMonitor, projectMonitor, projectBin, effectList,     effectStack,  compositionList,   premiereBrowser,
+                                                 audioMixer,  aiAssistant,    rotoStudio, transcriptDock, subtitleDock, colorScopes,       vectorscope,
+                                                 waveform,    rgbParade,      histogram,  renderDock,     undoHistory,  agentControlCentre};
         for (QDockWidget *d : candidates) {
             if (d != nullptr && !all.contains(d)) {
                 all.append(d);
@@ -116,6 +120,7 @@ ResolvedDocks resolveAllDocks(QMainWindow *mainWindow, const WorkspaceDocks &exp
     d.premiereBrowser = resolveDock(mainWindow, explicitDocks.premiereBrowser, kPremiereBrowserDockName);
     d.audioMixer = resolveDock(mainWindow, explicitDocks.audioMixer, kAudioMixerDockName);
     d.aiAssistant = resolveDock(mainWindow, explicitDocks.aiAssistant, kAiAssistantDockName);
+    d.agentControlCentre = resolveDock(mainWindow, explicitDocks.agentControlCentre, kAgentControlCentreDockName);
     d.rotoStudio = resolveDock(mainWindow, explicitDocks.rotoStudio, kRotoStudioDockName);
     d.transcriptDock = resolveDockWithFallback(mainWindow, explicitDocks.transcriptDock, kTranscriptDockName, "textedit");
     d.subtitleDock = resolveDockWithFallback(mainWindow, explicitDocks.subtitleDock, kSubtitleDockName, "bangonpro_subtitles");
@@ -183,45 +188,114 @@ struct StudioColumnSpec {
 
 void dockTopStudioColumns(QMainWindow *mainWindow, const QList<StudioColumnSpec> &columns, QList<QDockWidget *> &visibleDocks, int &arrangedCount)
 {
+    // V1.2 fix: QMainWindow::splitDockWidget() adds the second dock as a *tab* when the first dock is
+    // already part of a tab group. The previous single-pass algorithm tabified each column before
+    // splitting the next one, so every column collapsed into one tab group. We now (0) detach every
+    // column dock from stale tab groups, (1) place & split all column anchors while untabbed, then
+    // (2) tabify the remaining docks onto their column anchor.
     QList<QDockWidget *> colAnchors;
     QList<int> colWidths;
-    QDockWidget *prevAnchor = nullptr;
+    QList<QList<QDockWidget *>> colMembers;
 
     for (const StudioColumnSpec &col : columns) {
-        QDockWidget *anchor = nullptr;
+        QList<QDockWidget *> members;
         for (QDockWidget *dock : col.docks) {
-            if (dock == nullptr) {
-                continue;
+            if (dock != nullptr && !members.contains(dock)) {
+                members.append(dock);
             }
+        }
+        if (members.isEmpty()) {
+            continue;
+        }
+        for (QDockWidget *dock : members) {
+            mainWindow->removeDockWidget(dock);
             dock->setAllowedAreas(Qt::AllDockWidgetAreas);
-            mainWindow->addDockWidget(Qt::TopDockWidgetArea, dock);
             dock->setFloating(false);
-            dock->show();
-            if (anchor == nullptr) {
-                anchor = dock;
-                if (prevAnchor != nullptr && prevAnchor != anchor) {
-                    mainWindow->splitDockWidget(prevAnchor, anchor, Qt::Horizontal);
-                }
-            } else if (dock != anchor) {
+        }
+        colMembers.append(members);
+        colWidths.append(col.width);
+    }
+
+    // Screen-aware: never let side-by-side columns force the window wider than the available screen.
+    // Columns whose minimum width would overflow are tabbed into the previous column instead.
+    int available = mainWindow->width();
+    if (QScreen *screen = mainWindow->screen()) {
+        available = qMin(qMax(available, 800), screen->availableGeometry().width());
+    }
+    int used = 0;
+    for (int i = 0; i < colMembers.size(); ++i) {
+        int colMin = 0;
+        for (QDockWidget *dock : std::as_const(colMembers[i])) {
+            colMin = qMax(colMin, qMax(dock->minimumSizeHint().width(), dock->minimumWidth()));
+        }
+        if (i > 0 && used + colMin > available - 16) {
+            colMembers[i - 1].append(colMembers[i]);
+            colMembers.removeAt(i);
+            colWidths.removeAt(i);
+            --i;
+            continue;
+        }
+        used += colMin;
+    }
+
+    QDockWidget *prevAnchor = nullptr;
+    for (const QList<QDockWidget *> &members : std::as_const(colMembers)) {
+        QDockWidget *anchor = members.first();
+        mainWindow->addDockWidget(Qt::TopDockWidgetArea, anchor);
+        anchor->show();
+        if (prevAnchor != nullptr) {
+            mainWindow->splitDockWidget(prevAnchor, anchor, Qt::Horizontal);
+        }
+        colAnchors.append(anchor);
+        prevAnchor = anchor;
+    }
+
+    QList<QDockWidget *> preferred;
+    for (const StudioColumnSpec &col : columns) {
+        if (col.preferred != nullptr) {
+            preferred.append(col.preferred);
+        }
+    }
+    for (int colIdx = 0; colIdx < colMembers.size(); ++colIdx) {
+        const QList<QDockWidget *> &members = colMembers.at(colIdx);
+        QDockWidget *anchor = colAnchors.at(colIdx);
+        QDockWidget *raiseTarget = anchor;
+        for (QDockWidget *dock : members) {
+            if (dock != anchor) {
                 mainWindow->tabifyDockWidget(anchor, dock);
+                dock->show();
+            }
+            if (preferred.contains(dock) && raiseTarget == anchor && !preferred.contains(anchor)) {
+                raiseTarget = dock;
             }
             visibleDocks << dock;
             ++arrangedCount;
         }
-        if (anchor != nullptr) {
-            if (col.preferred != nullptr && col.docks.contains(col.preferred)) {
-                col.preferred->raise();
-            } else {
-                anchor->raise();
-            }
-            colAnchors.append(anchor);
-            colWidths.append(col.width);
-            prevAnchor = anchor;
-        }
+        raiseTarget->raise();
     }
 
     if (!colAnchors.isEmpty()) {
         mainWindow->resizeDocks(colAnchors, colWidths, Qt::Horizontal);
+        // Re-apply once the new dock layout has been processed (sizes requested before the layout settles are ignored).
+        QList<QPointer<QDockWidget>> guarded;
+        for (QDockWidget *a : std::as_const(colAnchors)) {
+            guarded.append(QPointer<QDockWidget>(a));
+        }
+        QPointer<QMainWindow> win(mainWindow);
+        QTimer::singleShot(0, mainWindow, [win, guarded, colWidths]() {
+            if (!win) {
+                return;
+            }
+            QList<QDockWidget *> docks;
+            QList<int> widths;
+            for (int i = 0; i < guarded.size(); ++i) {
+                if (guarded.at(i)) {
+                    docks.append(guarded.at(i).data());
+                    widths.append(colWidths.at(i));
+                }
+            }
+            win->resizeDocks(docks, widths, Qt::Horizontal);
+        });
     }
 }
 
@@ -699,7 +773,8 @@ bool applyWorkspace(QMainWindow *mainWindow, WorkspaceMode mode, const Workspace
             {
                 {{d.projectBin, d.premiereBrowser}, d.projectBin, 260},
                 {{d.projectMonitor, d.clipMonitor}, d.projectMonitor, 560},
-                {{d.aiAssistant, d.transcriptDock}, d.aiAssistant, 600},
+                // V1.2: the Agent Control Centre (production department) is raised; AI Assistant & Transcript tabbed beside it.
+                {{d.agentControlCentre, d.aiAssistant, d.transcriptDock}, d.agentControlCentre != nullptr ? d.agentControlCentre : d.aiAssistant, 600},
             },
             visibleDocks, arrangedCount);
         break;

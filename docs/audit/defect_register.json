@@ -1,15 +1,18 @@
 {
-  "schema_version": "1.1",
-  "generated_at_utc": "2026-11-24T20:43:26.763815+00:00",
+  "schema_version": "1.2",
+  "generated_at_utc": "2026-11-24T23:49:23.544774+00:00",
   "v10_base_commit": "1f7e2df8e3e797638e966ece5559a30e084c2041",
-  "head_commit": "bba0dfe0cb719a7d73e7ecde5d5c146a2bab4d3c",
+  "head_commit": "f68079e897132e403057011bb711581ac9981703",
   "summary": {
-    "total_defects_logged": 27,
+    "total_defects_logged": 38,
     "upstream_kdenlive_fixed": 10,
-    "bangonpro_fixed": 15,
+    "bangonpro_fixed": 25,
     "open_blocked_external_input": 1,
     "deferred_known_limitation": 1,
-    "remaining_non_blocking_upstream_cppcheck_items": 317
+    "remaining_non_blocking_upstream_cppcheck_items": 317,
+    "open": 1,
+    "v12_defects_logged": 11,
+    "v12_fixed": 10
   },
   "defects": [
     {
@@ -362,6 +365,149 @@
       "reproduction": "Inspect SIGNING_STATUS.txt and benchmark_report.md from macOS CI artifacts.",
       "remediation": "Build scripts fully support Developer ID + notarytool when secrets are supplied, clearly emit SIGNING_STATUS.txt (ad-hoc signed when secrets absent), and explicitly tag macOS CI benchmarks as virtualized apple_silicon_ci_vm rather than bare-metal.",
       "regression_test": "tests/bangonpro/test_macos_perf.py + macOS CI DMG verification."
+    },
+    {
+      "id": "BOP-V12-001",
+      "origin": "bangonpro",
+      "severity": "high",
+      "status": "fixed",
+      "subsystem": "bangonpro.ui",
+      "source_location": "src/bangonpro/ui/AiAssistantDock.cpp:populateDefaultProfiles",
+      "title": "AI Assistant default profiles sent non-existent profile ids 'podcast'/'gameshow'",
+      "root_cause": "Combo data used short ids while bangonpro/show_profiles uses podcast_multicam/gameshow_multicam; load_show_profile raised 'not found' for the two default selections.",
+      "reproduction": "python3 -c \"from bangonpro.show_profiles.loader import load_show_profile; load_show_profile('podcast')\"",
+      "remediation": "Use real profile ids; add interview_two_camera and social_short entries.",
+      "regression_test": "tests/bangonpro/test_v12_department.py::test_all_profiles_load_with_v12_sections; bangonpro_test_ai_assistant_dock"
+    },
+    {
+      "id": "BOP-V12-002",
+      "origin": "bangonpro",
+      "severity": "high",
+      "status": "fixed",
+      "subsystem": "bangonpro.ai_engine.project_builder",
+      "source_location": "bangonpro/ai_engine/project_builder.py:emit_kdenlive_xml",
+      "title": "Generated .kdenlive wrote SHA-256 as kdenlive:file_hash so Kdenlive flagged every clip as changed (Reload) on open",
+      "root_cause": "Kdenlive identifies clips with ProjectClip::calculateHash (MD5 of whole file <=2 MB, else first+last 1 MB) plus kdenlive:file_size.",
+      "reproduction": "Open a V1.1 generated project in the real Kdenlive build: the Missing/Changed items dialog lists every clip as Reload (found by real-app verification under Xvfb).",
+      "remediation": "kdenlive_file_hash() replicates Kdenlive's algorithm and writes kdenlive:file_size; SHA-256 kept as kdenlive:bangonpro_sha256.",
+      "regression_test": "tests/bangonpro/test_v12_department.py::test_draft_is_native_kdenlive_compatible + real-app screenshot docs/screenshots/v1.2/draft_project_open_in_bang_on_pro.png"
+    },
+    {
+      "id": "BOP-V12-003",
+      "origin": "bangonpro",
+      "severity": "high",
+      "status": "fixed",
+      "subsystem": "bangonpro.ai_engine.audio",
+      "source_location": "bangonpro/ai_engine/agents/audio_graphics_qc.py:build_audio_restoration_chain",
+      "title": "Audio restoration chain used filters Kdenlive excludes (avfilter.afftdn/acompressor/loudnorm); they were stripped when the project was opened",
+      "root_cause": "data/excluded_effects.txt lists the three avfilter services; Kdenlive's DocumentChecker removes unknown effects. melt renders were correct but the editable project silently lost the audio chain.",
+      "reproduction": "Open a generated project in Kdenlive: Missing items dialog offers Remove for the three effects.",
+      "remediation": "Kdenlive-supported, frame-accurate equivalents: avfilter.compand (compressor and noise-floor expander), dynamic_loudness (EBU R128 target), arnndn when an RNNoise model is configured; kdenlive_id written on track filters. FFmpeg strings preserved for external pipelines.",
+      "regression_test": "tests/bangonpro/test_v12_department.py::test_draft_is_native_kdenlive_compatible; tests/bangonpro/test_ai_production.py (updated assertions)"
+    },
+    {
+      "id": "BOP-V12-004",
+      "origin": "bangonpro",
+      "severity": "medium",
+      "status": "fixed",
+      "subsystem": "bangonpro.ai_engine.audio",
+      "source_location": "bangonpro/ai_engine/agents/audio_graphics_qc.py",
+      "title": "Buffering avfilters (loudnorm, afwtdn) fail in MLT realtime playback ('Unexpected return format')",
+      "root_cause": "MLT's avfilter wrapper requires 1:1 frame output; loudnorm/afwtdn buffer samples.",
+      "reproduction": "Play a draft containing avfilter.afwtdn in Kdenlive: notification 'Unexpected return format'.",
+      "remediation": "Use compand/dynamic_loudness (1:1).",
+      "regression_test": "test_draft_is_native_kdenlive_compatible asserts no afwtdn/loudnorm/afftdn"
+    },
+    {
+      "id": "BOP-V12-005",
+      "origin": "bangonpro",
+      "severity": "high",
+      "status": "fixed",
+      "subsystem": "bangonpro.ai_engine.model_manager",
+      "source_location": "bangonpro/ai_engine/model_manager.py:install_model",
+      "title": "Model Manager installed only model.bin for faster-whisper; CTranslate2 needs config.json/tokenizer.json/vocabulary.txt, so GUI-installed Whisper models could never load",
+      "root_cause": "Catalog entries had a single artifact; WhisperModel(local dir) fails without companion files and the agent silently fell back to VAD.",
+      "reproduction": "Install faster-whisper-tiny via ModelManager.install_model then load with faster_whisper.WhisperModel(dir, local_files_only=True).",
+      "remediation": "ModelCatalogEntry.companion_files, downloaded from the artifact's base URL (HTTPS) or copied from local siblings; manifest records runtime_loadable.",
+      "regression_test": "packaging/macos/verify_department_in_bundle.py (macOS CI gate: neural ASR required when the model installs)"
+    },
+    {
+      "id": "BOP-V12-006",
+      "origin": "bangonpro",
+      "severity": "medium",
+      "status": "fixed",
+      "subsystem": "bangonpro.ai_engine.model_manager",
+      "source_location": "bangonpro/ai_engine/model_manager.py (mobilesam-onnx)",
+      "title": "MobileSAM install lacked the mask decoder (sam_mask_decoder_single.onnx); neural segmentation could not run",
+      "root_cause": "Single-artifact catalog entry; mask_engine requires an encoder+decoder pair.",
+      "reproduction": "Install mobilesam-onnx then segment_frame_detailed(backend='auto') -> fallback 'ONNX weights not found'.",
+      "remediation": "Decoder added as companion file.",
+      "regression_test": "packaging/macos/verify_department_in_bundle.py"
+    },
+    {
+      "id": "BOP-V12-007",
+      "origin": "bangonpro",
+      "severity": "medium",
+      "status": "fixed",
+      "subsystem": "bangonpro.ui.workspace",
+      "source_location": "src/bangonpro/ui/BangOnProWorkspace.cpp:dockTopStudioColumns",
+      "title": "Column workspaces (AI First Cut, Effects, ...) collapsed every dock into a single tab group",
+      "root_cause": "QMainWindow::splitDockWidget() tabs the second dock when the first is already tabbed; columns were tabified before the next column was split.",
+      "reproduction": "Switch to the Effects or AI First Cut workspace in the real app (screenshots under Xvfb).",
+      "remediation": "Detach column docks, place/split all anchors first, then tabify; screen-aware column merge; deferred resizeDocks.",
+      "regression_test": "bangonpro_test_pro_workspace + real-app screenshots"
+    },
+    {
+      "id": "BOP-V12-008",
+      "origin": "bangonpro",
+      "severity": "medium",
+      "status": "fixed",
+      "subsystem": "bangonpro.ai_engine.distribution",
+      "source_location": "bangonpro/ai_engine/department/agents.py:run_distribution",
+      "title": "Single-pass loudness normalisation left rendered masters ~2 LU below target (-18.0 vs -16 LUFS on test content)",
+      "root_cause": "Realtime/single-pass normalisation on short, gated programme material.",
+      "reproduction": "Render the synthetic 4-camera job and measure with ffmpeg ebur128.",
+      "remediation": "Distribution Agent measures integrated loudness and applies a measured linear gain + true-peak limiter second pass; master now -16.0/-16.1 LUFS.",
+      "regression_test": "test_full_production_draft_end_to_end (loudness_ok)"
+    },
+    {
+      "id": "BOP-V12-009",
+      "origin": "bangonpro",
+      "severity": "high",
+      "status": "fixed",
+      "subsystem": "bangonpro.ai_engine.department",
+      "source_location": "bangonpro/ai_engine/department/jobs.py",
+      "title": "Installed Whisper models were ignored unless enable_whisper/asr_model_id was passed explicitly",
+      "root_cause": "transcribe_diarise only enables neural ASR on request; no caller set it.",
+      "reproduction": "Install a model, run the pipeline without --asr flags: transcript_quality=vad_speech_segments_only.",
+      "remediation": "Department auto-selects an installed, runnable model (select_local_asr_model); --asr-model to choose.",
+      "regression_test": "verify_department_in_bundle.py"
+    },
+    {
+      "id": "BOP-V12-010",
+      "origin": "bangonpro",
+      "severity": "low",
+      "status": "open",
+      "subsystem": "bangonpro.ui.workspace",
+      "source_location": "src/bangonpro/ui/BangOnProWorkspace.cpp (AI First Cut)",
+      "title": "AI First Cut workspace can widen the main window beyond a 1920 px screen (pre-existing in V1.1)",
+      "root_cause": "Combined minimum widths of the bin/monitor/dock columns; not fully isolated (likely monitor toolbars).",
+      "reproduction": "Xvfb 1920x1080: switch to AI First Cut; window geometry 2541 px.",
+      "remediation": "Mitigated (scroll-area Control Centre, screen-aware column merge); residual width source to be isolated on physical displays.",
+      "regression_test": "n/a (cosmetic, tracked)"
+    },
+    {
+      "id": "BOP-V12-011",
+      "origin": "bangonpro",
+      "severity": "medium",
+      "status": "fixed",
+      "subsystem": "bangonpro.ai_engine.captions",
+      "source_location": "bangonpro/ai_engine/agents/audio_graphics_qc.py:_build_edited_captions",
+      "title": "Captions duplicated the full sentence once per kept interval when the rough cut removed a pause inside a sentence",
+      "root_cause": "Each overlapping kept interval emitted a cue with the whole segment text.",
+      "reproduction": "Found in the macOS CI packaged-app run with genuine faster-whisper ASR: consecutive cues repeated 'Welcome back to the show...'.",
+      "remediation": "_split_segment_text_by_intervals assigns each word (word timestamps, else proportional split) to exactly one interval.",
+      "regression_test": "tests/bangonpro/test_v12_department.py::test_captions_not_duplicated_across_removed_pauses"
     }
   ],
   "outstanding_and_excluded": [
@@ -379,6 +525,22 @@
       "id": "UP-DEFERRED",
       "category": "upstream_non_blocking_static_noise",
       "description": "317 informational/style/performance cppcheck findings in untouched upstream Kdenlive files (e.g. passedByValue, postfixOperator, virtualCallInConstructor) are intentionally deferred to preserve upstream Kdenlive 24.08 stability."
+    },
+    {
+      "id": "EXT-003",
+      "category": "human_measurement_required",
+      "description": "The 60-85 % human editing-time reduction requires paired, timed manual-baseline and agent-assisted sessions by real editors on representative footage. The measurement instrument ships (department measure start/activity/finish/report); no human sessions were available, so the target is NOT claimed."
+    },
+    {
+      "id": "EXT-004",
+      "category": "network_policy",
+      "description": "The development container's network policy blocks huggingface.co, so Whisper/MobileSAM weights could not be downloaded locally; genuine neural inference is verified on the macOS CI runner inside the packaged runtime (verify_department_in_bundle.py)."
+    },
+    {
+      "id": "EXT-005",
+      "category": "legally_available_footage",
+      "description": "No licensed real multi-camera podcast/gameshow/sports/news recordings were supplied; acceptance tests use generated synthetic footage (TTS speech + generated video) and are labelled synthetic."
     }
-  ]
+  ],
+  "v11_base_commit": "4342306c2178a46c2ca9e2786f76f06100e90ea2"
 }

@@ -468,10 +468,13 @@ void AiAssistantDock::populateDefaultProfiles()
 {
     m_profileCombo->blockSignals(true);
     m_profileCombo->clear();
-    m_profileCombo->addItem(tr("Podcast Multicam"), QStringLiteral("podcast"));
-    m_profileCombo->addItem(tr("Gameshow Multicam"), QStringLiteral("gameshow"));
+    // Data values must be real bangonpro/show_profiles IDs (V1.2 fix: "podcast"/"gameshow" did not resolve).
+    m_profileCombo->addItem(tr("Podcast Multicam"), QStringLiteral("podcast_multicam"));
+    m_profileCombo->addItem(tr("Gameshow Multicam"), QStringLiteral("gameshow_multicam"));
     m_profileCombo->addItem(tr("Sports Discussion"), QStringLiteral("sports_discussion"));
     m_profileCombo->addItem(tr("Daily News"), QStringLiteral("daily_news"));
+    m_profileCombo->addItem(tr("Interview (2-Camera)"), QStringLiteral("interview_two_camera"));
+    m_profileCombo->addItem(tr("Social Short (9:16)"), QStringLiteral("social_short"));
     m_profileCombo->addItem(tr("Custom JSON Profile…"), QStringLiteral("custom"));
     m_profileCombo->setCurrentIndex(0);
     m_profileCombo->blockSignals(false);

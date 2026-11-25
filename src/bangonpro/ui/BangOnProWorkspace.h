@@ -38,6 +38,7 @@ inline constexpr const char *kAudioMixerDockName = "mixer";
 inline constexpr const char *kUndoHistoryDockName = "undo_history";
 inline constexpr const char *kPremiereBrowserDockName = "bangonpro_premiere_presets";
 inline constexpr const char *kAiAssistantDockName = "bangonpro_ai_assistant";
+inline constexpr const char *kAgentControlCentreDockName = "bangonpro_agent_control_centre_dock";
 inline constexpr const char *kRotoStudioDockName = "bangonpro_roto_studio";
 inline constexpr const char *kTranscriptDockName = "bangonpro_transcript_editor";
 inline constexpr const char *kSubtitleDockName = "Subtitles";
@@ -92,6 +93,7 @@ struct WorkspaceDocks
     QDockWidget *premiereBrowser = nullptr;
     QDockWidget *audioMixer = nullptr;
     QDockWidget *aiAssistant = nullptr;
+    QDockWidget *agentControlCentre = nullptr;
     QDockWidget *rotoStudio = nullptr;
     QDockWidget *transcriptDock = nullptr;
     QDockWidget *subtitleDock = nullptr;

@@ -92,6 +92,8 @@ void ShowProfileEditorDialog::buildUi()
     m_formatTypeCombo->addItem(tr("Gameshow"), QStringLiteral("gameshow"));
     m_formatTypeCombo->addItem(tr("Sports Discussion"), QStringLiteral("sports_discussion"));
     m_formatTypeCombo->addItem(tr("Daily News"), QStringLiteral("daily_news"));
+    m_formatTypeCombo->addItem(tr("Interview"), QStringLiteral("interview"));
+    m_formatTypeCombo->addItem(tr("Social"), QStringLiteral("social"));
     m_formatTypeCombo->addItem(tr("Custom"), QStringLiteral("custom"));
 
     m_descriptionEdit = new QPlainTextEdit(identityGroup);

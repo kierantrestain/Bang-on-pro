@@ -53,7 +53,7 @@ public:
     /** @brief Path to loaded custom Show Profile v1 JSON file, if any. */
     QString customProfilePath() const;
 
-    /** @brief Programmatically select a show profile by id (e.g. "podcast", "gameshow"). */
+    /** @brief Programmatically select a show profile by id (e.g. "podcast_multicam", "gameshow_multicam"). */
     bool setSelectedProfileId(const QString &profileId);
 
     /** @brief Load and validate a Show Profile v1 JSON file from disk. */

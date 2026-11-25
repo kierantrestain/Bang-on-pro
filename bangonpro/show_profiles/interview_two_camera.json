@@ -1,0 +1,184 @@
+{
+  "schema_version": "1.0",
+  "profile_id": "interview_two_camera",
+  "display_name": "Interview 2-Camera",
+  "description": "Two-camera sit-down interview (interviewer + subject) with optional independent lavalier recorder, slower pacing and -16 LUFS delivery.",
+  "format_type": "interview",
+  "video_spec": {
+    "width": 1920,
+    "height": 1080,
+    "fps_num": 25,
+    "fps_den": 1,
+    "color_space": "bt709"
+  },
+  "cameras": [
+    {
+      "camera_id": "cam_wide",
+      "role": "wide",
+      "speaker_label": null,
+      "priority": 1
+    },
+    {
+      "camera_id": "cam_subject",
+      "role": "guest",
+      "speaker_label": "Subject",
+      "priority": 2
+    },
+    {
+      "camera_id": "cam_interviewer",
+      "role": "host",
+      "speaker_label": "Interviewer",
+      "priority": 3
+    }
+  ],
+  "camera_roles": {
+    "cam_wide": "wide",
+    "cam_subject": "guest",
+    "cam_interviewer": "host"
+  },
+  "speaker_camera_map": {
+    "Interviewer": "cam_interviewer",
+    "Subject": "cam_subject"
+  },
+  "camera_preferences": {
+    "prefer_wide_on_overlap": true,
+    "default_opening_role": "wide",
+    "avoid_jump_cuts": true
+  },
+  "wide_shot_interval_sec": 30.0,
+  "reaction_shot_frequency": 0.2,
+  "min_shot_duration_sec": 3.0,
+  "max_shot_duration_sec": 20.0,
+  "silence_threshold_db": -36.0,
+  "loudness_target_lufs": -16.0,
+  "intro_outro_rules": {
+    "open_on_wide": true,
+    "opening_wide_sec": 2.0,
+    "close_on_wide": true,
+    "closing_wide_sec": 2.0,
+    "intro_asset": null,
+    "outro_asset": null,
+    "fade_in_sec": 0.0,
+    "fade_out_sec": 0.5
+  },
+  "editing_rules": {
+    "min_shot_sec": 3.0,
+    "max_shot_sec": 20.0,
+    "min_shot_duration_sec": 3.0,
+    "max_shot_duration_sec": 20.0,
+    "wide_shot_interval_sec": 30.0,
+    "reaction_shot_frequency": 0.2,
+    "reaction_cut_interval_sec": 6.0,
+    "silence_threshold_db": -36.0,
+    "min_silence_sec": 0.8,
+    "interruption_gap_sec": 10.0,
+    "excise_interruption_gaps": true,
+    "overlap_cut_to_wide": true,
+    "keep_padding_sec": 0.2,
+    "trim_setup_delay": true,
+    "review_confidence_threshold": 0.72
+  },
+  "audio_rules": {
+    "target_lufs": -16.0,
+    "loudness_target_lufs": -16.0,
+    "true_peak_dbtp": -1.5,
+    "highpass_hz": 80.0,
+    "enable_denoise": true,
+    "enable_compressor": true,
+    "enable_mic_level_matching": true,
+    "max_mic_trim_db": 24.0,
+    "music_duck_db": -18.0
+  },
+  "graphics_rules": {
+    "enable_captions": true,
+    "enable_lower_thirds": true,
+    "lower_third_duration_sec": 4.5,
+    "brand_accent_hex": "#FF5A1F",
+    "enable_title_card": true,
+    "title_card_duration_sec": 3.0
+  },
+  "graphics_templates": {
+    "lower_third_template": "podcast_clean_bar",
+    "lower_third_position": "bottom_left",
+    "title_card_template": "podcast_episode_opener",
+    "bug_position": "top_right",
+    "font_family": "DejaVu Sans",
+    "accent_hex": "#FF5A1F"
+  },
+  "caption_style": {
+    "font_family": "DejaVu Sans",
+    "font_size_px": 48,
+    "primary_color_hex": "#FFFFFF",
+    "highlight_color_hex": "#FF5A1F",
+    "outline_color_hex": "#121212",
+    "outline_width": 3.0,
+    "alignment": "bottom_center",
+    "max_chars_per_line": 42,
+    "uppercase": false,
+    "burn_in": false,
+    "max_chars_per_sec": 20.0
+  },
+  "delivery_spec": {
+    "container": "mp4",
+    "video_codec": "libx264",
+    "audio_codec": "aac",
+    "width": 1920,
+    "height": 1080,
+    "fps_num": 25,
+    "fps_den": 1,
+    "color_space": "bt709",
+    "audio_sample_rate": 48000,
+    "audio_channels": 2,
+    "target_lufs": -16.0,
+    "true_peak_dbtp": -1.5,
+    "video_bitrate": "12M",
+    "audio_bitrate": "192k"
+  },
+  "export_presets": [
+    {
+      "name": "youtube_1080p_master",
+      "container": "mp4",
+      "video_codec": "libx264",
+      "audio_codec": "aac",
+      "video_bitrate": "12M",
+      "audio_bitrate": "192k"
+    },
+    {
+      "name": "podcast_review_proxy",
+      "container": "mp4",
+      "video_codec": "libx264",
+      "audio_codec": "aac",
+      "video_bitrate": "4M",
+      "audio_bitrate": "128k"
+    }
+  ],
+  "agent_config": {
+    "disabled_agents": [],
+    "default_mode": "full_production_draft"
+  },
+  "colour_rules": {
+    "enabled": true,
+    "reference_camera": null,
+    "correct_exposure": true,
+    "target_luma": 0.45,
+    "max_channel_gain": 1.33,
+    "lut_path": null,
+    "treatment": "natural_studio"
+  },
+  "vfx_rules": {
+    "tasks": [],
+    "blur_strength": 12
+  },
+  "distribution_rules": {
+    "social_versions": true,
+    "highlight_reel": true,
+    "highlight_count": 5,
+    "social_aspect": "9:16",
+    "loudness_tolerance_lu": 1.5
+  },
+  "series": {
+    "series_id": null,
+    "episode_number_format": "Ep {n:03d}",
+    "consistent_standards": true
+  }
+}

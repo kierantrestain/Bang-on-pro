@@ -10,6 +10,7 @@
 #include "timeline_api/KdenliveTimelineBridge.h"
 #include "timeline_api/TimelineCommandEngine.h"
 #include "timeline_api/TimelineCommandServer.h"
+#include "ui/AgentControlCentre.h"
 #include "ui/AiAssistantDock.h"
 #include "ui/BangOnProShortcutPresets.h"
 #include "ui/BangOnProTheme.h"
@@ -45,9 +46,11 @@
 #include <QMainWindow>
 #include <QMenu>
 #include <QMenuBar>
+#include <QMessageBox>
 #include <QProcess>
 #include <QProcessEnvironment>
 #include <QRegularExpression>
+#include <QScrollArea>
 #include <QStandardPaths>
 #include <QToolBar>
 #include <QUrl>
@@ -136,6 +139,7 @@ BangOnProIntegration::BangOnProIntegration(QMainWindow *mainWindow, EffectListWi
 {
     setupEngine();
     setupAiDock();
+    setupAgentControlCentre();
     setupTranscriptDock();
     setupPresetBrowser();
     setupRotoStudioDock();
@@ -203,6 +207,7 @@ WorkspaceDocks BangOnProIntegration::collectWorkspaceDocks() const
 {
     WorkspaceDocks docks;
     docks.aiAssistant = m_aiDock;
+    docks.agentControlCentre = m_agentDock;
     docks.premiereBrowser = m_presetDock;
     docks.transcriptDock = m_transcriptDock;
     docks.rotoStudio = m_rotoDock;
@@ -270,6 +275,207 @@ void BangOnProIntegration::setupAiDock()
     connect(m_aiWidget, &AiAssistantDock::modelManagerRequested, this, &BangOnProIntegration::openModelManager);
     connect(m_aiWidget, &AiAssistantDock::clearCacheRequested, this, &BangOnProIntegration::clearTemporaryCaches);
     connect(m_engine.get(), &TimelineCommandEngine::revisionChanged, m_aiWidget, &AiAssistantDock::setTimelineRevision);
+}
+
+QString BangOnProIntegration::departmentJobsRoot()
+{
+    const QString dir = dataDir() + QStringLiteral("/jobs");
+    QDir().mkpath(dir);
+    return dir;
+}
+
+void BangOnProIntegration::setupAgentControlCentre()
+{
+    m_agentCentre = new AgentControlCentre(m_mainWindow);
+    m_agentDock = new QDockWidget(QStringLiteral("Agent Control Centre"), m_mainWindow);
+    m_agentDock->setObjectName(QString::fromLatin1(kAgentControlCentreDockName));
+    // Scroll container: the dense control centre must never force the main window wider than the screen.
+    auto *agentScroll = new QScrollArea(m_agentDock);
+    agentScroll->setWidgetResizable(true);
+    agentScroll->setFrameShape(QFrame::NoFrame);
+    agentScroll->setWidget(m_agentCentre);
+    m_agentDock->setWidget(agentScroll);
+    m_mainWindow->addDockWidget(Qt::RightDockWidgetArea, m_agentDock);
+    if (m_aiDock) {
+        m_mainWindow->tabifyDockWidget(m_aiDock, m_agentDock);
+        m_aiDock->raise();
+    }
+    connect(m_agentCentre, &AgentControlCentre::startJobRequested, this, &BangOnProIntegration::startDepartmentJob);
+    connect(m_agentCentre, &AgentControlCentre::cancelJobRequested, this, [this](const QString &jobDir) {
+        // Cooperative cancellation: agents poll the CANCEL file; checkpoints make the job resumable.
+        QFile cancelFile(QDir(jobDir).filePath(QStringLiteral("CANCEL")));
+        if (cancelFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            cancelFile.write("Cancelled from Agent Control Centre");
+        }
+        m_aiWidget->appendActivityLog(QStringLiteral("department"), QStringLiteral("Cancellation requested for %1").arg(jobDir), QStringLiteral("WARN"));
+    });
+    connect(m_agentCentre, &AgentControlCentre::resumeJobRequested, this, [this](const QString &jobDir) {
+        runDepartmentCommand({QStringLiteral("resume"), jobDir}, jobDir, QStringLiteral("Resuming job from checkpoint"));
+    });
+    connect(m_agentCentre, &AgentControlCentre::rerunAgentRequested, this, [this](const QString &jobDir, const QString &agentId) {
+        runDepartmentCommand({QStringLiteral("rerun"), jobDir, agentId}, jobDir, QStringLiteral("Rerunning %1").arg(agentId));
+    });
+    connect(m_agentCentre, &AgentControlCentre::agentDecisionRequested, this, [this](const QString &jobDir, const QString &agentId, bool accept) {
+        runDepartmentCommand({QStringLiteral("decide"), jobDir, agentId, accept ? QStringLiteral("accept") : QStringLiteral("reject")}, jobDir,
+                             QStringLiteral("%1 %2").arg(accept ? QStringLiteral("Accepting") : QStringLiteral("Rejecting"), agentId));
+    });
+    connect(m_agentCentre, &AgentControlCentre::reviewDraftInTimelineRequested, this, &BangOnProIntegration::stageDepartmentDraft);
+    connect(m_agentCentre, &AgentControlCentre::promoteDraftRequested, this, &BangOnProIntegration::promoteDepartmentDraft);
+    connect(m_agentCentre, &AgentControlCentre::openDraftProjectRequested, this, [this](const QString &path) {
+        m_lastKdenliveProjectPath = path;
+        openLastGeneratedProject();
+    });
+    // Job recovery: reopen the most recent production job after a restart or crash.
+    {
+        const QFileInfoList jobs = QDir(departmentJobsRoot()).entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Time);
+        for (const QFileInfo &fi : jobs) {
+            if (QFileInfo::exists(QDir(fi.absoluteFilePath()).filePath(QStringLiteral("job.json")))) {
+                m_agentCentre->recoverJob(fi.absoluteFilePath(), false);
+                break;
+            }
+        }
+    }
+    connect(m_agentCentre, &AgentControlCentre::jobFinished, this, [this](const QString &jobDir, const QString &status) {
+        m_aiWidget->appendActivityLog(QStringLiteral("department"), QStringLiteral("Job %1 finished: %2").arg(QFileInfo(jobDir).fileName(), status));
+    });
+}
+
+void BangOnProIntegration::startDepartmentJob(const QStringList &runArguments)
+{
+    if (m_deptProcess) {
+        m_aiWidget->appendActivityLog(QStringLiteral("department"), QStringLiteral("A production job is already running"), QStringLiteral("WARN"));
+        return;
+    }
+    m_deptBaseRevision = m_engine->currentRevision();
+    m_deptBaseProjectId = m_engine->activeProjectId().isEmpty() ? QStringLiteral("active_project") : m_engine->activeProjectId();
+    m_deptBaseSequenceId = m_engine->activeSequenceId().isEmpty() ? QStringLiteral("seq_main") : m_engine->activeSequenceId();
+
+    QStringList args = runArguments;
+    if (!args.contains(QStringLiteral("--inputs"))) {
+        QStringList inputs = collectProjectBinMediaPaths();
+        if (inputs.isEmpty()) {
+            inputs = QFileDialog::getOpenFileNames(m_mainWindow, QStringLiteral("Select camera / microphone media for this production"), QString(),
+                                                   QStringLiteral("Media (*.mp4 *.mov *.mxf *.mkv *.m4v *.wav *.mp3);;All files (*)"));
+        }
+        if (inputs.isEmpty()) {
+            m_aiWidget->appendActivityLog(QStringLiteral("department"), QStringLiteral("Job not started: no source media selected"));
+            return;
+        }
+        args << QStringLiteral("--inputs") << inputs;
+    }
+    const QString jobId = QStringLiteral("job_") + QDateTime::currentDateTimeUtc().toString(QStringLiteral("yyyyMMdd-HHmmss"));
+    const QString jobDir = departmentJobsRoot() + QLatin1Char('/') + jobId;
+    args << QStringLiteral("--job-root") << departmentJobsRoot() << QStringLiteral("--job-id") << jobId << QStringLiteral("--project-id") << m_deptBaseProjectId
+         << QStringLiteral("--sequence-id") << m_deptBaseSequenceId;
+    runDepartmentCommand(args, jobDir, QStringLiteral("Production job started"));
+}
+
+void BangOnProIntegration::runDepartmentCommand(const QStringList &subcommandArgs, const QString &jobDir, const QString &description)
+{
+    if (m_deptProcess) {
+        m_aiWidget->appendActivityLog(QStringLiteral("department"), QStringLiteral("Wait for the running department task to finish"), QStringLiteral("WARN"));
+        return;
+    }
+    QStringList args{QStringLiteral("-m"), QStringLiteral("bangonpro.ai_engine.department")};
+    args << subcommandArgs;
+    QProcess *proc = startPython(args);
+    if (!proc) {
+        m_aiWidget->appendActivityLog(QStringLiteral("department"), QStringLiteral("Cannot start AI department: bangonpro package not found"),
+                                      QStringLiteral("ERROR"));
+        return;
+    }
+    m_deptProcess = proc;
+    m_agentCentre->setActiveJobDir(jobDir);
+    m_agentCentre->setBusy(true, description);
+    m_aiWidget->appendActivityLog(QStringLiteral("department"), QStringLiteral("%1 (%2)").arg(description, jobDir));
+    connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this, [this, proc, jobDir](int code, QProcess::ExitStatus status) {
+        m_deptProcess.clear();
+        proc->deleteLater();
+        m_agentCentre->setBusy(false);
+        m_agentCentre->refreshFromDisk();
+        if (status != QProcess::NormalExit || code != 0) {
+            m_aiWidget->appendActivityLog(
+                QStringLiteral("department"),
+                QStringLiteral("Department task failed (exit=%1): %2").arg(code).arg(QString::fromUtf8(proc->readAllStandardError().right(800))),
+                QStringLiteral("ERROR"));
+        }
+        Q_UNUSED(jobDir)
+    });
+}
+
+void BangOnProIntegration::stageDepartmentDraft(const QString &jobDir)
+{
+    QString err;
+    const QJsonObject job = readJsonFile(QDir(jobDir).filePath(QStringLiteral("job.json")), &err);
+    const QString cmdsPath = job.value(QStringLiteral("artifacts")).toObject().value(QStringLiteral("timeline_commands_json")).toString();
+    const QJsonObject cmds = readJsonFile(cmdsPath, &err);
+    if (cmds.isEmpty()) {
+        m_aiWidget->appendActivityLog(QStringLiteral("department"), err, QStringLiteral("ERROR"));
+        return;
+    }
+    // The isolated draft becomes ONE reviewable proposal at the revision captured when the job started;
+    // the engine's stale-proposal detection protects any manual edits made since.
+    TimelineCommandBatch merged;
+    merged.requestId = QStringLiteral("dept-") + QUuid::createUuid().toString(QUuid::WithoutBraces);
+    merged.projectId = m_deptBaseProjectId.isEmpty() ? cmds.value(QStringLiteral("project_id")).toString() : m_deptBaseProjectId;
+    merged.sequenceId = m_deptBaseSequenceId.isEmpty() ? cmds.value(QStringLiteral("sequence_id")).toString() : m_deptBaseSequenceId;
+    merged.agentId = QStringLiteral("executive");
+    merged.agentRole = QStringLiteral("ai_production_department");
+    merged.requiresApproval = true;
+    merged.expectedRevision = m_deptBaseRevision;
+    merged.transactionLabel = QStringLiteral("AI Production Draft (%1)").arg(job.value(QStringLiteral("job_id")).toString());
+    const QJsonObject batchAgents = cmds.value(QStringLiteral("batch_agents")).toObject();
+    for (const QJsonValue &bv : cmds.value(QStringLiteral("batches")).toArray()) {
+        TimelineCommandBatch b;
+        QString berr;
+        if (!TimelineCommandEngine::batchFromJson(bv.toObject(), &b, &berr)) {
+            m_aiWidget->appendActivityLog(QStringLiteral("department"), QStringLiteral("Skipped invalid batch: %1").arg(berr), QStringLiteral("WARN"));
+            continue;
+        }
+        const QString agent = batchAgents.value(b.requestId).toString(b.agentId);
+        for (TimelineOperation op : std::as_const(b.operations)) {
+            op.rationale = QStringLiteral("[%1] %2").arg(agent, op.rationale);
+            merged.operations.append(op);
+        }
+    }
+    const TimelineCommandResponse stageResp = m_engine->executeBatch(merged);
+    if (stageResp.status == CommandStatus::RevisionConflict) {
+        m_aiWidget->displayProposal(merged);
+        m_aiWidget->showStaleProposalWarning(stageResp.errorMessage, false);
+        return;
+    }
+    if (stageResp.status != CommandStatus::PendingApproval) {
+        m_aiWidget->appendActivityLog(QStringLiteral("department"), QStringLiteral("Failed to stage draft: %1").arg(stageResp.errorMessage),
+                                      QStringLiteral("ERROR"));
+        return;
+    }
+    m_activeProposalRequestId = merged.requestId;
+    m_aiWidget->displayProposal(merged);
+    if (m_aiDock) {
+        m_aiDock->raise();
+    }
+    m_aiWidget->appendActivityLog(
+        QStringLiteral("department"),
+        QStringLiteral("Draft staged for review: %1 operations (accept/reject per operation; undoable)").arg(merged.operations.size()));
+}
+
+void BangOnProIntegration::promoteDepartmentDraft(const QString &jobDir)
+{
+    const QString target =
+        QFileDialog::getSaveFileName(m_mainWindow, QStringLiteral("Promote draft to project file"), QString(), QStringLiteral("Kdenlive project (*.kdenlive)"));
+    if (target.isEmpty()) {
+        return;
+    }
+    QStringList args{QStringLiteral("promote"), jobDir, target};
+    if (QFileInfo::exists(target)) {
+        const auto answer = QMessageBox::question(m_mainWindow, QStringLiteral("Replace existing edit?"),
+                                                  QStringLiteral("%1 already exists. Replace it with the AI draft? A timestamped backup is kept.").arg(target));
+        if (answer != QMessageBox::Yes) {
+            return;
+        }
+        args << QStringLiteral("--approve");
+    }
+    runDepartmentCommand(args, jobDir, QStringLiteral("Promoting draft to %1").arg(target));
 }
 
 void BangOnProIntegration::setupTranscriptDock()
