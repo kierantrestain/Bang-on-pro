@@ -1,6 +1,12 @@
-# V1.2.2 work-in-progress snapshots (temporary)
+# V1.2.2 specialist work in progress (temporary, unreviewed)
 
-Uncommitted specialist work saved at the usage-limit interruption. Each `<domain>_snapshot.tar.gz`
-holds every changed or new file (paths relative to the repository root, base `fb6b7b2`), and
-`<domain>_tracked.patch` holds the diff of modified tracked files. Restore with
-`tar xzf wip/v1.2.2/<domain>_snapshot.tar.gz`. This folder is removed once the work is integrated.
+`specialists.bundle` holds the three specialist branches (base `fb6b7b2`), stopped at low usage:
+
+| Branch in bundle | Domain |
+|---|---|
+| `worktree-agent-a4876dec8ee16c178` | media processing (sync drift/segments, ingest, visual analysis, colour, ...) |
+| `worktree-agent-a7670755ad67ffde0` | editorial intelligence (pacing, analysis, brief, director, ...) |
+| `worktree-agent-a992b83155d350f18` | production readiness (queue, readiness, diagnostics, relink, measurement, learning, profiles, ops tests) |
+
+Restore: `git fetch wip/v1.2.2/specialists.bundle 'refs/heads/*:refs/remotes/wip/*'`, then review and merge each
+`wip/<branch>` into this branch. The last commit on each is an untested checkpoint. Delete this folder after integration.
