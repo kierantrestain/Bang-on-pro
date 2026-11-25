@@ -4,15 +4,15 @@
   "v10_base_commit": "1f7e2df8e3e797638e966ece5559a30e084c2041",
   "head_commit": "f68079e897132e403057011bb711581ac9981703",
   "summary": {
-    "total_defects_logged": 37,
+    "total_defects_logged": 38,
     "upstream_kdenlive_fixed": 10,
-    "bangonpro_fixed": 24,
+    "bangonpro_fixed": 25,
     "open_blocked_external_input": 1,
     "deferred_known_limitation": 1,
     "remaining_non_blocking_upstream_cppcheck_items": 317,
     "open": 1,
-    "v12_defects_logged": 10,
-    "v12_fixed": 9
+    "v12_defects_logged": 11,
+    "v12_fixed": 10
   },
   "defects": [
     {
@@ -495,6 +495,19 @@
       "reproduction": "Xvfb 1920x1080: switch to AI First Cut; window geometry 2541 px.",
       "remediation": "Mitigated (scroll-area Control Centre, screen-aware column merge); residual width source to be isolated on physical displays.",
       "regression_test": "n/a (cosmetic, tracked)"
+    },
+    {
+      "id": "BOP-V12-011",
+      "origin": "bangonpro",
+      "severity": "medium",
+      "status": "fixed",
+      "subsystem": "bangonpro.ai_engine.captions",
+      "source_location": "bangonpro/ai_engine/agents/audio_graphics_qc.py:_build_edited_captions",
+      "title": "Captions duplicated the full sentence once per kept interval when the rough cut removed a pause inside a sentence",
+      "root_cause": "Each overlapping kept interval emitted a cue with the whole segment text.",
+      "reproduction": "Found in the macOS CI packaged-app run with genuine faster-whisper ASR: consecutive cues repeated 'Welcome back to the show...'.",
+      "remediation": "_split_segment_text_by_intervals assigns each word (word timestamps, else proportional split) to exactly one interval.",
+      "regression_test": "tests/bangonpro/test_v12_department.py::test_captions_not_duplicated_across_removed_pauses"
     }
   ],
   "outstanding_and_excluded": [

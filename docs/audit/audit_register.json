@@ -79,7 +79,7 @@
   },
   "python_qa_runner": {
    "status": "PASS",
-   "passed": 94,
+   "passed": 95,
    "failed": 0,
    "skipped": 1,
    "environment": "linux container (local) + GitHub ubuntu-24.04 CI"
@@ -118,9 +118,15 @@
    ]
   },
   "real_neural_inference_verified_v12": {
-   "status": "verified_in_macos_ci_bundle_pending_release_run",
-   "script": "packaging/macos/verify_department_in_bundle.py",
-   "note": "Local container cannot reach huggingface.co (EXT-004); the macOS CI gate fails the build if models install but agents do not run neural inference."
+   "status": "verified",
+   "where": "packaged BangOnPro-1.2.0-arm64 bundled runtime, GitHub macos-15 arm64 runner (virtualised_apple_silicon, kern.hv_vmm_present=1)",
+   "ci_run": "https://github.com/kierantrestain/Bang-on-pro/actions/runs/45513598081",
+   "asr": "faster_whisper (faster-whisper-tiny via Model Manager) is_neural_inference=true",
+   "captions": "neural, emitted",
+   "segmentation": "mobile_sam_onnx is_neural_inference=true",
+   "media": "synthetic (macOS say TTS dialogue + generated video)",
+   "department_tests_in_bundle": "15/15 passed",
+   "processing_elapsed_sec": 89.6
   }
  },
  "explicit_exclusions": [

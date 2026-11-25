@@ -376,6 +376,45 @@ def _speaker_matches_filter(speaker: str, target_speakers: list[str]) -> bool:
     return any(t.strip().lower() in spk_low or spk_low in t.strip().lower() for t in target_speakers)
 
 
+def _split_segment_text_by_intervals(seg: Any, intervals: list[Any]) -> dict[int, str]:
+    """Distribute a segment's words over the kept intervals it overlaps (each word exactly once).
+
+    V1.2 fix: when the rough cut removed a pause inside a sentence, the full sentence was
+    emitted once per kept interval (duplicated captions). Word timestamps (neural ASR) assign
+    each word to the interval containing its midpoint; without them words are split in
+    proportion to each interval's overlap.
+    """
+    overlaps: dict[int, float] = {}
+    for idx, iv in enumerate(intervals):
+        ov = min(seg.end_sec, iv.end_sec) - max(seg.start_sec, iv.start_sec)
+        if ov >= 0.20:
+            overlaps[idx] = ov
+    if not overlaps:
+        return {}
+    if len(overlaps) == 1:
+        return {next(iter(overlaps)): seg.text}
+    buckets: dict[int, list[str]] = {idx: [] for idx in overlaps}
+    words = [w for w in (seg.words or []) if str(w.get("word", "")).strip()]
+    if words:
+        for w in words:
+            mid = (float(w.get("start_sec", seg.start_sec)) + float(w.get("end_sec", seg.end_sec))) / 2.0
+            best = min(
+                overlaps,
+                key=lambda i: 0.0 if intervals[i].start_sec <= mid <= intervals[i].end_sec else min(abs(mid - intervals[i].start_sec), abs(mid - intervals[i].end_sec)),
+            )
+            buckets[best].append(str(w["word"]).strip())
+    else:
+        tokens = seg.text.split()
+        total = sum(overlaps.values()) or 1.0
+        pos = 0
+        ordered = sorted(overlaps)
+        for n, idx in enumerate(ordered):
+            take = len(tokens) - pos if n == len(ordered) - 1 else round(len(tokens) * overlaps[idx] / total)
+            buckets[idx] = tokens[pos: pos + take]
+            pos += take
+    return {idx: " ".join(ws) for idx, ws in buckets.items() if ws}
+
+
 def _build_edited_captions(state: ProjectAnalysisState) -> list[CaptionCue]:
     """Map diarised transcript segments onto the edited rough-cut or source master timeline."""
     target_speakers = state.intent.target_speakers
@@ -388,7 +427,8 @@ def _build_edited_captions(state: ProjectAnalysisState) -> list[CaptionCue]:
             if not _speaker_matches_filter(seg.speaker_id, target_speakers):
                 continue
             cursor = 0.0
-            for iv in state.kept_master_intervals:
+            pieces = _split_segment_text_by_intervals(seg, state.kept_master_intervals)
+            for iv_idx, iv in enumerate(state.kept_master_intervals):
                 ov_start = max(seg.start_sec, iv.start_sec)
                 ov_end = min(seg.end_sec, iv.end_sec)
                 if ov_end - ov_start >= 0.20:
@@ -397,7 +437,8 @@ def _build_edited_captions(state: ProjectAnalysisState) -> list[CaptionCue]:
                     if time_range is not None:
                         ed_start = max(ed_start, time_range[0])
                         ed_end = min(ed_end, time_range[1])
-                    if ed_end - ed_start >= 0.15:
+                    piece = pieces.get(iv_idx, "")
+                    if ed_end - ed_start >= 0.15 and piece:
                         if cues and ed_start < cues[-1].end_sec:
                             ed_start = cues[-1].end_sec
                         if ed_end > ed_start + 0.10:
@@ -407,7 +448,7 @@ def _build_edited_captions(state: ProjectAnalysisState) -> list[CaptionCue]:
                                     start_sec=round(ed_start, 3),
                                     end_sec=round(ed_end, 3),
                                     speaker_id=seg.speaker_id,
-                                    text=seg.text,
+                                    text=piece,
                                     confidence=seg.confidence,
                                 )
                             )

@@ -328,3 +328,19 @@ def test_draft_is_native_kdenlive_compatible(full_job: ProductionJob) -> None:
         expected = hashlib.md5(data if len(data) <= 2_000_000 else data[:1_000_000] + data[-1_000_000:]).hexdigest()
         assert props["kdenlive:file_hash"] == expected
         assert int(props["kdenlive:file_size"]) == len(data)
+
+
+def test_captions_not_duplicated_across_removed_pauses() -> None:
+    """Regression (found with neural ASR in the packaged app): a sentence spanning a removed
+    pause was captioned once per kept interval, duplicating the full text."""
+    from bangonpro.ai_engine.agents.audio_graphics_qc import _split_segment_text_by_intervals
+    from bangonpro.ai_engine.state import TimeInterval, TranscriptSegment
+
+    words = [{"word": w, "start_sec": t, "end_sec": t + 0.3} for w, t in (("welcome", 0.0), ("back", 0.4), ("to", 2.6), ("the", 3.0), ("show", 3.4))]
+    seg = TranscriptSegment("seg_0001", 0.0, 3.8, "Host", "cam_host", "welcome back to the show", 0.9, False, -20.0, words=words)
+    ivs = [TimeInterval(0.0, 1.0), TimeInterval(2.5, 4.0)]
+    pieces = _split_segment_text_by_intervals(seg, ivs)
+    assert pieces == {0: "welcome back", 1: "to the show"}
+    seg_nowords = TranscriptSegment("seg_0002", 0.0, 3.8, "Host", "cam_host", "one two three four", 0.9, False, -20.0)
+    split = _split_segment_text_by_intervals(seg_nowords, ivs)
+    assert " ".join(split[k] for k in sorted(split)) == "one two three four"

@@ -664,7 +664,7 @@ def run_audio_engineer(ctx: AgentContext) -> AgentOutcome:
         summary=f"{len(st.audio_filters)} filters, {len(trims)} mic trims, target {agq._loudness_target(st)} LUFS",
         rationale="High-pass, denoise, compression, mic level matching and EBU R128 loudness normalisation",
         neural_inference=bool(st.rnnoise_model_path),
-        fallback_reason=None if st.rnnoise_model_path else "RNNoise model not configured; FFmpeg afftdn spectral denoise used",
+        fallback_reason=None if st.rnnoise_model_path else "RNNoise model not configured; non-neural noise-floor expander (avfilter.compand) used",
         metrics={"filters": [f.filter_id for f in st.audio_filters], "mic_trims_db": trims, "denoise": denoise},
     )
 
