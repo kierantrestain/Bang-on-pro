@@ -1030,9 +1030,14 @@ def department_qc_checks(st: ProjectAnalysisState) -> list[QCIssue]:
 
 def run_quality_control(ctx: AgentContext) -> AgentOutcome:
     st = ctx.state
+    from bangonpro.ai_engine.department.quality_loop import run_qc_checks
+
     base = agq.prepare_qc(st) if st.intent.run_qc else st.qc_report
     extra = department_qc_checks(st)
-    st.qc_report.issues = list(base.issues) + extra
+    hooked, hook_errors = run_qc_checks(st)
+    st.qc_report.issues = list(base.issues) + extra + hooked
+    if hook_errors:
+        st.metadata["qc_check_errors"] = hook_errors
     st.qc_report.passed = not any(i.severity == "error" for i in st.qc_report.issues)
     path = write_json_atomic(Path(st.output_dir) / "qc_report.json", dataclasses.asdict(st.qc_report))
     st.artifacts["qc_report_json"] = str(path)

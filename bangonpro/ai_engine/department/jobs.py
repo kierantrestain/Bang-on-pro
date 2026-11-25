@@ -49,7 +49,12 @@ from bangonpro.ai_engine.department.checkpoint import (
     serialize_state,
     write_json_atomic,
 )
-from bangonpro.ai_engine.department.learning import ProfilePreferenceStore
+from bangonpro.ai_engine.department import quality_loop as ql
+from bangonpro.ai_engine.department.learning import (
+    ProfilePreferenceStore,
+    deep_merge,
+    validate_overlay,
+)
 from bangonpro.ai_engine.department.registry import (
     AGENT_ORDER,
     AGENTS_BY_ID,
@@ -404,8 +409,13 @@ class ProductionJob:
 
         ctx = AgentContext(agent_id=agent_id, state=st, token=token, progress=_progress, cache=cache, options=opts, plan=plan)
         t0 = time.perf_counter()
+        ql.ensure_extensions_loaded()
+        pre_snapshot = serialize_state(st) if agent_id in ql.ASSESSORS else None
+        loop_log: dict[str, Any] | None = None
         try:
             outcome: AgentOutcome = HANDLERS[agent_id](ctx)
+            if pre_snapshot is not None:
+                outcome, loop_log = self._quality_loop(agent_id, ctx, outcome, pre_snapshot)
         except (PipelineCancelledError, InsufficientStorageError):
             rec["duration_sec"] = round(time.perf_counter() - t0, 3)
             raise
@@ -457,6 +467,8 @@ class ProductionJob:
                 "metrics": outcome.metrics,
                 "skipped_reason": outcome.skipped_reason,
                 "decision": "pending" if (committed and not auto) else ("auto_accepted" if committed else None),
+                "quality_loop": loop_log,
+                "quality_score": (loop_log or {}).get("final_score"),
             }
         )
         self.doc["budget"]["spent_usd"] = round(self.doc["budget"]["spent_usd"] + outcome.est_external_cost_usd, 4)
@@ -464,11 +476,76 @@ class ProductionJob:
         self._event(agent_id, "agent_completed", {"summary": outcome.summary, "batches": committed, "confidence": outcome.confidence, "rationale": outcome.rationale})
         self._save(force=True)
 
+    def _quality_loop(
+        self,
+        agent_id: str,
+        ctx: AgentContext,
+        outcome: AgentOutcome,
+        pre_snapshot: dict[str, Any],
+    ) -> tuple[AgentOutcome, dict[str, Any] | None]:
+        """Assess -> correct -> verify, bounded; keep a correction only if measurably better."""
+        st = ctx.state
+        first = ql.assess(agent_id, ctx, outcome)
+        if first is None:
+            return outcome, None
+        log: dict[str, Any] = {"metric": first.metric, "initial_score": first.score, "initial": first.to_dict(), "attempts": []}
+        best, best_outcome, current = first, outcome, first
+        tried: list[str] = []
+        attempts = 0
+        handler = HANDLERS[agent_id]
+        while current.correction and attempts < ql.MAX_ATTEMPTS_PER_AGENT and int(self.doc.get("quality_loop_attempts", 0)) < ql.MAX_ATTEMPTS_PER_JOB:
+            key = json.dumps(current.correction, sort_keys=True, default=str)
+            if key in tried:
+                break
+            tried.append(key)
+            ctx.token.check(f"quality loop {agent_id}")
+            attempts += 1
+            self.doc["quality_loop_attempts"] = int(self.doc.get("quality_loop_attempts", 0)) + 1
+            try:
+                overlay = validate_overlay(current.correction)
+            except ValueError as exc:
+                log["attempts"].append({"attempt": attempts, "correction": current.correction, "accepted": False, "verdict": f"rejected: invalid correction ({exc})"})
+                break
+            trial = deserialize_state(pre_snapshot)
+            trial.profile = deep_merge(trial.profile, overlay)
+            attempt_dir = self.dir / "quality_loop" / f"{agent_id}_{attempts}"
+            attempt_dir.mkdir(parents=True, exist_ok=True)
+            trial.output_dir = str(attempt_dir)
+            tctx = AgentContext(agent_id=agent_id, state=trial, token=ctx.token, progress=ctx.progress, cache=ctx.cache, options=ctx.options, plan=ctx.plan)
+            ctx.progress(0.95, f"Verifying correction {attempts}: {current.correction_reason or 'profile adjustment'}")
+            t_outcome = handler(tctx)
+            after = ql.assess(agent_id, tctx, t_outcome)
+            if after is None:
+                break
+            ok, verdict = ql.accept_correction(best, after)
+            log["attempts"].append({"attempt": attempts, "correction": overlay, "reason": current.correction_reason, "score": after.score, "defects": [asdict(d) for d in after.defects], "accepted": ok, "verdict": verdict})
+            self._event(agent_id, "quality_correction_" + ("accepted" if ok else "rejected"), {"attempt": attempts, "verdict": verdict, "correction": overlay})
+            if ok:
+                _relocate_attempt_outputs(attempt_dir, Path(st.output_dir), trial, t_outcome)
+                trial.output_dir = st.output_dir
+                st.__dict__.update(trial.__dict__)
+                best, best_outcome = after, t_outcome
+            current = after
+        log["final_score"] = best.score
+        log["final_defects"] = [asdict(d) for d in best.defects]
+        log["corrections_applied"] = sum(1 for a in log["attempts"] if a.get("accepted"))
+        review = list(best_outcome.review_items)
+        for d in best.defects:
+            if d.severity in ("warning", "error") or d.subjective:
+                item = ("Judgement call: " if d.subjective else "") + d.message
+                if item not in review:
+                    review.append(item)
+        if best_outcome.confidence < ql.LOW_CONFIDENCE_REVIEW and not best_outcome.skipped_reason:
+            review.append(f"Low confidence ({best_outcome.confidence:.2f}): review this agent's decisions")
+        best_outcome.review_items = review
+        return best_outcome, log
+
     def _finalise(self, st: ProjectAnalysisState, elapsed: float, failed: set[str]) -> None:
         self.doc["current_agent"] = None
         integrity = verify_source_integrity(st) if st.media_assets else {}
         self.doc["source_integrity"] = {"verified": all(integrity.values()) if integrity else None, "per_source": integrity}
         self.rebuild_draft(st)
+        self.doc["final_verification"] = ql.run_final_verifiers(st, self.doc)
         self.doc["processing_elapsed_sec"] = round(elapsed + float(self.doc.get("processing_elapsed_sec", 0.0)), 3)
         self.doc["status"] = "completed_with_errors" if failed else ("awaiting_review" if self.doc["mode"] == MODE_ASSISTED else "draft_ready")
         self.doc["progress"] = 1.0
@@ -666,7 +743,7 @@ class ProductionJob:
                 rejected_ops += ops
             elif ops:
                 pending_ops += ops
-            agents.append({k: r.get(k) for k in ("agent_id", "display_name", "active", "activation_reason", "status", "decision", "summary", "rationale", "confidence", "duration_sec", "operation_count", "neural_inference", "fallback_reason", "review_items", "cache_hits", "est_external_cost_usd", "error", "stale")})
+            agents.append({k: r.get(k) for k in ("agent_id", "display_name", "active", "activation_reason", "status", "decision", "summary", "rationale", "confidence", "duration_sec", "operation_count", "neural_inference", "fallback_reason", "review_items", "cache_hits", "est_external_cost_usd", "error", "stale", "quality_score", "quality_loop")})
         review = [f"[{r['agent_id']}] {item}" for r in agents for item in (r.get("review_items") or [])]
         return {
             "job_id": self.doc["job_id"],
@@ -685,7 +762,25 @@ class ProductionJob:
             "external_cost_usd": self.doc["budget"]["spent_usd"],
             "artifacts": self.doc.get("artifacts", {}),
             "approvals_required": ["Replace an existing edit (promote --approve)", "Publish deliverables"],
+            "final_verification": self.doc.get("final_verification", {}),
+            "quality_loop_attempts": int(self.doc.get("quality_loop_attempts", 0)),
         }
+
+
+def _relocate_attempt_outputs(attempt_dir: Path, draft_dir: Path, trial: ProjectAnalysisState, outcome: AgentOutcome) -> None:
+    """Move an accepted correction's artefacts into the draft and rewrite their paths."""
+    src_prefix, dst_prefix = str(attempt_dir), str(draft_dir)
+    for f in attempt_dir.rglob("*"):
+        if f.is_file():
+            dest = draft_dir / f.relative_to(attempt_dir)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(f, dest)
+
+    def _fix(v: Any) -> Any:
+        return v.replace(src_prefix, dst_prefix, 1) if isinstance(v, str) and v.startswith(src_prefix) else v
+
+    trial.artifacts = {k: _fix(v) for k, v in trial.artifacts.items()}
+    outcome.outputs = {k: _fix(v) for k, v in outcome.outputs.items()}
 
 
 def _count_types(batch: dict[str, Any]) -> dict[str, int]:
