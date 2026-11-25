@@ -17,6 +17,7 @@ SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import re
@@ -458,3 +459,239 @@ def suggest_from_project_diff(
                 }
             )
     return out
+
+
+# ---------------------------------------------------------------------------
+# V1.2.2: draft -> final comparison from a job, recurring preferences, bundles
+# ---------------------------------------------------------------------------
+BUNDLE_FORMAT = "bangonpro.preference_bundle"
+BUNDLE_VERSION = 1
+MAX_BUNDLE_BYTES = 256 * 1024
+_BUNDLE_KEYS = frozenset({"bundle_format", "bundle_version", "app_version", "created_at_utc", "profile_id", "series_id", "editor", "source_version", "items", "manifest"})
+_ITEM_KEYS = frozenset({"category", "reason", "overlay", "evidence"})
+_WEIGHT_OR_CODE_RE = re.compile(r"(\.(onnx|pt|pth|bin|safetensors|ckpt|gguf|mlmodel|py|sh|so|dylib)\b|__\w+__|\bimport\s|\blambda\b|\beval\(|\bexec\()", re.IGNORECASE)
+
+
+def shots_from_kdenlive(path: str | Path, path_to_camera: dict[str, str] | None = None) -> list[dict[str, Any]]:
+    """V1 (video) shots of a Kdenlive project as ``{camera_id, duration_sec}``."""
+    from bangonpro.ai_engine.planner import ingest_kdenlive_project
+
+    mapping = {str(Path(k).resolve()): v for k, v in (path_to_camera or {}).items()}
+    ctx = ingest_kdenlive_project(path)
+    out = []
+    for c in ctx.clips:
+        if not c.track_id.upper().startswith("V") or c.clip_kind == "kdenlivetitle":
+            continue
+        fp = str(Path(c.file_path).resolve()) if c.file_path else ""
+        out.append({"camera_id": mapping.get(fp) or Path(c.file_path or c.clip_name).stem, "duration_sec": c.duration_sec})
+    return out
+
+
+def diff_job_against_final(job_dir: str | Path, final_project: str | Path, *, prefs_root: str | Path | None = None, record: bool = True) -> dict[str, Any]:
+    """Compare a job's agent draft with the editor's finished ``.kdenlive`` and propose suggestions.
+
+    The observation is recorded against the job, so recurring preferences can be detected
+    across jobs; suggestions are proposed as *pending* and still need approval.
+    """
+    from bangonpro.ai_engine.department.jobs import ProductionJob
+
+    job = ProductionJob(job_dir)
+    if not job.doc:
+        raise PreferenceError(f"No production job at {job_dir}")
+    draft = (job.doc.get("artifacts") or {}).get("kdenlive_project")
+    if not draft or not Path(draft).is_file():
+        raise PreferenceError("The job has no draft timeline to compare")
+    st = job.state or job._latest_state()
+    path_to_cam = {v: k for k, v in st.input_camera_files.items()}
+    path_to_cam.update({a.file_path: cam for cam, a in st.media_assets.items()})
+    store = ProfilePreferenceStore(str(job.doc["profile_id"]), str(job.doc.get("series_id") or "default"), prefs_root or (job.doc.get("options") or {}).get("prefs_root"))
+    profile, _ = store.apply_to_profile(st.profile)
+    roles = dict(profile.get("camera_roles") or {})
+    ai_shots = shots_from_kdenlive(draft, path_to_cam)
+    final_shots = shots_from_kdenlive(final_project, path_to_cam)
+    suggestions = suggest_from_project_diff(profile, ai_shots, final_shots, roles)
+    observation = {
+        "kind": "draft_final_diff",
+        "job_id": job.doc["job_id"],
+        "agent_id": "multicam_director",
+        "ai_shot_count": len(ai_shots),
+        "final_shot_count": len(final_shots),
+        "parameters": {k: v for s in suggestions for k, v in _flatten(s["overlay"]).items() if not isinstance(v, (dict, list))},
+        "evidence": [s.get("evidence") for s in suggestions],
+    }
+    if record:
+        store.record_correction(observation)
+    return {"job_id": job.doc["job_id"], "ai_shots": len(ai_shots), "final_shots": len(final_shots), "suggestions": store.propose(suggestions) if suggestions else [], "observation": observation}
+
+
+def _parameter_observations(corrections: list[dict[str, Any]]) -> dict[str, list[tuple[str, float]]]:
+    """Flat parameter -> [(job_id, value)] from rerun overrides and draft/final comparisons."""
+    obs: dict[str, list[tuple[str, float]]] = {}
+    for c in corrections:
+        params: dict[str, Any] = {}
+        if c.get("kind") == "parameter_override":
+            params = _flatten(c.get("overrides") or {})
+        elif c.get("kind") == "draft_final_diff":
+            params = dict(c.get("parameters") or {})
+        for k, v in params.items():
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                obs.setdefault(k, []).append((str(c.get("job_id")), float(v)))
+    return obs
+
+
+def detect_recurring_preferences(profile: dict[str, Any], corrections: list[dict[str, Any]], *, min_jobs: int = 2) -> list[dict[str, Any]]:
+    """Suggest a parameter change when editors made the same correction in >= ``min_jobs`` jobs.
+
+    A parameter qualifies when it was overridden on a rerun, or changed by a draft/final
+    comparison, in at least ``min_jobs`` distinct jobs, and every observation moves it in the
+    same direction relative to the current profile. The suggestion carries evidence counts
+    (jobs, observations, values) and still needs approval.
+    """
+    flat_profile = _flatten(profile)
+    out: list[dict[str, Any]] = []
+    for key, items in sorted(_parameter_observations(corrections).items()):
+        jobs = sorted({j for j, _ in items})
+        if len(jobs) < min_jobs or key.split(".")[0] not in LEARNABLE_TOP_LEVEL_KEYS:
+            continue
+        cur = flat_profile.get(key)
+        values = sorted(v for _, v in items)
+        if isinstance(cur, (int, float)) and not isinstance(cur, bool):
+            ups, downs = sum(1 for v in values if v > cur), sum(1 for v in values if v < cur)
+            if (ups and downs) or not (ups or downs):
+                continue  # editors disagree, or the profile already has this value
+        median = values[len(values) // 2]
+        overlay: dict[str, Any] = {}
+        node = overlay
+        parts = key.split(".")
+        for p in parts[:-1]:
+            node = node.setdefault(p, {})
+        node[parts[-1]] = round(median, 3)
+        try:
+            overlay = validate_overlay(overlay)
+        except PreferenceError:
+            continue
+        out.append(
+            {
+                "category": "recurring_preference",
+                "reason": f"{key} was changed in {len(jobs)} jobs ({cur} -> {round(median, 3)})",
+                "evidence": {"jobs": len(jobs), "observations": len(items), "job_ids": jobs, "values": values, "current_value": cur},
+                "overlay": overlay,
+            }
+        )
+    rejected_jobs: dict[str, set[str]] = {}
+    for c in corrections:
+        if c.get("decision") == "rejected" and c.get("agent_id") in ("graphics", "colourist", "vfx"):
+            rejected_jobs.setdefault(str(c["agent_id"]), set()).add(str(c.get("job_id")))
+    for agent_id, jobs_set in sorted(rejected_jobs.items()):
+        if len(jobs_set) >= max(min_jobs, 2):
+            out.append(
+                {
+                    "category": "agent_activation",
+                    "reason": f"{agent_id} was rejected in {len(jobs_set)} jobs; consider leaving it out for this series",
+                    "evidence": {"jobs": len(jobs_set), "job_ids": sorted(jobs_set)},
+                    "overlay": {"distribution_rules": {"disabled_agents_hint": [agent_id]}},
+                }
+            )
+    return out
+
+
+def _canonical(payload: Any) -> bytes:
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+
+
+def _check_values(value: Any, path: str = "", depth: int = 0) -> None:
+    if depth > 5:
+        raise PreferenceError(f"Bundle value '{path}' is nested too deeply")
+    if isinstance(value, float) and (value != value or value in (float("inf"), float("-inf"))):
+        raise PreferenceError(f"Bundle value '{path}' is not a finite number")
+    if isinstance(value, str):
+        if len(value) > 200 or "\n" in value or _WEIGHT_OR_CODE_RE.search(value):
+            raise PreferenceError(f"Bundle value '{path}' is not a production setting")
+    elif isinstance(value, list):
+        if len(value) > 50:
+            raise PreferenceError(f"Bundle list '{path}' is too long")
+        for i, v in enumerate(value):
+            _check_values(v, f"{path}[{i}]", depth + 1)
+    elif isinstance(value, dict):
+        for k, v in value.items():
+            _check_values(v, f"{path}.{k}" if path else str(k), depth + 1)
+    elif not isinstance(value, (int, float, bool, type(None))):
+        raise PreferenceError(f"Bundle value '{path}' has an unsupported type")
+
+
+def export_preference_bundle(store: ProfilePreferenceStore, out_path: str | Path, *, editor: str = "", app_version: str = "") -> dict[str, Any]:
+    """Write the series' approved preferences as a versioned, checksummed JSON bundle."""
+    overlay = validate_overlay(store.active_overlay())
+    if not overlay:
+        raise PreferenceError("There are no approved preferences to export for this profile and series")
+    approved = [s for s in store.suggestions() if s.get("status") == "approved"]
+    items = []
+    for top, value in sorted(overlay.items()):
+        reasons = [s.get("reason", "") for s in approved if top in (s.get("overlay") or {})]
+        items.append({"category": "approved_preference", "reason": "; ".join(r for r in reasons if r) or f"Approved {top}", "overlay": {top: value}, "evidence": {"source_version": store.active_version(), "approved_suggestions": len(reasons)}})
+    payload: dict[str, Any] = {
+        "bundle_format": BUNDLE_FORMAT,
+        "bundle_version": BUNDLE_VERSION,
+        "app_version": app_version,
+        "created_at_utc": _utc(),
+        "profile_id": store.profile_id,
+        "series_id": store.series_id,
+        "editor": editor[:80],
+        "source_version": store.active_version(),
+        "items": items,
+    }
+    payload["manifest"] = {"algorithm": "sha256", "payload_sha256": hashlib.sha256(_canonical(payload)).hexdigest(), "item_sha256": [hashlib.sha256(_canonical(i)).hexdigest() for i in items]}
+    write_json_atomic(out_path, payload)
+    return payload
+
+
+def load_preference_bundle(path: str | Path) -> dict[str, Any]:
+    """Parse and fully validate a bundle; raises ``PreferenceError`` on any problem."""
+    p = Path(path).expanduser()
+    if p.stat().st_size > MAX_BUNDLE_BYTES:
+        raise PreferenceError("Preference bundle is too large")
+    try:
+        doc = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise PreferenceError(f"Preference bundle is not valid JSON: {exc}") from exc
+    if not isinstance(doc, dict) or doc.get("bundle_format") != BUNDLE_FORMAT:
+        raise PreferenceError("Not a Bang On Pro preference bundle")
+    if doc.get("bundle_version") != BUNDLE_VERSION:
+        raise PreferenceError(f"Unsupported preference bundle version {doc.get('bundle_version')}")
+    extra = set(doc) - _BUNDLE_KEYS
+    if extra:
+        raise PreferenceError(f"Unexpected bundle fields: {', '.join(sorted(extra))}")
+    manifest = doc.get("manifest") or {}
+    body = {k: v for k, v in doc.items() if k != "manifest"}
+    if manifest.get("algorithm") != "sha256" or manifest.get("payload_sha256") != hashlib.sha256(_canonical(body)).hexdigest():
+        raise PreferenceError("Preference bundle checksum does not match (the file was changed or damaged)")
+    items = doc.get("items")
+    if not isinstance(items, list) or not items or len(items) > 50:
+        raise PreferenceError("Preference bundle has no valid items")
+    cleaned = []
+    for i, item in enumerate(items):
+        if not isinstance(item, dict) or set(item) - _ITEM_KEYS or not isinstance(item.get("overlay"), dict):
+            raise PreferenceError(f"Bundle item {i} is malformed")
+        _check_values(item["overlay"], "overlay")
+        cleaned.append({**item, "overlay": validate_overlay(item["overlay"])})
+    doc["items"] = cleaned
+    return doc
+
+
+def import_preference_bundle(store: ProfilePreferenceStore, path: str | Path, *, allow_other_profile: bool = False) -> list[dict[str, Any]]:
+    """Import a bundle as *pending* suggestions: nothing is applied until an editor approves it."""
+    doc = load_preference_bundle(path)
+    if doc.get("profile_id") != store.profile_id and not allow_other_profile:
+        raise PreferenceError(f"Bundle is for profile '{doc.get('profile_id')}', not '{store.profile_id}'")
+    checksum = doc["manifest"]["payload_sha256"]
+    sugg = [
+        {
+            "category": "imported",
+            "reason": f"Imported from {doc.get('editor') or 'another editor'}: {item.get('reason', '')}".strip(),
+            "overlay": item["overlay"],
+            "evidence": {"bundle_sha256": checksum, "source_profile": doc.get("profile_id"), "source_series": doc.get("series_id"), "source_version": doc.get("source_version"), **(item.get("evidence") or {})},
+        }
+        for item in doc["items"]
+    ]
+    before = {s.get("suggestion_id") for s in store.suggestions()}
+    return [s for s in store.propose(sugg) if s.get("suggestion_id") not in before]

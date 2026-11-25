@@ -24,6 +24,22 @@ def get_profiles_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
+def default_custom_profiles_dir() -> Path:
+    """Where editors' custom profiles live (``$BANGONPRO_PROFILES_DIR`` overrides)."""
+    import os
+
+    env = os.environ.get("BANGONPRO_PROFILES_DIR")
+    if env:
+        return Path(env).expanduser().resolve()
+    return (Path.home() / ".local" / "share" / "bangonpro" / "profiles").resolve()
+
+
+def user_profile_dirs() -> list[Path]:
+    """Custom profile folders searched after the built-in profiles (only existing ones)."""
+    d = default_custom_profiles_dir()
+    return [d] if d.is_dir() else []
+
+
 def get_show_profile_schema_path() -> Path:
     """Return path to ``bangonpro/schemas/show_profile_v1.schema.json``."""
     return Path(__file__).resolve().parent.parent / "schemas" / "show_profile_v1.schema.json"

@@ -20,7 +20,10 @@ SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
 from __future__ import annotations
 
 import copy
+import html
 import json
+import os
+import re
 import shutil
 import threading
 import time
@@ -30,7 +33,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from bangonpro.ai_engine.agents.ingest_sync import verify_source_integrity
+from bangonpro.ai_engine.agents.ingest_sync import compute_file_sha256, verify_source_integrity
 from bangonpro.ai_engine.commands import validate_timeline_command_batch
 from bangonpro.ai_engine.department.agents import (
     HANDLERS,
@@ -50,6 +53,7 @@ from bangonpro.ai_engine.department.checkpoint import (
     write_json_atomic,
 )
 from bangonpro.ai_engine.department import quality_loop as ql
+from bangonpro.ai_engine.department.errors import explain
 from bangonpro.ai_engine.department.learning import (
     ProfilePreferenceStore,
     deep_merge,
@@ -75,7 +79,7 @@ from bangonpro.ai_engine.project_builder import (
     emit_otio_timeline,
 )
 from bangonpro.ai_engine.state import ProjectAnalysisState
-from bangonpro.show_profiles.loader import load_show_profile
+from bangonpro.show_profiles.loader import load_show_profile, user_profile_dirs
 
 JOB_SCHEMA_VERSION = "1.2"
 TERMINAL_AGENT_STATES = frozenset({"completed", "skipped", "failed", "blocked", "rolled_back"})
@@ -167,7 +171,7 @@ class ProductionJob:
             allow_default_empty=mode in AUTONOMOUS_MODES,
             provider_config=opts.provider_config,
         )
-        profile = load_show_profile(profile_ref or interp.intent.profile_hint or context.profile_id or "podcast_multicam")
+        profile = load_show_profile(profile_ref or interp.intent.profile_hint or context.profile_id or "podcast_multicam", custom_dirs=user_profile_dirs())
         cams: dict[str, str] = {}
         if inputs:
             cams = map_inputs_to_profile_cameras(inputs, profile)
@@ -293,23 +297,53 @@ class ProductionJob:
         self.doc.setdefault("checkpoints", []).append(str(path))
         return path
 
+    def _valid_checkpoints(self) -> list[tuple[int, Path]]:
+        """Checkpoints that agree with job.json, in agent order.
+
+        A checkpoint is trusted only when its agent is recorded as completed (or it is the
+        initial state). This guards against two V1.2.1 defects: a worker killed between writing
+        an agent's checkpoint and recording the agent as completed (the agent then ran twice on
+        top of its own output), and checkpoints of later agents left behind by a rollback or an
+        interrupted rerun (a later CLI call silently restored the rolled-back edits).
+        """
+        out: list[tuple[int, Path]] = []
+        agents = self.doc.get("agents", {})
+        for p in sorted(self.ckpt_dir.glob("*.json")):
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue  # torn write from an interrupted worker
+            aid, aidx = str(data.get("agent_id")), int(data.get("agent_index", -1))
+            if aid == "initial" or agents.get(aid, {}).get("status") == "completed":
+                out.append((aidx, p))
+        return out
+
     def _load_checkpoint_before(self, agent_id: str) -> ProjectAnalysisState:
         idx = AGENT_ORDER.index(agent_id)
-        candidates = sorted(self.ckpt_dir.glob("*.json"))
         best: Path | None = None
-        for p in candidates:
-            data = json.loads(p.read_text(encoding="utf-8"))
-            if int(data["agent_index"]) < idx:
+        for aidx, p in self._valid_checkpoints():
+            if aidx < idx:
                 best = p
         if best is None:
             raise FileNotFoundError(f"No checkpoint found before agent '{agent_id}'")
         return deserialize_state(json.loads(best.read_text(encoding="utf-8"))["state"])
 
     def _latest_state(self) -> ProjectAnalysisState:
-        files = sorted(self.ckpt_dir.glob("*.json"))
+        files = self._valid_checkpoints()
         if not files:
             raise FileNotFoundError("Job has no checkpoints")
-        return deserialize_state(json.loads(files[-1].read_text(encoding="utf-8"))["state"])
+        return deserialize_state(json.loads(files[-1][1].read_text(encoding="utf-8"))["state"])
+
+    def _discard_checkpoints_from(self, idx: int) -> None:
+        """Delete checkpoints of agents at or after ``idx``: they no longer describe the draft."""
+        for p in sorted(self.ckpt_dir.glob("*.json")):
+            try:
+                aidx = int(json.loads(p.read_text(encoding="utf-8")).get("agent_index", -1))
+            except (OSError, ValueError):
+                aidx = idx
+            if aidx >= idx:
+                p.unlink(missing_ok=True)
+        self.doc["checkpoints"] = [c for c in self.doc.get("checkpoints", []) if Path(c).exists()]
 
     @property
     def plan(self) -> dict[str, Any]:
@@ -340,8 +374,22 @@ class ProductionJob:
             self._save(force=True)
             return self.doc
 
+        from bangonpro.ai_engine.department.readiness import preflight_storage
+
+        ok, msg, free = preflight_storage(self.draft_dir, int(opts.min_free_bytes))
+        if not ok:
+            # Blocked before any processing: nothing is half-written, and Resume works once space is freed.
+            self.doc["status"] = "blocked_insufficient_storage"
+            self.doc["error"] = msg
+            self.doc["error_help"] = explain(InsufficientStorageError(msg))
+            self._event("executive", "blocked_insufficient_storage", {"error": msg, "free_bytes": free, "preflight": True})
+            self._save(force=True)
+            return self.doc
         self.doc["status"] = "running"
         self.doc["started_at_utc"] = self.doc.get("started_at_utc") or _utc()
+        self.doc["worker_pid"] = os.getpid()
+        self.doc.pop("error", None)
+        self.doc.pop("error_help", None)
         t_job = time.perf_counter()
         start_idx = AGENT_ORDER.index(start_agent) if start_agent else 0
         failed_or_blocked: set[str] = set()
@@ -363,6 +411,8 @@ class ProductionJob:
                     failed_or_blocked.add(agent_id)
                     continue
                 self._run_agent(idx, agent_id, st, token, cache, opts, plan, progress_callback, failed_or_blocked)
+                self._attach_help(agent_id)
+                _test_delay(token)
             self._finalise(st, time.perf_counter() - t_job, failed_or_blocked)
         except PipelineCancelledError as exc:
             cur = self.doc.get("current_agent")
@@ -370,14 +420,34 @@ class ProductionJob:
                 self.doc["agents"][cur]["status"] = "cancelled"
             self.doc["status"] = "cancelled"
             self.doc["cancel_reason"] = str(exc)
+            self._add_processing_time(time.perf_counter() - t_job)
             self._event(cur or "executive", "job_cancelled", {"reason": str(exc)})
             self._save(force=True)
         except InsufficientStorageError as exc:
             self.doc["status"] = "blocked_insufficient_storage"
             self.doc["error"] = str(exc)
+            self.doc["error_help"] = explain(exc)
+            self._add_processing_time(time.perf_counter() - t_job)
             self._event("media_ingest", "blocked_insufficient_storage", {"error": str(exc)})
             self._save(force=True)
         return self.doc
+
+    def _add_processing_time(self, elapsed: float) -> None:
+        """Machine time of a run that stopped early (cancelled / blocked); _finalise adds a full run's."""
+        self.doc["processing_elapsed_sec"] = round(float(elapsed) + float(self.doc.get("processing_elapsed_sec") or 0.0), 3)
+
+    def _attach_help(self, agent_id: str) -> None:
+        """Add a plain-language fix to a failed agent or a failed render (outside ``_run_agent``)."""
+        rec = self.doc["agents"][agent_id]
+        rec.pop("help", None)
+        if rec.get("status") == "failed" and rec.get("error"):
+            rec["help"] = explain(str(rec["error"]), context=agent_id)
+        failed_renders = [r for r in rec.get("review_items") or [] if str(r).startswith("Render failed")]
+        if rec.get("status") == "completed" and failed_renders:
+            rec["help"] = explain("render failed", context="export")
+            rec["review_items"] = [f"{r}. {rec['help']['fix']}" if r in failed_renders else r for r in rec["review_items"]]
+        if "help" in rec:
+            self._save(force=True)
 
     def _run_agent(
         self,
@@ -645,9 +715,15 @@ class ProductionJob:
                 validate_overlay,
             )
 
-            st.profile = deep_merge(st.profile, validate_overlay(profile_overrides))
+            cleaned = validate_overlay(profile_overrides)
+            st.profile = deep_merge(st.profile, cleaned)
             self._event(agent_id, "refinement_applied", {"profile_overrides": profile_overrides})
+            # Recorded per job so the Learning Agent can spot the same correction across jobs.
+            ProfilePreferenceStore(str(self.doc["profile_id"]), str(self.doc.get("series_id") or "default"), self.doc["options"].get("prefs_root")).record_correction(
+                {"kind": "parameter_override", "job_id": self.doc["job_id"], "agent_id": agent_id, "overrides": cleaned}
+            )
         idx = AGENT_ORDER.index(agent_id)
+        self._discard_checkpoints_from(idx)
         for a in AGENT_ORDER[idx:]:
             r = self.doc["agents"][a]
             if a == agent_id and not r["active"]:
@@ -672,6 +748,7 @@ class ProductionJob:
                 self.doc["batches"].pop(rid, None)
             if r["active"]:
                 r.update({"status": "rolled_back", "batches": [], "decision": None})
+        self._discard_checkpoints_from(idx + 1)
         self.state = st
         self._event(agent_id, "rolled_back_to", {})
         self.rebuild_draft(st)
@@ -714,7 +791,7 @@ class ProductionJob:
             raise FileNotFoundError("Draft has no timeline to promote")
         target = Path(target_path).expanduser().resolve()
         sources = {Path(p).resolve() for p in (self.state or self._latest_state()).input_camera_files.values()}
-        if target in sources:
+        if target in sources or (target.exists() and any(s.exists() and os.path.samefile(target, s) for s in sources)):
             raise PermissionError("Refusing to overwrite original source media")
         backup = None
         if target.exists():
@@ -729,6 +806,86 @@ class ProductionJob:
         self._event("executive", "draft_promoted", rec)
         self._save(force=True)
         return rec
+
+    def source_inventory(self) -> dict[str, dict[str, Any]]:
+        """Expected source media per camera: path, SHA-256 and size (from ingest)."""
+        st = self.state or self._latest_state()
+        out: dict[str, dict[str, Any]] = {}
+        for cam, path in st.input_camera_files.items():
+            out[cam] = {"path": str(path), "sha256": None, "size_bytes": None, "aliases": {str(path), str(Path(path).expanduser().absolute())}}
+        for row in (st.metadata.get("media_inventory") or {}).get("inputs", []):
+            if row.get("camera_id") in out and row.get("sha256"):
+                out[row["camera_id"]].update({"sha256": row["sha256"], "size_bytes": row.get("size_bytes")})
+                out[row["camera_id"]]["aliases"].add(str(row.get("path")))
+        for cam, asset in st.media_assets.items():
+            if cam in out and asset.sha256:
+                out[cam].update({"sha256": asset.sha256, "size_bytes": asset.file_size_bytes})
+                out[cam]["aliases"].add(str(asset.file_path))
+        return out
+
+    def relink(self, search_dirs: list[str | Path], *, project_files: list[str | Path] | None = None, dry_run: bool = False) -> dict[str, Any]:
+        """Find moved or renamed source media by SHA-256 and repoint the job (and saved projects).
+
+        Only files whose content hash matches the hash recorded at ingest are accepted, so a
+        different take with the same name is never linked. Source media are only read. The job's
+        checkpoints and plan are rewritten, the draft is rebuilt, and each ``project_files``
+        entry (an editor's saved ``.kdenlive``) is updated in place after a timestamped backup.
+        """
+        expected = self.source_inventory()
+        moved = {cam: e for cam, e in expected.items() if not Path(e["path"]).is_file() or (e["sha256"] and e["size_bytes"] and Path(e["path"]).stat().st_size != e["size_bytes"])}
+        unverifiable = sorted(cam for cam, e in moved.items() if not e["sha256"])
+        wanted = {cam: e for cam, e in moved.items() if e["sha256"]}
+        by_size: dict[int, list[str]] = {}
+        for cam, e in wanted.items():
+            by_size.setdefault(int(e["size_bytes"] or -1), []).append(cam)
+        found: dict[str, str] = {}
+        for root in search_dirs:
+            base = Path(root).expanduser()
+            if not base.is_dir():
+                continue
+            for dirpath, dirnames, filenames in os.walk(base):
+                dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+                for name in filenames:
+                    f = Path(dirpath) / name
+                    try:
+                        size = f.stat().st_size
+                    except OSError:
+                        continue
+                    for cam in by_size.get(size, []):
+                        if cam not in found and compute_file_sha256(f, use_cache=False) == wanted[cam]["sha256"]:
+                            found[cam] = str(f.resolve())
+        mapping = {alias: new for cam, new in found.items() for alias in wanted[cam]["aliases"] if alias and alias != new}
+        result: dict[str, Any] = {
+            "relinked": {cam: {"from": wanted[cam]["path"], "to": new} for cam, new in sorted(found.items())},
+            "still_missing": sorted(set(wanted) - set(found)),
+            "unverifiable": unverifiable,
+            "projects_updated": [],
+            "dry_run": dry_run,
+        }
+        if dry_run or not mapping:
+            return result
+        for _, ckpt in self._valid_checkpoints():
+            data = json.loads(ckpt.read_text(encoding="utf-8"))
+            write_json_atomic(ckpt, _replace_paths(data, mapping))
+        write_json_atomic(self.plan_path, _replace_paths(self.plan, mapping))
+        self.state = self._latest_state()
+        for project in project_files or []:
+            pf = Path(project).expanduser().resolve()
+            if not pf.is_file():
+                continue
+            text = pf.read_text(encoding="utf-8")
+            updated = _sub_paths(text, {html.escape(old, quote=False): html.escape(new, quote=False) for old, new in mapping.items()})
+            if updated != text:
+                backup = pf.with_name(f"{pf.name}.bak-{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}")
+                shutil.copy2(pf, backup)
+                pf.write_text(updated, encoding="utf-8")
+                result["projects_updated"].append({"project": str(pf), "backup": str(backup)})
+        self.doc.setdefault("relinks", []).append({"ts_utc": _utc(), **{k: result[k] for k in ("relinked", "still_missing", "projects_updated")}})
+        self._event("executive", "media_relinked", {"relinked": result["relinked"], "still_missing": result["still_missing"]})
+        self.rebuild_draft(self.state)
+        integrity = verify_source_integrity(self.state) if self.state.media_assets else {}
+        result["source_integrity"] = {"verified": all(integrity.values()) if integrity else None, "per_source": integrity}
+        return result
 
     # --------------------------------------------------------------- reporting
     def build_summary(self, st: ProjectAnalysisState) -> dict[str, Any]:
@@ -781,6 +938,37 @@ def _relocate_attempt_outputs(attempt_dir: Path, draft_dir: Path, trial: Project
 
     trial.artifacts = {k: _fix(v) for k, v in trial.artifacts.items()}
     outcome.outputs = {k: _fix(v) for k, v in outcome.outputs.items()}
+
+
+def _sub_paths(text: str, mapping: dict[str, str]) -> str:
+    """Single-pass replacement (longest path first) so a new path is never rewritten again."""
+    if not mapping:
+        return text
+    pattern = re.compile("|".join(re.escape(k) for k in sorted(mapping, key=len, reverse=True)))
+    return pattern.sub(lambda m: mapping[m.group(0)], text)
+
+
+def _replace_paths(value: Any, mapping: dict[str, str]) -> Any:
+    """Rewrite every occurrence of an old source path inside a JSON structure."""
+    if isinstance(value, str):
+        return _sub_paths(value, mapping) if any(k in value for k in mapping) else value
+    if isinstance(value, list):
+        return [_replace_paths(v, mapping) for v in value]
+    if isinstance(value, dict):
+        return {k: _replace_paths(v, mapping) for k, v in value.items()}
+    return value
+
+
+def _test_delay(token: CancellationToken) -> None:
+    """Test-only slow motion (``BANGONPRO_TEST_AGENT_DELAY_SEC``) used to interrupt a worker mid-job."""
+    try:
+        delay = float(os.environ.get("BANGONPRO_TEST_AGENT_DELAY_SEC") or 0.0)
+    except ValueError:
+        delay = 0.0
+    end = time.monotonic() + max(0.0, min(delay, 60.0))
+    while time.monotonic() < end:
+        token.check("test delay")
+        time.sleep(0.05)
 
 
 def _count_types(batch: dict[str, Any]) -> dict[str, int]:
