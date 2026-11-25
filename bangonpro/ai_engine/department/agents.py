@@ -395,9 +395,9 @@ def run_media_ingest(ctx: AgentContext) -> AgentOutcome:
         )
     if missing and len(missing) == len(cams):
         raise FileNotFoundError(f"All source media are missing: {', '.join(missing)}")
-    review = [f"Missing media: {', '.join(missing)} (job continues with remaining sources)"] if missing else []
+    review = [f"Missing media: {', '.join(missing)}. The job continued with the remaining sources"] if missing else []
     if mixed:
-        review.append(f"Mixed frame rates {dict(fps_seen)} conformed to project {profile_fps:g} fps")
+        review.append(f"Mixed frame rates ({', '.join(f'{k} fps ×{v}' for k, v in sorted(fps_seen.items()))}) conformed to {profile_fps:g} fps")
     unl = [i["camera_id"] for i in inventory if i.get("role_label") == "unlabelled"]
     if unl:
         review.append(f"Unlabelled angles {', '.join(unl)}: assign camera roles in the profile for better coverage")
@@ -550,10 +550,10 @@ def run_editorial_intelligence(ctx: AgentContext) -> AgentOutcome:
     rep = st.asr_backend_report
     review = []
     if not rep.is_neural_inference:
-        review.append(f"Transcript is VAD-only ({rep.fallback_reason or 'no Whisper model installed'}); install a Whisper model in Model Manager for word-level editing and captions")
+        review.append("Speech regions only, no words. Install a Whisper model in Model Manager for word-level editing and captions")
     low = sum(1 for s in st.transcript_segments if s.is_low_confidence)
     if low:
-        review.append(f"{low} low-confidence transcript segments flagged for review")
+        review.append(f"{low} low-confidence transcript segment{'s' if low != 1 else ''} to check")
     return AgentOutcome(
         batches=batches,
         confidence=round(float(np.mean([s.confidence for s in st.transcript_segments])), 4) if st.transcript_segments else 0.5,
@@ -642,7 +642,7 @@ def run_rough_cut(ctx: AgentContext) -> AgentOutcome:
         confidence=round(float(np.mean([s.confidence for s in shots])), 4) if shots else 0.5,
         summary=f"{len(shots)} shots, edited {edited:.1f}s from {sources:.1f}s source ({(1 - edited / sources) * 100 if sources else 0:.0f}% removed)",
         rationale="Setup delays, dead air and long silences removed; speaker-aware angle switching per camera plan",
-        review_items=[f"{review} shots flagged for editorial review"] if review else [],
+        review_items=[f"{review} shot{'s' if review != 1 else ''} to check for pacing or angle"] if review else [],
         metrics={"shots": len(shots), "edited_duration_sec": round(edited, 3), "source_duration_sec": round(sources, 3)},
     )
 
@@ -679,7 +679,7 @@ def run_captions(ctx: AgentContext) -> AgentOutcome:
             summary="Captions withheld: only a VAD (non-neural) transcript is available",
             neural_inference=False,
             fallback_reason=st.asr_backend_report.fallback_reason or "No local Whisper model installed",
-            review_items=["Install a Whisper model (Model Manager) and rerun the Captions agent to generate real subtitles"],
+            review_items=["Captions need a spoken transcript. Install a Whisper model in Model Manager, then rerun Captions"],
             skipped_reason="no_spoken_transcript",
         )
     agq.prepare_captions(st)
@@ -959,7 +959,7 @@ def run_vfx(ctx: AgentContext) -> AgentOutcome:
         outputs={"vfx_report_json": str(vfx_dir / "vfx_report.json")},
         neural_inference=neural_any,
         fallback_reason="; ".join(sorted(set(fallback_reasons))) or None,
-        review_items=["Review mattes in Roto Studio; refine/propagate if subjects move significantly"] + ([] if neural_any else ["Segmentation used a non-neural fallback (install MobileSAM/SAM2 in Model Manager)"]),
+        review_items=["Check the mattes in Roto and 2D and refine them where the subject moves"] + ([] if neural_any else ["Mattes used the non-neural fallback. Install MobileSAM in Model Manager for neural segmentation"]),
         skipped_reason=None if b.operation_count else "no_target_cameras",
     )
 

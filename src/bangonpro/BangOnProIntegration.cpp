@@ -52,6 +52,7 @@
 #include <QRegularExpression>
 #include <QScrollArea>
 #include <QStandardPaths>
+#include <QTimer>
 #include <QToolBar>
 #include <QUrl>
 #include <QUuid>
@@ -144,9 +145,14 @@ BangOnProIntegration::BangOnProIntegration(QMainWindow *mainWindow, EffectListWi
     setupPresetBrowser();
     setupRotoStudioDock();
     setupWorkspaceBar();
-    setupShortcuts();
+    // Menu actions (incl. the nine workspace actions) must exist before the shortcut preset is applied,
+    // otherwise Alt+Shift+1…9 workspace shortcuts are never bound (V1.2.1 fix).
     setupMenu();
+    setupShortcuts();
     loadBuiltinStarterPresetsIfNeeded();
+    // Restored window geometry can come from a larger display; keep the editor on the current screen.
+    QTimer::singleShot(0, m_mainWindow, [this]() { fitWindowToScreen(m_mainWindow); });
+    QTimer::singleShot(1500, m_mainWindow, [this]() { fitWindowToScreen(m_mainWindow); });
 }
 
 BangOnProIntegration::~BangOnProIntegration()
@@ -289,12 +295,8 @@ void BangOnProIntegration::setupAgentControlCentre()
     m_agentCentre = new AgentControlCentre(m_mainWindow);
     m_agentDock = new QDockWidget(QStringLiteral("Agent Control Centre"), m_mainWindow);
     m_agentDock->setObjectName(QString::fromLatin1(kAgentControlCentreDockName));
-    // Scroll container: the dense control centre must never force the main window wider than the screen.
-    auto *agentScroll = new QScrollArea(m_agentDock);
-    agentScroll->setWidgetResizable(true);
-    agentScroll->setFrameShape(QFrame::NoFrame);
-    agentScroll->setWidget(m_agentCentre);
-    m_agentDock->setWidget(agentScroll);
+    // Shared scroll container: dense panels never force the main window wider or taller than the screen.
+    m_agentDock->setWidget(makeScrollableDockContent(m_agentCentre, m_agentDock));
     m_mainWindow->addDockWidget(Qt::RightDockWidgetArea, m_agentDock);
     if (m_aiDock) {
         m_mainWindow->tabifyDockWidget(m_aiDock, m_agentDock);
@@ -481,9 +483,9 @@ void BangOnProIntegration::promoteDepartmentDraft(const QString &jobDir)
 void BangOnProIntegration::setupTranscriptDock()
 {
     m_transcriptWidget = new TranscriptEditorWidget(m_mainWindow);
-    m_transcriptDock = new QDockWidget(QStringLiteral("Transcript & Captions"), m_mainWindow);
+    m_transcriptDock = new QDockWidget(QStringLiteral("Transcript"), m_mainWindow);
     m_transcriptDock->setObjectName(QString::fromLatin1(kTranscriptDockName));
-    m_transcriptDock->setWidget(m_transcriptWidget);
+    m_transcriptDock->setWidget(makeScrollableDockContent(m_transcriptWidget, m_transcriptDock));
     m_mainWindow->addDockWidget(Qt::RightDockWidgetArea, m_transcriptDock);
     if (m_aiDock) {
         m_mainWindow->tabifyDockWidget(m_aiDock, m_transcriptDock);
@@ -498,7 +500,7 @@ void BangOnProIntegration::setupPresetBrowser()
     m_presetWidget = new PremierePresetBrowser(m_mainWindow);
     m_presetDock = new QDockWidget(QStringLiteral("Premiere Presets"), m_mainWindow);
     m_presetDock->setObjectName(QString::fromLatin1(kPremiereBrowserDockName));
-    m_presetDock->setWidget(m_presetWidget);
+    m_presetDock->setWidget(makeScrollableDockContent(m_presetWidget, m_presetDock));
     m_mainWindow->addDockWidget(Qt::LeftDockWidgetArea, m_presetDock);
     connect(m_presetWidget, &PremierePresetBrowser::importArchiveRequested, this, &BangOnProIntegration::importPresetArchive);
     connect(m_presetWidget, &PremierePresetBrowser::applyPresetRequested, this, &BangOnProIntegration::applyPreset);
@@ -509,9 +511,9 @@ void BangOnProIntegration::setupPresetBrowser()
 void BangOnProIntegration::setupRotoStudioDock()
 {
     m_rotoWidget = new RotoStudioDock(m_mainWindow);
-    m_rotoDock = new QDockWidget(QStringLiteral("Roto, Masking & 2D Studio"), m_mainWindow);
+    m_rotoDock = new QDockWidget(QStringLiteral("Roto and 2D"), m_mainWindow);
     m_rotoDock->setObjectName(QString::fromLatin1(kRotoStudioDockName));
-    m_rotoDock->setWidget(m_rotoWidget);
+    m_rotoDock->setWidget(makeScrollableDockContent(m_rotoWidget, m_rotoDock));
     m_mainWindow->addDockWidget(Qt::RightDockWidgetArea, m_rotoDock);
     if (m_aiDock) {
         m_mainWindow->tabifyDockWidget(m_aiDock, m_rotoDock);
@@ -609,12 +611,12 @@ void BangOnProIntegration::setupMenu()
     }
     if (m_transcriptDock) {
         QAction *toggleTranscript = m_transcriptDock->toggleViewAction();
-        toggleTranscript->setText(QStringLiteral("Transcript & Captions Editor"));
+        toggleTranscript->setText(QStringLiteral("Transcript"));
         menu->addAction(toggleTranscript);
     }
     if (m_rotoDock) {
         QAction *toggleRoto = m_rotoDock->toggleViewAction();
-        toggleRoto->setText(QStringLiteral("Roto, Masking & 2D Studio"));
+        toggleRoto->setText(QStringLiteral("Roto and 2D"));
         menu->addAction(toggleRoto);
     }
     if (m_presetDock) {

@@ -4,6 +4,7 @@
 */
 
 #include "ShowProfileEditorDialog.h"
+#include "BangOnProTheme.h"
 
 #include <QCheckBox>
 #include <QComboBox>
@@ -230,9 +231,9 @@ void ShowProfileEditorDialog::buildUi()
     camVBox->addWidget(m_cameraTable, 1);
 
     auto *camBtnRow = new QHBoxLayout();
-    m_addCameraButton = new QPushButton(tr("+ Add Camera"), camerasPage);
+    m_addCameraButton = new QPushButton(tr("+ add camera"), camerasPage);
     m_addCameraButton->setObjectName(QStringLiteral("addCameraRowButton"));
-    m_removeCameraButton = new QPushButton(tr("Remove Selected"), camerasPage);
+    m_removeCameraButton = new QPushButton(tr("Remove selected"), camerasPage);
     m_removeCameraButton->setObjectName(QStringLiteral("removeCameraRowButton"));
     camBtnRow->addWidget(m_addCameraButton);
     camBtnRow->addWidget(m_removeCameraButton);
@@ -314,7 +315,7 @@ void ShowProfileEditorDialog::buildUi()
     m_saveJsonButton->setObjectName(QStringLiteral("saveProfileJsonButton"));
 
     m_cancelButton = new QPushButton(tr("Cancel"), this);
-    m_useProfileButton = new QPushButton(tr("Apply Profile"), this);
+    m_useProfileButton = new QPushButton(tr("Apply profile"), this);
     m_useProfileButton->setObjectName(QStringLiteral("applyProfileDialogButton"));
     m_useProfileButton->setProperty("bangOnProPrimary", true);
     m_useProfileButton->setDefault(true);
@@ -813,10 +814,10 @@ void ShowProfileEditorDialog::updateValidationState()
     const bool valid = errs.isEmpty();
     if (valid) {
         m_validationLabel->setText(tr("✓ Show Profile v1 schema valid — ready to save or apply."));
-        m_validationLabel->setStyleSheet(QStringLiteral("color: #22A06B; font-size: 11px; font-weight: 600;"));
+        setTone(m_validationLabel, "success");
     } else {
         m_validationLabel->setText(tr("⚠ Validation: %1").arg(errs.join(QStringLiteral(" • "))));
-        m_validationLabel->setStyleSheet(QStringLiteral("color: #E04F5F; font-size: 11px; font-weight: 600;"));
+        setTone(m_validationLabel, "danger");
     }
     m_saveJsonButton->setEnabled(valid);
     m_useProfileButton->setEnabled(valid);

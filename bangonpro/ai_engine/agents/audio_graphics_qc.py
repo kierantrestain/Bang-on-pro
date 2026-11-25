@@ -1076,7 +1076,7 @@ def emit_qc_ops(
         cat = "qc_error" if issue.severity == "error" else "qc_warning"
         marker = state.add_review_marker(
             timeline_sec=issue.timeline_sec,
-            label=f"QC [{issue.code}]: {issue.message[:80]}",
+            label=f"QC · {issue.message[:80]}",
             category=cat,
             confidence=0.95,
             rationale=issue.message,

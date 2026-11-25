@@ -4,6 +4,7 @@
 */
 
 #include "ExternalProviderConsentDialog.h"
+#include "BangOnProTheme.h"
 
 #include <QCheckBox>
 #include <QComboBox>
@@ -126,7 +127,7 @@ void ExternalProviderConsentDialog::buildUi()
     m_explicitConsentCheck =
         new QCheckBox(tr("I explicitly consent to sending the selected data above to the configured external AI endpoint."), m_privacyGroup);
     m_explicitConsentCheck->setObjectName(QStringLiteral("explicitConsentCheckBox"));
-    m_explicitConsentCheck->setStyleSheet(QStringLiteral("font-weight: 700; color: #FFB07C;"));
+    setTone(m_explicitConsentCheck, "warning");
 
     privLayout->addWidget(privIntro);
     privLayout->addWidget(m_sendTranscriptCheck);
@@ -146,7 +147,7 @@ void ExternalProviderConsentDialog::buildUi()
     // Footer buttons
     auto *footer = new QHBoxLayout();
     m_cancelButton = new QPushButton(tr("Cancel"), this);
-    m_saveButton = new QPushButton(tr("Save AI Provider Settings"), this);
+    m_saveButton = new QPushButton(tr("Save AI provider settings"), this);
     m_saveButton->setObjectName(QStringLiteral("saveProviderSettingsButton"));
     m_saveButton->setProperty("bangOnProPrimary", true);
     m_saveButton->setDefault(true);
@@ -338,13 +339,13 @@ void ExternalProviderConsentDialog::updateConsentGate()
 
     if (m_localOnlyRadio->isChecked()) {
         m_statusLabel->setText(tr("✓ Local Only mode active — 100% offline, free, and private."));
-        m_statusLabel->setStyleSheet(QStringLiteral("color: #22A06B; font-size: 11px; font-weight: 600;"));
+        setTone(m_statusLabel, "success");
     } else if (ok) {
         m_statusLabel->setText(tr("✓ Explicit consent recorded — external requests permitted for selected scopes only."));
-        m_statusLabel->setStyleSheet(QStringLiteral("color: #E5A00D; font-size: 11px; font-weight: 600;"));
+        setTone(m_statusLabel, "warning");
     } else {
         m_statusLabel->setText(tr("⚠ External transmission blocked: %1").arg(err));
-        m_statusLabel->setStyleSheet(QStringLiteral("color: #E04F5F; font-size: 11px; font-weight: 600;"));
+        setTone(m_statusLabel, "danger");
     }
 
     m_saveButton->setEnabled(ok);

@@ -14,9 +14,11 @@
 #include <QAction>
 #include <QApplication>
 #include <QDockWidget>
+#include <QImage>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QMainWindow>
+#include <QScreen>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QtTest>
@@ -38,6 +40,75 @@ private Q_SLOTS:
         QVERIFY(qss.contains(QStringLiteral("QDockWidget")));
         QVERIFY(qss.contains(QStringLiteral("#FF5A1F")));
         QVERIFY(applyBangOnProTheme(qApp));
+    }
+
+    void testDesignSystemSingleSourceAndTally()
+    {
+        // V1.2.1: one design system. The legacy brand stylesheet is the shared component layer.
+        QCOMPARE(brandStyleSheet(), componentStyleSheet());
+        const QString qss = globalApplicationStyleSheet();
+        QVERIFY(qss.contains(componentStyleSheet()));
+        QVERIFY(!qss.contains(QStringLiteral("{{")));
+        QVERIFY(!qss.contains(QStringLiteral("font-weight: 700")));
+        QVERIFY(qss.contains(QStringLiteral("bopRole=\"primary\"")));
+        const QImage img = tallyIcon(TallyState::Done).pixmap(12, 12).toImage();
+        QCOMPARE(img.pixelColor(6, 6).name(), QColor(QString::fromLatin1(StudioPaletteTokens::kStatusSuccess)).name());
+        QCOMPARE(tallyColor(TallyState::Running), QColor(QString::fromLatin1(StudioPaletteTokens::kAccentPrimary)));
+    }
+
+    void testDenseDocksCanShrinkAndWindowFitsScreen()
+    {
+        // Regression: dense docks (AI Assistant min height 782 px, Premiere Presets min width 664 px)
+        // forced the main window beyond 1920x1080. The shared scroll container lets them shrink.
+        auto *dense = new QWidget;
+        dense->setMinimumSize(900, 900);
+        QWidget *scroll = makeScrollableDockContent(dense);
+        QVERIFY(scroll->minimumSizeHint().width() <= 200);
+        QVERIFY(scroll->minimumSizeHint().height() <= 200);
+        delete scroll;
+
+        QMainWindow mw;
+        mw.resize(5000, 4000);
+        mw.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&mw) || true);
+        const QRect avail = mw.screen()->availableGeometry();
+        fitWindowToScreen(&mw);
+        QVERIFY(mw.width() <= avail.width());
+        QVERIFY(mw.height() <= avail.height());
+        QVERIFY(!fitWindowToScreen(&mw)); // idempotent once inside the screen
+    }
+
+    void testAiFirstCutGivesProductionColumnFullHeight()
+    {
+        QMainWindow mw;
+        mw.resize(1440, 900);
+        WorkspaceDocks docks;
+        auto makeDock = [&mw](const char *name) {
+            auto *d = new QDockWidget(QString::fromLatin1(name), &mw);
+            d->setObjectName(QString::fromLatin1(name));
+            d->setWidget(new QWidget(d));
+            mw.addDockWidget(Qt::LeftDockWidgetArea, d);
+            return d;
+        };
+        docks.projectMonitor = makeDock(kProjectMonitorDockName);
+        docks.clipMonitor = makeDock(kClipMonitorDockName);
+        docks.projectBin = makeDock(kProjectBinDockName);
+        docks.aiAssistant = makeDock(kAiAssistantDockName);
+        docks.transcriptDock = makeDock(kTranscriptDockName);
+        docks.agentControlCentre = makeDock(kAgentControlCentreDockName);
+        mw.setCentralWidget(new QWidget(&mw));
+        mw.show();
+        QVERIFY(applyWorkspace(&mw, WorkspaceMode::AiFirstCut, docks));
+        QCOMPARE(mw.dockWidgetArea(docks.agentControlCentre), Qt::RightDockWidgetArea);
+        QCOMPARE(mw.dockWidgetArea(docks.projectMonitor), Qt::TopDockWidgetArea);
+        QVERIFY(mw.tabifiedDockWidgets(docks.agentControlCentre).contains(docks.aiAssistant));
+        QCOMPARE(mw.corner(Qt::TopRightCorner), Qt::RightDockWidgetArea);
+        // Dock titles never show accelerator markers in the styled title bar.
+        docks.clipMonitor->setWindowTitle(QStringLiteral("C&lip Monitor"));
+        docks.projectBin->setWindowTitle(QStringLiteral("Roto && 2D"));
+        QVERIFY(applyWorkspace(&mw, WorkspaceMode::Edit, docks));
+        QCOMPARE(docks.clipMonitor->windowTitle(), QStringLiteral("Clip Monitor"));
+        QCOMPARE(docks.projectBin->windowTitle(), QStringLiteral("Roto & 2D"));
     }
 
     void testAllNineStudioWorkspacesAndPersistence()

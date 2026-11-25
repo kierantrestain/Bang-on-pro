@@ -10,6 +10,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QLabel>
 #include <QPushButton>
 #include <QSignalSpy>
 #include <QTemporaryDir>
@@ -54,6 +55,18 @@ private Q_SLOTS:
     {
         QCOMPARE(AgentControlCentre::agentIds().size(), 14);
         QCOMPARE(AgentControlCentre::automationModes().size(), 4);
+    }
+
+    void compactControlCentreKeepsPrimaryActionAndStableIds()
+    {
+        AgentControlCentre acc;
+        QCOMPARE(acc.minimumWidth(), 280);
+        auto *start = acc.findChild<QPushButton *>(QStringLiteral("acc_start"));
+        QVERIFY(start);
+        QVERIFY(start->property("bangOnProPrimary").toBool());
+        QVERIFY(acc.findChild<QPushButton *>(QStringLiteral("acc_review_draft")));
+        QVERIFY(acc.findChild<QPushButton *>(QStringLiteral("acc_open_draft")));
+        QVERIFY(acc.findChild<QPushButton *>(QStringLiteral("acc_promote")));
     }
 
     void buildsRunArgumentsFromUi()
@@ -104,6 +117,31 @@ private Q_SLOTS:
         QVERIFY(acc.summaryText().startsWith(QStringLiteral("# Production summary")));
         QVERIFY(acc.refreshFromDisk());
         QCOMPARE(finished.count(), 1); // emitted once per terminal status
+    }
+
+    void primaryActionHandsOverToReviewWhenDraftReady()
+    {
+        // One primary action at a time: Start before a run, Review once a draft exists.
+        QTemporaryDir tmp;
+        AgentControlCentre acc;
+        auto *start = acc.findChild<QPushButton *>(QStringLiteral("acc_start"));
+        auto *review = acc.findChild<QPushButton *>(QStringLiteral("acc_review_draft"));
+        QVERIFY(start->property("bangOnProPrimary").toBool());
+        QVERIFY(!review->property("bangOnProPrimary").toBool());
+        acc.setActiveJobDir(tmp.path());
+        acc.loadJobStatus(sampleJob(QStringLiteral("draft_ready")));
+        QVERIFY(review->property("bangOnProPrimary").toBool());
+        QVERIFY(!start->property("bangOnProPrimary").toBool());
+        QVERIFY(acc.agentStatus(QStringLiteral("colourist")).startsWith(QStringLiteral("Done")));
+        // Setup collapses while reviewing; "New production" brings it back.
+        auto *setup = acc.findChild<QWidget *>(QStringLiteral("acc_setup"));
+        auto *newJob = acc.findChild<QPushButton *>(QStringLiteral("acc_new_job"));
+        QVERIFY(setup && newJob);
+        QVERIFY(setup->isHidden());
+        QTest::mouseClick(newJob, Qt::LeftButton);
+        QVERIFY(!setup->isHidden());
+        auto *reviewTitle = acc.findChild<QLabel *>(QStringLiteral("acc_review_title"));
+        QVERIFY(reviewTitle && reviewTitle->text().contains(QStringLiteral("1")));
     }
 
     void recoversInterruptedJob()

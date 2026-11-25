@@ -443,187 +443,9 @@ QString brandAccentHex()
 
 QString brandStyleSheet()
 {
-    const QString chrome = QString::fromLatin1(StudioPaletteTokens::kWindowChrome);
-    const QString panel = QString::fromLatin1(StudioPaletteTokens::kPanelSurface);
-    const QString elevated = QString::fromLatin1(StudioPaletteTokens::kElevatedSurface);
-    const QString hover = QString::fromLatin1(StudioPaletteTokens::kElevatedHover);
-    const QString well = QString::fromLatin1(StudioPaletteTokens::kSunkenWell);
-    const QString hairline = QString::fromLatin1(StudioPaletteTokens::kBorderHairline);
-    const QString activeBorder = QString::fromLatin1(StudioPaletteTokens::kBorderActive);
-    const QString text = QString::fromLatin1(StudioPaletteTokens::kTextPrimary);
-    const QString textMuted = QString::fromLatin1(StudioPaletteTokens::kTextSecondary);
-    const QString accent = brandAccentHex();
-    const QString selection = QString::fromLatin1(StudioPaletteTokens::kAccentSelection);
-    const QString green = QString::fromLatin1(StudioPaletteTokens::kStatusSuccess);
-    const QString amber = QString::fromLatin1(StudioPaletteTokens::kStatusWarning);
-    const QString red = QString::fromLatin1(StudioPaletteTokens::kStatusDanger);
-
-    QString qss;
-    qss.reserve(4096);
-
-    qss += QStringLiteral(
-               "QWidget#bangOnProAiAssistant, QWidget#bangOnProTranscriptEditor {"
-               "  background-color: %1;"
-               "  color: %2;"
-               "}"
-               "QFrame#bangOnProHeader {"
-               "  background-color: %3;"
-               "  border: 1px solid %4;"
-               "  border-left: 3px solid %5;"
-               "  border-radius: 5px;"
-               "}"
-               "QLabel#bangOnProTitle {"
-               "  font-size: 13px;"
-               "  font-weight: 700;"
-               "  color: #FFFFFF;"
-               "}"
-               "QLabel#bangOnProBadge {"
-               "  background-color: %5;"
-               "  color: #FFFFFF;"
-               "  font-size: 10px;"
-               "  font-weight: 700;"
-               "  padding: 2px 6px;"
-               "  border-radius: 3px;"
-               "}"
-               "QLabel#bangOnProStatusBadge {"
-               "  background-color: %6;"
-               "  color: %2;"
-               "  font-size: 10px;"
-               "  font-weight: 600;"
-               "  padding: 2px 7px;"
-               "  border-radius: 9px;"
-               "}"
-               "QLabel#bangOnProStatusBadge[statusState=\"proposal\"] { background-color: #4A2810; color: #FFB07C; }"
-               "QLabel#bangOnProStatusBadge[statusState=\"ok\"] { background-color: #133B2A; color: #6CE5AD; }"
-               "QLabel#bangOnProStatusBadge[statusState=\"busy\"] { background-color: #163055; color: #7BB8FF; }"
-               "QLabel#bangOnProStatusBadge[statusState=\"error\"] { background-color: #4D1B22; color: #FF8E9B; }"
-               "QLabel#bangOnProSubtitle, QLabel#bangOnProMutedLabel, QLabel#bangOnProRevision, QLabel#taskStatusLabel {"
-               "  color: %7;"
-               "  font-size: 11px;"
-               "}"
-               "QLabel#bangOnProSectionLabel {"
-               "  color: %2;"
-               "  font-weight: 600;"
-               "  font-size: 11px;"
-               "}"
-               "QLabel#proposalSummaryLabel {"
-               "  color: %8;"
-               "  font-size: 11px;"
-               "  font-weight: 600;"
-               "}")
-               .arg(panel, text, elevated, hairline, accent, hover, textMuted, amber);
-
-    qss += QStringLiteral(
-               "QComboBox#showProfileCombo, QPlainTextEdit#instructionInput, QPlainTextEdit#agentActivityLog, QTreeWidget#proposedDiffTree {"
-               "  background-color: %1;"
-               "  color: %2;"
-               "  border: 1px solid %3;"
-               "  border-radius: 4px;"
-               "}"
-               "QTreeWidget#proposedDiffTree { alternate-background-color: %4; }"
-               "QHeaderView::section {"
-               "  background-color: %5;"
-               "  color: %6;"
-               "  border: 0px;"
-               "  border-right: 1px solid %3;"
-               "  border-bottom: 1px solid %3;"
-               "  padding: 4px 6px;"
-               "  font-size: 11px;"
-               "  font-weight: 600;"
-               "}"
-               "QPushButton {"
-               "  background-color: %5;"
-               "  color: %2;"
-               "  border: 1px solid %3;"
-               "  border-radius: 4px;"
-               "  padding: 5px 8px;"
-               "  font-size: 11px;"
-               "}"
-               "QPushButton:hover { background-color: %7; border-color: %8; }"
-               "QPushButton:disabled { background-color: %4; color: #5C6578; border-color: %3; }"
-               "QPushButton[bangOnProChip=\"true\"] {"
-               "  background-color: %5;"
-               "  border: 1px solid %3;"
-               "  border-radius: 10px;"
-               "  padding: 4px 8px;"
-               "  font-size: 10px;"
-               "  text-align: left;"
-               "}"
-               "QPushButton[bangOnProChip=\"true\"]:hover { border-color: %9; color: #FFFFFF; }")
-               .arg(well, text, hairline, panel, elevated, textMuted, hover, activeBorder, accent);
-
-    qss += QStringLiteral(
-               "QPushButton[bangOnProPrimary=\"true\"] {"
-               "  background-color: %1;"
-               "  border-color: %1;"
-               "  color: #FFFFFF;"
-               "  font-weight: 700;"
-               "}"
-               "QPushButton[bangOnProPrimary=\"true\"]:hover { background-color: #FF733F; }"
-               "QPushButton[bangOnProAccept=\"true\"] {"
-               "  background-color: %2;"
-               "  border-color: %2;"
-               "  color: #FFFFFF;"
-               "  font-weight: 700;"
-               "}"
-               "QPushButton[bangOnProAccept=\"true\"]:hover { background-color: #28BA7C; }"
-               "QPushButton[bangOnProDanger=\"true\"]:hover { background-color: %3; border-color: %3; color: #FFFFFF; }"
-               "QPushButton#compareToggleButton:checked {"
-               "  background-color: #1A3A66;"
-               "  border-color: %4;"
-               "  color: #FFFFFF;"
-               "  font-weight: 600;"
-               "}"
-               "QProgressBar#agentProgressBar {"
-               "  background-color: %5;"
-               "  border: 1px solid %6;"
-               "  border-radius: 3px;"
-               "  text-align: center;"
-               "  font-size: 10px;"
-               "  color: %7;"
-               "}"
-               "QProgressBar#agentProgressBar::chunk { background-color: %1; border-radius: 2px; }"
-               "QToolButton#activityLogToggleButton { color: %7; font-weight: 600; font-size: 11px; }")
-               .arg(accent, green, red, selection, well, hairline, text);
-
-    qss += QStringLiteral(
-               "QWidget#bangOnProWorkspaceSwitcher {"
-               "  background-color: %1;"
-               "  border-bottom: 1px solid %2;"
-               "}"
-               "QPushButton[bangOnProWorkspacePill=\"true\"] {"
-               "  background-color: transparent;"
-               "  color: %3;"
-               "  border: 0px;"
-               "  border-bottom: 2px solid transparent;"
-               "  border-radius: 0px;"
-               "  padding: 5px 10px;"
-               "  font-size: 11px;"
-               "  font-weight: 600;"
-               "}"
-               "QPushButton[bangOnProWorkspacePill=\"true\"]:hover { color: %4; background-color: %5; }"
-               "QPushButton[bangOnProWorkspacePill=\"true\"]:checked {"
-               "  color: #FFFFFF;"
-               "  background-color: %6;"
-               "  border-bottom: 2px solid %7;"
-               "}"
-               "QPushButton#workspaceAiPanelToggle {"
-               "  background-color: %5;"
-               "  color: %4;"
-               "  border: 1px solid %2;"
-               "  border-radius: 11px;"
-               "  padding: 3px 10px;"
-               "  font-size: 11px;"
-               "  font-weight: 600;"
-               "}"
-               "QPushButton#workspaceAiPanelToggle:checked {"
-               "  background-color: #3D1F13;"
-               "  border-color: %7;"
-               "  color: #FFB07C;"
-               "}")
-               .arg(chrome, hairline, textMuted, text, elevated, panel, accent);
-
-    return qss;
+    // V1.2.1: single design system. The component layer lives in BangOnProTheme (globalApplicationStyleSheet);
+    // this alias remains for API compatibility and widgets no longer install their own copies.
+    return componentStyleSheet();
 }
 
 QDockWidget *createAiAssistantDock(QMainWindow *mainWindow, AiAssistantDock *contentWidget, bool initiallyVisible)
@@ -632,13 +454,14 @@ QDockWidget *createAiAssistantDock(QMainWindow *mainWindow, AiAssistantDock *con
         return nullptr;
     }
 
-    auto *dock = new QDockWidget(QCoreApplication::translate("BangOnProWorkspace", "Bang On Pro — AI Assistant"), mainWindow);
+    auto *dock = new QDockWidget(QCoreApplication::translate("BangOnProWorkspace", "AI Assistant"), mainWindow);
     dock->setObjectName(QString::fromLatin1(kAiAssistantDockName));
     dock->setFeatures(QDockWidget::DockWidgetClosable | QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
     dock->setAllowedAreas(Qt::AllDockWidgetAreas);
 
     AiAssistantDock *widget = contentWidget != nullptr ? contentWidget : new AiAssistantDock(dock);
-    dock->setWidget(widget);
+    // Scroll container: the dense assistant must never force the window taller than the screen (V1.2.1).
+    dock->setWidget(makeScrollableDockContent(widget, dock));
 
     mainWindow->addDockWidget(Qt::RightDockWidgetArea, dock);
     dock->setVisible(initiallyVisible);
@@ -767,16 +590,46 @@ bool applyWorkspace(QMainWindow *mainWindow, WorkspaceMode mode, const Workspace
     }
 
     case WorkspaceMode::AiFirstCut: {
-        // Project Bin left, Program/Clip Monitor center, AI Assistant & Interactive Transcript right, full-width Timeline bottom.
-        dockTopStudioColumns(
-            mainWindow,
-            {
-                {{d.projectBin, d.premiereBrowser}, d.projectBin, 260},
-                {{d.projectMonitor, d.clipMonitor}, d.projectMonitor, 560},
-                // V1.2: the Agent Control Centre (production department) is raised; AI Assistant & Transcript tabbed beside it.
-                {{d.agentControlCentre, d.aiAssistant, d.transcriptDock}, d.agentControlCentre != nullptr ? d.agentControlCentre : d.aiAssistant, 600},
-            },
-            visibleDocks, arrangedCount);
+        // V1.2.1: the production department gets a full-height right column beside the timeline (it is the
+        // primary tool here); Project Bin and Program/Clip Monitor sit above the timeline.
+        dockTopStudioColumns(mainWindow,
+                             {
+                                 {{d.projectBin, d.premiereBrowser}, d.projectBin, 280},
+                                 {{d.projectMonitor, d.clipMonitor}, d.projectMonitor, 720},
+                             },
+                             visibleDocks, arrangedCount);
+        QList<QDockWidget *> right;
+        for (QDockWidget *dk : {d.agentControlCentre, d.aiAssistant, d.transcriptDock}) {
+            if (dk != nullptr) {
+                right.append(dk);
+            }
+        }
+        if (!right.isEmpty()) {
+            QDockWidget *anchor = right.first();
+            for (QDockWidget *dk : std::as_const(right)) {
+                mainWindow->removeDockWidget(dk);
+                dk->setFloating(false);
+            }
+            mainWindow->addDockWidget(Qt::RightDockWidgetArea, anchor);
+            anchor->show();
+            for (QDockWidget *dk : std::as_const(right)) {
+                if (dk != anchor) {
+                    mainWindow->tabifyDockWidget(anchor, dk);
+                    dk->show();
+                }
+                visibleDocks << dk;
+                ++arrangedCount;
+            }
+            anchor->raise();
+            QPointer<QMainWindow> win(mainWindow);
+            QPointer<QDockWidget> guardedAnchor(anchor);
+            QTimer::singleShot(0, mainWindow, [win, guardedAnchor]() {
+                if (win && guardedAnchor) {
+                    const int w = qBound(360, win->width() / 4, 480);
+                    win->resizeDocks({guardedAnchor.data()}, {w}, Qt::Horizontal);
+                }
+            });
+        }
         break;
     }
 
@@ -884,6 +737,38 @@ bool applyWorkspace(QMainWindow *mainWindow, WorkspaceMode mode, const Workspace
         }
         dock->hide();
     }
+    // Styled dock title bars paint accelerator markers literally ("C&lip Monitor"); keep titles clean.
+    for (QDockWidget *dock : allMainDocks) {
+        const QString title = dock->windowTitle();
+        if (title.contains(QLatin1Char('&'))) {
+            QString clean = title;
+            clean.replace(QStringLiteral("&&"), QStringLiteral("\x01"));
+            clean.remove(QLatin1Char('&'));
+            clean.replace(QStringLiteral("\x01"), QStringLiteral("&"));
+            dock->setWindowTitle(clean);
+        }
+    }
+    // Keep the window on the current screen after every workspace change (restored layouts from larger displays).
+    QTimer::singleShot(0, mainWindow, [mainWindow]() { fitWindowToScreen(mainWindow); });
+    if (qEnvironmentVariableIsSet("BANGONPRO_LAYOUT_DEBUG")) {
+        // Layout diagnostics: which visible docks force the main window wider/taller than the screen.
+        QTimer::singleShot(0, mainWindow, [mainWindow]() {
+            qInfo("[bangonpro-layout] window=%dx%d minHint=%dx%d", mainWindow->width(), mainWindow->height(), mainWindow->minimumSizeHint().width(),
+                  mainWindow->minimumSizeHint().height());
+            const QList<QDockWidget *> docks = mainWindow->findChildren<QDockWidget *>();
+            for (QDockWidget *dk : docks) {
+                if (dk->isVisible()) {
+                    const QWidget *w = dk->widget();
+                    qInfo("[bangonpro-layout] dock=%s area=%d size=%dx%d minHint=%dx%d min=%dx%d widgetMinHint=%dx%d", qPrintable(dk->objectName()),
+                          int(mainWindow->dockWidgetArea(dk)), dk->width(), dk->height(), dk->minimumSizeHint().width(), dk->minimumSizeHint().height(),
+                          dk->minimumWidth(), dk->minimumHeight(), w ? w->minimumSizeHint().width() : -1, w ? w->minimumSizeHint().height() : -1);
+                }
+            }
+            if (QWidget *c = mainWindow->centralWidget()) {
+                qInfo("[bangonpro-layout] central minHint=%dx%d", c->minimumSizeHint().width(), c->minimumSizeHint().height());
+            }
+        });
+    }
     return arrangedCount > 0;
 }
 
@@ -975,18 +860,18 @@ WorkspaceSwitcherBar::WorkspaceSwitcherBar(QWidget *parent)
 {
     qRegisterMetaType<BangOnPro::WorkspaceMode>("BangOnPro::WorkspaceMode");
     setObjectName(QStringLiteral("bangOnProWorkspaceSwitcher"));
-    setFixedHeight(34);
+    setFixedHeight(36);
+    setAttribute(Qt::WA_StyledBackground, true);
     buildUi();
-    setStyleSheet(brandStyleSheet());
 }
 
 void WorkspaceSwitcherBar::buildUi()
 {
     auto *layout = new QHBoxLayout(this);
-    layout->setContentsMargins(10, 0, 10, 0);
+    layout->setContentsMargins(8, 0, 8, 0);
     layout->setSpacing(2);
 
-    auto *brandTag = new QLabel(QStringLiteral("BANG ON PRO"), this);
+    auto *brandTag = new QLabel(QStringLiteral("Bang On Pro"), this);
     brandTag->setObjectName(QStringLiteral("bangOnProBadge"));
     layout->addWidget(brandTag);
     layout->addSpacing(8);
@@ -1016,7 +901,7 @@ void WorkspaceSwitcherBar::buildUi()
 
     layout->addStretch(1);
 
-    m_aiPanelToggleButton = new QPushButton(tr("AI Panel"), this);
+    m_aiPanelToggleButton = new QPushButton(tr("AI panel"), this);
     m_aiPanelToggleButton->setObjectName(QStringLiteral("workspaceAiPanelToggle"));
     m_aiPanelToggleButton->setCheckable(true);
     m_aiPanelToggleButton->setChecked(false);
@@ -1024,7 +909,7 @@ void WorkspaceSwitcherBar::buildUi()
     m_aiPanelToggleButton->setToolTip(tr("Show or collapse the Bang On Pro AI Assistant dock"));
     layout->addWidget(m_aiPanelToggleButton);
 
-    layout->addSpacing(6);
+    layout->addSpacing(8);
 
     m_saveLayoutButton = new QToolButton(this);
     m_saveLayoutButton->setObjectName(QStringLiteral("workspaceSaveLayoutButton"));
