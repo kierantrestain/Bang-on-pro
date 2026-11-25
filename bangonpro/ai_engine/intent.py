@@ -256,6 +256,30 @@ def _classify_scope(
     return "targeted_edit"
 
 
+_NEGATION_PATTERNS: dict[str, str] = {
+    "captions": r"\b(no|without|skip|disable|omit|don'?t\s+add)\s+(captions?|subtitles?|srt|ass)\b",
+    "graphics": r"\b(no|without|skip|disable|omit|don'?t\s+add)\s+(graphics?|lower[\s-]*thirds?|titles?|overlays?)\b",
+    "silence": r"\b(keep|preserve|no|without|skip|don'?t\s+(?:remove|trim|cut))\s+(?:the\s+|all\s+(?:the\s+)?)?(silence|silences|dead\s*air|pauses?)\b",
+    "setup": r"\b(keep|preserve|no|without|skip|don'?t\s+(?:remove|trim))\s+(setup(?:\s+delays?)?|delays?|leader|slate)\b",
+    "audio": (
+        r"\b(no|without|skip|disable|don'?t\s+(?:clean|restore|normalize|denoise|process))\s+"
+        r"(audio(?:\s+restor\w*|\s+clean\w*|\s+process\w*)?|denoise|loudness|normalization|audio\s+mix)\b"
+    ),
+    "multicam": r"\b(no|without|skip|disable|single[\s-]*cam(?:era)?)\s+(multicam|camera\s+switch\w*|angle\s+switch\w*)\b",
+    "sync": r"\b(no|without|skip|don'?t)\s+(sync|synchroni[sz]e|camera\s+sync)\b",
+}
+
+
+def explicit_negations(text: str) -> dict[str, bool]:
+    """Stages the brief explicitly excludes ("no captions", "keep the pauses", ...).
+
+    Shared by the instruction parser and the Executive so that automation-mode widening
+    never overrides an explicit instruction (V1.2.2).
+    """
+    lower = (text or "").lower()
+    return {k: bool(re.search(p, lower)) for k, p in _NEGATION_PATTERNS.items()}
+
+
 def parse_production_instruction(
     instruction: str,
     *,
@@ -306,26 +330,14 @@ def parse_production_instruction(
             break
 
     # Negation detection so users can explicitly skip stages
-    no_captions = _has(
-        r"\b(no|without|skip|disable|omit|don'?t\s+add)\s+(captions?|subtitles?|srt|ass)\b"
-    )
-    no_graphics = _has(
-        r"\b(no|without|skip|disable|omit|don'?t\s+add)\s+(graphics?|lower[\s-]*thirds?|titles?|overlays?)\b"
-    )
-    no_silence = _has(
-        r"\b(keep|preserve|no|without|skip|don'?t\s+(?:remove|trim|cut))\s+(silence|dead\s*air|pauses?)\b"
-    )
-    no_setup = _has(
-        r"\b(keep|preserve|no|without|skip|don'?t\s+(?:remove|trim))\s+(setup(?:\s+delays?)?|delays?|leader|slate)\b"
-    )
-    no_audio = _has(
-        r"\b(no|without|skip|disable|don'?t\s+(?:clean|restore|normalize|denoise|process))\s+"
-        r"(audio(?:\s+restor\w*|\s+clean\w*|\s+process\w*)?|denoise|loudness|normalization|audio\s+mix)\b"
-    )
-    no_multicam = _has(
-        r"\b(no|without|skip|disable|single[\s-]*cam(?:era)?)\s+(multicam|camera\s+switch\w*|angle\s+switch\w*)\b"
-    )
-    no_sync = _has(r"\b(no|without|skip|don'?t)\s+(sync|synchroni[sz]e|camera\s+sync)\b")
+    neg = explicit_negations(lower)
+    no_captions = neg["captions"]
+    no_graphics = neg["graphics"]
+    no_silence = neg["silence"]
+    no_setup = neg["setup"]
+    no_audio = neg["audio"]
+    no_multicam = neg["multicam"]
+    no_sync = neg["sync"]
 
     # Positive explicit action detection (strictly avoiding over-broad triggers)
     sync_mentioned = _has(

@@ -13,6 +13,7 @@ SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
 
 from __future__ import annotations
 
+import bisect
 import importlib.util
 import itertools
 from collections.abc import Callable
@@ -338,6 +339,114 @@ def _majority_smooth_labels(labels: list[int], half_window: int = 15) -> list[in
         vals, counts = np.unique(arr[lo:hi], return_counts=True)
         smoothed[i] = vals[int(np.argmax(counts))]
     return smoothed.tolist()
+
+
+def measure_nonspeech_activity(
+    features_by_cam: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]],
+    cam_ids: list[str],
+    vad_mask: np.ndarray,
+    *,
+    hop_sec: float,
+    speech_thresh_db: float,
+    speaker_labels: dict[str, str | None] | None = None,
+) -> tuple[list[dict[str, Any]], float]:
+    """Find reaction audio the VAD does not treat as dialogue (V1.2.2).
+
+    * **In pauses:** sustained (>= 0.5 s) sound on any microphone at least 18 dB above the room
+      floor and within 14 dB of the speech threshold (laughter or applause from the room, a
+      listener reacting, a quiet answer). These are protected by the Rough Cut.
+    * **Inside speech runs:** diffuse broadband sound (high spectral centroid, low
+      speech-band ratio, similar level on every microphone) is labelled applause.
+
+    Returns ``(events, noise_floor_db)``; events are master-clock dicts. Deterministic DSP
+    only; it never claims words.
+    """
+    if not cam_ids:
+        return [], -120.0
+    n = min(features_by_cam[c][0].size for c in cam_ids)
+    n = min(n, vad_mask.size)
+    if n <= 0:
+        return [], -120.0
+    full_all = np.vstack([features_by_cam[c][0][:n] for c in cam_ids]).astype(np.float64)
+    audible = full_all.max(axis=1) > -150.0
+    if not bool(audible.any()):
+        return [], -120.0
+    cams = [c for c, a in zip(cam_ids, audible) if a]
+    full = full_all[audible]
+    ratio = np.vstack([features_by_cam[c][2][:n] for c in cams]).astype(np.float64)
+    cent = np.vstack([features_by_cam[c][3][:n] for c in cams]).astype(np.float64)
+    max_full = full.max(axis=0)
+    floor = float(np.percentile(max_full, 10))
+    best = full.argmax(axis=0)
+    idx = np.arange(n)
+    best_cent = cent[best, idx]
+    best_ratio = ratio[best, idx]
+    multi = len(cams) > 1
+    spread = (full.max(axis=0) - full.min(axis=0)) if multi else np.zeros(n)
+    vm = vad_mask[:n].astype(bool)
+    loud = (max_full >= floor + 18.0) & (max_full >= speech_thresh_db - 14.0)
+    in_gaps = _morphological_clean_mask(
+        (~vm) & loud, min_gap_frames=max(2, round(0.15 / hop_sec)), min_run_frames=max(5, round(0.5 / hop_sec))
+    )
+    diffuse = (best_cent >= 2500.0) & (best_ratio <= 0.6) & ((spread <= 8.0) if multi else (best_cent >= 3000.0))
+    in_speech = _morphological_clean_mask(
+        vm & diffuse & (max_full >= floor + 15.0), min_gap_frames=max(2, round(0.2 / hop_sec)), min_run_frames=max(8, round(0.8 / hop_sec))
+    )
+    labels = speaker_labels or {}
+    events: list[dict[str, Any]] = []
+    for mask, where in ((in_gaps, "pause"), (in_speech, "speech_run")):
+        for fs, fe in _extract_true_runs(mask):
+            c_mean = float(np.mean(best_cent[fs:fe]))
+            r_mean = float(np.mean(best_ratio[fs:fe]))
+            sp = float(np.mean(spread[fs:fe])) if multi else None
+            dom = cams[int(np.argmax(full[:, fs:fe].mean(axis=1)))]
+            dur = (fe - fs) * hop_sec
+            if where == "speech_run" or (c_mean >= 2200.0 and r_mean <= 0.65 and (sp is None or sp <= 9.0) and dur >= 0.6):
+                kind = "applause"
+            elif r_mean >= 0.45 and c_mean < 2200.0:
+                kind = "voice_activity"
+            else:
+                kind = "activity"
+            events.append(
+                {
+                    "start_sec": round(fs * hop_sec, 4),
+                    "end_sec": round(fe * hop_sec, 4),
+                    "where": where,
+                    "kind_hint": kind,
+                    "peak_db_above_floor": round(float(np.max(max_full[fs:fe]) - floor), 2),
+                    "mean_db_above_floor": round(float(np.mean(max_full[fs:fe]) - floor), 2),
+                    "centroid_hz": round(c_mean, 1),
+                    "speech_band_ratio": round(r_mean, 3),
+                    "mic_spread_db": round(sp, 2) if sp is not None else None,
+                    "dominant_camera": dom,
+                    "dominant_speaker": labels.get(dom),
+                    "evidence_class": "dsp_features",
+                }
+            )
+    events.sort(key=lambda e: e["start_sec"])
+    return events, round(floor, 2)
+
+
+def _carve_intervals(intervals: list[TimeInterval], regions: list[tuple[float, float]], min_len: dict[str, float]) -> list[TimeInterval]:
+    """Remove ``regions`` (speech) from silence intervals, keeping labels; drop short leftovers."""
+    out: list[TimeInterval] = []
+    for iv in intervals:
+        pieces = [(iv.start_sec, iv.end_sec)]
+        for rs, re_ in regions:
+            nxt: list[tuple[float, float]] = []
+            for a, b in pieces:
+                if re_ <= a or rs >= b:
+                    nxt.append((a, b))
+                    continue
+                if rs > a:
+                    nxt.append((a, rs))
+                if re_ < b:
+                    nxt.append((re_, b))
+            pieces = nxt
+        for a, b in pieces:
+            if b - a >= min_len.get(iv.label, 0.0) and b - a > 1e-3:
+                out.append(TimeInterval(round(a, 4), round(b, 4), iv.label, iv.confidence))
+    return out
 
 
 def _try_neural_whisper_asr(
@@ -812,6 +921,19 @@ def run_transcribe_diarise_agent(
     if detected_interruptions:
         state.interruption_intervals = detected_interruptions
 
+    # V1.2.2: reaction audio (laughter/applause/listener) the VAD does not count as dialogue
+    audio_cams = [cid for cid, a in state.media_assets.items() if a.audio_codec is not None] or list(state.media_assets)
+    nonspeech_events, noise_floor_db = measure_nonspeech_activity(
+        features_by_cam,
+        audio_cams,
+        vad_mask,
+        hop_sec=hop_sec,
+        speech_thresh_db=speech_thresh_db,
+        speaker_labels={cid: a.speaker_label for cid, a in state.media_assets.items()},
+    )
+    state.metadata["nonspeech_activity"] = nonspeech_events
+    state.metadata["noise_floor_db"] = noise_floor_db
+
     # 4. Multi-mic speaker diarisation & genuine neural Whisper ASR (when enabled & available)
     report_progress(0.60, "Performing multi-camera speaker diarisation & ASR check")
     spk_db_matrix = np.vstack([features_by_cam[cid][1][:min_len] for cid in speaker_cams])
@@ -831,6 +953,7 @@ def run_transcribe_diarise_agent(
     state.asr_backend_report = asr_report
 
     segments: list[TranscriptSegment] = []
+    seg_specs: list[dict[str, Any]] = []
     min_turn_frames = max(12, round(0.40 / hop_sec))
     overlap_margin_db = 4.0
 
@@ -966,82 +1089,186 @@ def run_transcribe_diarise_agent(
                     float(np.clip(0.5 * energy_conf + 0.5 * diar_conf, 0.20, 0.98)), 4
                 )
 
-            # Match genuine neural Whisper text & word timestamps when executed
-            text = ""
-            explicit_words: list[dict[str, Any]] | None = None
-            seg_is_neural = False
-            seg_quality = "vad_speech_segments_only"
-
-            if whisper_rows and asr_report.is_neural_inference:
-                overlapping_rows = [
-                    r for r in whisper_rows if r["end"] > start_sec and r["start"] < end_sec
-                ]
-                text = " ".join(r["text"] for r in overlapping_rows).strip()
-                gathered_words = [
-                    w for r in overlapping_rows for w in (r.get("words") or [])
-                ]
-                if gathered_words:
-                    explicit_words = gathered_words
-                if text:
-                    seg_is_neural = True
-                    seg_quality = "neural_asr"
-
-            if not text:
-                # Honest VAD-only speech segment marker — NEVER fabricated spoken words!
-                dur = end_sec - start_sec
-                if is_overlap and len(overlap_speakers) >= 2:
-                    joined = " & ".join(overlap_speakers)
-                    text = (
-                        f"[VAD speech segment: {joined} overlap, {dur:.1f}s "
-                        "— install Whisper ASR for spoken transcript]"
-                    )
-                else:
-                    text = (
-                        f"[VAD speech segment: {speaker_id}, {dur:.1f}s "
-                        "— install Whisper ASR for spoken transcript]"
-                    )
-                words: list[dict[str, Any]] = []
-            else:
-                words = build_words_for_segment(
-                    text,
-                    start_sec,
-                    end_sec,
-                    state.fps,
-                    confidence=confidence,
-                    explicit_words=explicit_words,
-                )
-
-            seg_id = f"seg_{len(segments) + 1:04d}"
-            segments.append(
-                TranscriptSegment(
-                    segment_id=seg_id,
-                    start_sec=start_sec,
-                    end_sec=end_sec,
-                    speaker_id=speaker_id,
-                    speaker_name=speaker_id,
-                    camera_id=cam_id,
-                    text=text,
-                    confidence=confidence,
-                    is_low_confidence=confidence < review_thresh,
-                    energy_db=round(winner_db, 2),
-                    spectral_centroid_hz=round(centroid_hz, 1),
-                    backend=active_backend if seg_is_neural else "deterministic_multimic_vad",
-                    is_neural_inference=seg_is_neural,
-                    transcript_quality=seg_quality,
-                    is_overlap=is_overlap,
-                    overlap_speakers=overlap_speakers,
-                    is_filler_or_silence=is_filler_or_silence_text(text)
-                    if seg_is_neural
-                    else False,
-                    deleted=False,
-                    words=words,
-                )
+            seg_specs.append(
+                {
+                    "start_sec": start_sec,
+                    "end_sec": end_sec,
+                    "speaker_id": speaker_id,
+                    "camera_id": cam_id,
+                    "confidence": confidence,
+                    "energy_db": round(winner_db, 2),
+                    "centroid_hz": round(centroid_hz, 1),
+                    "is_overlap": is_overlap,
+                    "overlap_speakers": overlap_speakers,
+                }
             )
 
-    # 5. Group transcript segments into editorial Story Sections
-    report_progress(0.82, "Identifying story sections, overlaps & editorial review flags")
-    story_sections: list[StorySection] = []
+    # V1.2.2: assign every recognised word to exactly one segment (by its midpoint). V1.2.1 gave a
+    # segment the full text of every Whisper row it overlapped, so a sentence spanning two speech
+    # runs was transcribed twice. Words the VAD morphology dropped (a short "Yes." inside a pause)
+    # become their own segments instead of being lost to a pause cut.
+    spec_words: list[list[dict[str, Any]]] = [[] for _ in seg_specs]
+    spec_rows: list[list[str]] = [[] for _ in seg_specs]
+    orphan_words: list[dict[str, Any]] = []
+    if whisper_rows and asr_report.is_neural_inference:
+        spec_starts = [sp["start_sec"] for sp in seg_specs]
+
+        def _spec_for(t: float, reach: float) -> int | None:
+            k = bisect.bisect_right(spec_starts, t) - 1
+            best_k, best_d = None, reach
+            for cand in (k, k + 1):
+                if 0 <= cand < len(seg_specs):
+                    sp = seg_specs[cand]
+                    d = 0.0 if sp["start_sec"] <= t <= sp["end_sec"] else min(abs(t - sp["start_sec"]), abs(t - sp["end_sec"]))
+                    if d <= best_d:
+                        best_k, best_d = cand, d
+            return best_k
+
+        for row in whisper_rows:
+            row_words = [w for w in (row.get("words") or []) if str(w.get("word", "")).strip()]
+            if row_words:
+                for w in row_words:
+                    ws, we = float(w["start_sec"]), float(w["end_sec"])
+                    k = _spec_for((ws + we) / 2.0, 0.35)
+                    if k is None:
+                        orphan_words.append(dict(w))
+                        continue
+                    spec_words[k].append(dict(w))
+                    seg_specs[k]["start_sec"] = round(min(seg_specs[k]["start_sec"], ws), 4)
+                    seg_specs[k]["end_sec"] = round(min(common_duration, max(seg_specs[k]["end_sec"], we)), 4)
+            elif str(row.get("text", "")).strip():
+                ov = [max(0.0, min(row["end"], sp["end_sec"]) - max(row["start"], sp["start_sec"])) for sp in seg_specs]
+                if ov and max(ov) > 0.0:
+                    spec_rows[int(np.argmax(ov))].append(str(row["text"]).strip())
+        # Group dropped words into short segments attributed by microphone dominance
+        orphan_words.sort(key=lambda w: float(w["start_sec"]))
+        groups: list[list[dict[str, Any]]] = []
+        for w in orphan_words:
+            if groups and float(w["start_sec"]) - float(groups[-1][-1]["end_sec"]) < 0.6:
+                groups[-1].append(w)
+            else:
+                groups.append([w])
+        for grp in groups:
+            g_s, g_e = float(grp[0]["start_sec"]), float(grp[-1]["end_sec"])
+            f0 = max(0, min(min_len - 1, round(g_s / hop_sec)))
+            f1 = max(f0 + 1, min(min_len, round(g_e / hop_sec)))
+            means = np.mean(spk_db_matrix[:, f0:f1], axis=1)
+            dom = int(np.argmax(means))
+            cid = speaker_cams[dom]
+            seg_specs.append(
+                {
+                    "start_sec": round(g_s, 4),
+                    "end_sec": round(min(common_duration, max(g_e, g_s + 0.05)), 4),
+                    "speaker_id": state.media_assets[cid].speaker_label or cid,
+                    "camera_id": cid,
+                    "confidence": round(float(np.clip(np.mean([float(w.get("confidence", 0.8)) for w in grp]) * 0.85, 0.2, 0.95)), 4),
+                    "energy_db": round(float(means[dom]), 2),
+                    "centroid_hz": round(float(np.mean(best_centroid[f0:f1])), 1),
+                    "is_overlap": False,
+                    "overlap_speakers": [],
+                    "recovered_from_pause": True,
+                }
+            )
+            spec_words.append([dict(w) for w in grp])
+            spec_rows.append([])
+    order = sorted(range(len(seg_specs)), key=lambda k: (seg_specs[k]["start_sec"], seg_specs[k]["end_sec"]))
+
+    for k in order:
+        sp = seg_specs[k]
+        start_sec, end_sec = sp["start_sec"], sp["end_sec"]
+        assigned = sorted(spec_words[k], key=lambda w: float(w["start_sec"]))
+        text = " ".join(str(w["word"]).strip() for w in assigned) if assigned else " ".join(spec_rows[k])
+        seg_is_neural = bool(text.strip()) and asr_report.is_neural_inference
+        seg_quality = "neural_asr" if seg_is_neural else "vad_speech_segments_only"
+        confidence = sp["confidence"]
+        if not seg_is_neural:
+            # Honest VAD-only speech segment marker — NEVER fabricated spoken words!
+            dur = end_sec - start_sec
+            if sp["is_overlap"] and len(sp["overlap_speakers"]) >= 2:
+                joined = " & ".join(sp["overlap_speakers"])
+                text = f"[VAD speech segment: {joined} overlap, {dur:.1f}s — install Whisper ASR for spoken transcript]"
+            else:
+                text = f"[VAD speech segment: {sp['speaker_id']}, {dur:.1f}s — install Whisper ASR for spoken transcript]"
+            words: list[dict[str, Any]] = []
+        else:
+            words = build_words_for_segment(text, start_sec, end_sec, state.fps, confidence=confidence, explicit_words=assigned or None)
+            for w in words:
+                w["timing"] = "asr" if assigned else "interpolated"
+
+        seg_id = f"seg_{len(segments) + 1:04d}"
+        segments.append(
+            TranscriptSegment(
+                segment_id=seg_id,
+                start_sec=start_sec,
+                end_sec=end_sec,
+                speaker_id=sp["speaker_id"],
+                speaker_name=sp["speaker_id"],
+                camera_id=sp["camera_id"],
+                text=text,
+                confidence=confidence,
+                is_low_confidence=confidence < review_thresh,
+                energy_db=sp["energy_db"],
+                spectral_centroid_hz=sp["centroid_hz"],
+                backend=active_backend if seg_is_neural else "deterministic_multimic_vad",
+                is_neural_inference=seg_is_neural,
+                transcript_quality=seg_quality,
+                is_overlap=sp["is_overlap"],
+                overlap_speakers=sp["overlap_speakers"],
+                is_filler_or_silence=is_filler_or_silence_text(text) if seg_is_neural else False,
+                deleted=False,
+                words=words,
+            )
+        )
+
+    # Silences never overlap recognised speech (extended or recovered segments carve them)
     if segments:
+        regions = [(s.start_sec, s.end_sec) for s in segments]
+        state.silence_intervals = _carve_intervals(
+            state.silence_intervals,
+            regions,
+            {"silence": min_silence_sec, "trailing_silence": min_silence_sec, "setup_delay": 0.40, "interruption_gap": interruption_gap_sec},
+        )
+        if detected_interruptions:
+            detected_interruptions = [iv for iv in state.silence_intervals if iv.label == "interruption_gap"]
+            state.interruption_intervals = detected_interruptions
+        first_start = min(s.start_sec for s in segments)
+        if setup_delay_sec >= 0.40 and first_start < setup_delay_sec:
+            setup_delay_sec = round(first_start, 4) if first_start >= 0.40 else 0.0
+            state.setup_delay_sec = setup_delay_sec
+
+    # 5. Group transcript segments into editorial Story Sections (V1.2.2: topic segmentation from
+    # lexical cohesion when words exist, turn structure/pauses/energy when they do not)
+    report_progress(0.82, "Identifying topics, overlaps & editorial review flags")
+    story_sections: list[StorySection] = []
+    topic_rows: list[dict[str, Any]] | None = None
+    if segments:
+        try:
+            from bangonpro.ai_engine.department.editorial_analysis import segment_topics
+
+            topic_rows = segment_topics(segments, state.profile, min_silence_sec=min_silence_sec, interruptions=detected_interruptions)
+        except Exception as exc:  # noqa: BLE001 - topic analysis must never fail transcription
+            state.metadata["topic_segmentation_error"] = f"{type(exc).__name__}: {exc}"
+            topic_rows = None
+    if topic_rows:
+        for row in topic_rows:
+            story_sections.append(
+                StorySection(
+                    section_id=row["section_id"],
+                    label=row["label"],
+                    start_sec=row["start_sec"],
+                    end_sec=row["end_sec"],
+                    dominant_speaker=row["dominant_speaker"],
+                    confidence=row["confidence"],
+                )
+            )
+            for seg in segments:
+                if row["start_sec"] - 1e-6 <= seg.start_sec <= row["end_sec"] + 1e-6:
+                    seg.section_label = row["label"]
+        state.metadata["topic_segmentation"] = {
+            "method": topic_rows[0]["method"],
+            "topics": [{k: r[k] for k in ("section_id", "label", "start_sec", "end_sec", "keywords", "boundary_evidence", "boundary_score")} for r in topic_rows],
+        }
+    elif segments:
         section_gap_sec = max(1.2, min_silence_sec * 1.4)
         cur_group: list[TranscriptSegment] = [segments[0]]
         section_groups: list[list[TranscriptSegment]] = []
