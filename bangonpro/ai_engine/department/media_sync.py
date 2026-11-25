@@ -331,12 +331,21 @@ def measure_windows(
         lead = round((start - (t - half_w)) * sr)
         centre = round(c * sr) - lead
         lag, conf, snr = gcc_phat_in_range(rw, tw, sr, centre - round(s * sr), centre + round(s * sr))
-        off = (lag + lead) / sr
-        status = "ok"
-        if conf < p.min_window_confidence or ncc_v < p.min_coarse_ncc:
-            status = "low_confidence"
-        out.append(WindowMeasurement(t, off, conf, snr, c, ncc_v, status=status))
-    return out, target_env
+        out.append(WindowMeasurement(t, (lag + lead) / sr, conf, snr, c, ncc_v, status="ok"))
+    return classify_windows(out, p), target_env
+
+
+def classify_windows(meas: list[WindowMeasurement], p: SyncParams) -> list[WindowMeasurement]:
+    """Apply the (cheap, tunable) acceptance thresholds to raw window measurements."""
+    for m in meas:
+        if m.status == "no_overlap" or not math.isfinite(m.offset_sec):
+            m.status = "no_overlap"
+        elif m.confidence < p.min_window_confidence or m.coarse_ncc < p.min_coarse_ncc:
+            m.status = "low_confidence"
+        else:
+            m.status = "ok"
+        m.residual_ms, m.segment = None, None
+    return meas
 
 
 # ---------------------------------------------------------------------------
@@ -500,12 +509,18 @@ def estimate_drift_for_target(
 ) -> tuple[DriftFit, np.ndarray]:
     """Full multi-window estimate for one target (offset intercept, drift ppm, segments, residuals)."""
     meas, tgt_env = measure_windows(ref_env, ref_windows, centres, target_source, target_duration, p)
+    return fit_target(camera_id, meas, ref_env, tgt_env, p), tgt_env
+
+
+def fit_target(camera_id: str, meas: list[WindowMeasurement], ref_env: np.ndarray, tgt_env: np.ndarray, p: SyncParams) -> DriftFit:
+    """Cheap stage: thresholds, robust regression, segments and breakpoints from cached measurements."""
+    meas = classify_windows(meas, p)
     a, b, lab, b_se, inl = fit_drift_and_segments(meas, p)
     fit = DriftFit(camera_id=camera_id, offset_sec=0.0, drift_ppm=0.0, drift_ppm_stderr=0.0, n_windows=len(meas))
     if inl.size == 0:
         fit.review.append(f"{camera_id}: no window aligned with confidence; sync could not be measured across the recording")
         fit.windows = [_wdict(m) for m in meas]
-        return fit, tgt_env
+        return fit
     inl_set = {int(i): int(s) for i, s in zip(inl, lab, strict=True)}
     for i, m in enumerate(meas):
         if i in inl_set:
@@ -547,7 +562,10 @@ def estimate_drift_for_target(
             gaps.append({"master_start_sec": round(brk, 3), "master_end_sec": round(brk, 3), "jump_sec": round(jump, 4), "kind": "inserted_content", "restart_estimate_sec": round(start_b, 3)})
     edges.append(float("inf"))
     for s in range(n_seg):
-        seg_rows.append({"master_start_sec": round(edges[s], 4), "master_end_sec": edges[s + 1] if math.isinf(edges[s + 1]) else round(edges[s + 1], 4), "offset_sec": round(float(a[s]), 6), "drift_ppm": fit.drift_ppm})
+        row = {"master_start_sec": round(edges[s], 4), "offset_sec": round(float(a[s]), 6), "drift_ppm": fit.drift_ppm}
+        if not math.isinf(edges[s + 1]):  # open-ended last segment: no key (strict JSON has no Infinity)
+            row["master_end_sec"] = round(edges[s + 1], 4)
+        seg_rows.append(row)
     fit.offset_sec = round(float(a[0]), 6)
     fit.segments = seg_rows if n_seg > 1 else []
     fit.gaps = gaps
@@ -562,12 +580,10 @@ def estimate_drift_for_target(
     if fit.residual_rms_ms > 4.0:
         fit.review.append(f"{camera_id}: sync residual {fit.residual_rms_ms:.1f} ms RMS is high; check for variable frame rate or edits inside the file")
     for g in gaps:
-        fit.review.append(
-            f"{camera_id}: recording discontinuity at {g['master_start_sec']:.2f}s on the master clock (clock jump {g['jump_sec'] * 1000:+.0f} ms); "
-            + ("content missing until " + f"{g['master_end_sec']:.2f}s" if g["kind"] == "missing_content" else "extra content inserted")
-        )
+        if g["kind"] != "missing_content":
+            fit.review.append(f"{camera_id}: clock jump {g['jump_sec'] * 1000:+.0f} ms at {g['master_start_sec']:.2f}s (extra content inside the file); re-synced per segment")
     fit.windows = [_wdict(m) for m in meas]
-    return fit, tgt_env
+    return fit
 
 
 def _wdict(m: WindowMeasurement) -> dict[str, Any]:
@@ -627,43 +643,103 @@ def refine_state_sync(st: Any, cache: Any = None, progress: Any = None, token: A
     ref_req = [(c - half, c + half) for c in centres]
     ref_env: np.ndarray | None = None
     ref_wins: list[np.ndarray] = []
+    plan = plan_key(p)
+    ref_env_key = {"sha": ref.sha256, "sr": p.sample_rate, "env": p.env_rate_hz}
 
-    def _ref_data() -> tuple[np.ndarray, list[np.ndarray]]:
-        nonlocal ref_env, ref_wins
+    def _ref_env() -> np.ndarray:
+        nonlocal ref_env
         if ref_env is None:
+            hit = cache.get("sync_envelope", SYNC_ANALYSIS_VERSION, ref_env_key) if cache is not None else None
+            if hit:
+                ref_env = _b64_to_env(hit)
+            else:
+                _ref_full()
+        return ref_env  # type: ignore[return-value]
+
+    def _ref_full() -> tuple[np.ndarray, list[np.ndarray]]:
+        nonlocal ref_env, ref_wins
+        if not ref_wins:
             src = st.audio_pcm_cache.get(ref_id)
             src = src if isinstance(src, np.ndarray) and src.size else ref.file_path
             ref_env, ref_wins = stream_envelope_and_windows(src, sample_rate=p.sample_rate, env_rate_hz=p.env_rate_hz, windows=ref_req)
-        return ref_env, ref_wins
+            if cache is not None:
+                cache.put("sync_envelope", SYNC_ANALYSIS_VERSION, ref_env_key, _env_to_b64(ref_env))
+        return ref_env, ref_wins  # type: ignore[return-value]
 
     targets = [c for c, a in st.media_assets.items() if c != ref_id and a.audio_codec]
     fps = st.fps
+    measured_fresh = 0
     for n, cam in enumerate(targets):
         if token is not None:
             token.check(f"drift sync {cam}")
         if progress:
             progress(0.9 + 0.08 * n / max(1, len(targets)), f"Measuring clock drift of {cam} across the recording")
         asset = st.media_assets[cam]
-        key = {"ref": ref.sha256, "tgt": asset.sha256, "params": p.key(), "ref_dur": round(ref.duration_sec, 3), "tgt_dur": round(asset.duration_sec, 3)}
-        cached = cache.get("sync_drift", SYNC_ANALYSIS_VERSION, key) if cache is not None else None
+        # Expensive stage (decodes, GCC-PHAT windows, envelopes) is cached without the cheap fit
+        # thresholds, so a quality-loop correction of those thresholds never decodes again.
+        key = {"ref": ref.sha256, "tgt": asset.sha256, "plan": plan, "ref_dur": round(ref.duration_sec, 3), "tgt_dur": round(asset.duration_sec, 3)}
+        cached = cache.get("sync_windows", SYNC_ANALYSIS_VERSION, key) if cache is not None else None
         if cached:
-            fit = DriftFit(**cached)
-            report["cameras"][cam] = {**fit.to_dict(), "cache_hit": True}
+            meas = [WindowMeasurement(**m) for m in cached["windows"]]
+            tgt_env = _b64_to_env(cached["target_env"])
+            env = _ref_env()
         else:
-            env, wins = _ref_data()
+            env, wins = _ref_full()
             src = st.audio_pcm_cache.get(cam)
             src = src if isinstance(src, np.ndarray) and src.size else asset.file_path
-            fit, _ = estimate_drift_for_target(cam, env, wins, centres, src, asset.duration_sec, p)
+            meas, tgt_env = measure_windows(env, wins, centres, src, asset.duration_sec, p)
+            measured_fresh += 1
             if cache is not None:
-                cache.put("sync_drift", SYNC_ANALYSIS_VERSION, key, fit.to_dict())
-            report["cameras"][cam] = {**fit.to_dict(), "cache_hit": False}
+                cache.put("sync_windows", SYNC_ANALYSIS_VERSION, key, {"windows": [asdict(m) for m in meas], "target_env": _env_to_b64(tgt_env)})
+        fit = fit_target(cam, meas, env, tgt_env, p)
+        report["cameras"][cam] = {**fit.to_dict(), "cache_hit": bool(cached)}
         _apply_fit(st, cam, fit, fps)
     sr_obj.method = "multiwindow_gcc_phat_drift" if targets else sr_obj.method
     report["review"] = [r for c in report["cameras"].values() for r in c.get("review", [])]
     report["elapsed_sec"] = round(time.perf_counter() - t0, 3)
     report["windows_planned"] = len(centres)
+    report["targets_measured_fresh"] = measured_fresh
+    report["frame_sec"] = round(1.0 / fps, 6)
     st.metadata["sync_report"] = report
     return report
+
+
+_PLAN_FIELDS = ("sample_rate", "env_rate_hz", "fine_window_sec", "fine_search_sec", "coarse_window_sec", "target_windows", "min_spacing_sec", "max_windows")
+
+
+def plan_key(p: SyncParams) -> dict[str, Any]:
+    return {k: getattr(p, k) for k in _PLAN_FIELDS}
+
+
+def _env_to_b64(env: np.ndarray) -> str:
+    import base64
+
+    return base64.b64encode(np.asarray(env, dtype=np.float16).tobytes()).decode("ascii")
+
+
+def _b64_to_env(s: str) -> np.ndarray:
+    import base64
+
+    return np.frombuffer(base64.b64decode(s), dtype=np.float16).astype(np.float32)
+
+
+def evidence_errors_ms(sync_result: Any, report: dict[str, Any], cam: str) -> list[tuple[float, float]]:
+    """Per-window |applied mapping - independent GCC-PHAT measurement| in ms, as (master_sec, err_ms).
+
+    Windows inside a recording gap are skipped (no content there to agree with).
+    """
+    rep = (report.get("cameras") or {}).get(cam) or {}
+    gaps = [(g["master_start_sec"], g["master_end_sec"]) for g in rep.get("gaps", []) if g.get("kind") == "missing_content"]
+    out = []
+    for w in rep.get("windows", []):
+        if w.get("status") not in ("ok", "outlier") or w.get("offset_ms") is None or w.get("status") == "outlier":
+            continue
+        t = float(w["master_sec"])
+        if any(a - 1.0 <= t <= b + 1.0 for a, b in gaps):
+            continue
+        measured = t + float(w["offset_ms"]) / 1000.0
+        out.append((t, abs(sync_result.source_time(cam, t) - measured) * 1000.0))
+    return out
 
 
 def _apply_fit(st: Any, cam: str, fit: DriftFit, fps: float) -> None:

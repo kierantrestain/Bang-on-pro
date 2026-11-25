@@ -22,6 +22,7 @@ import subprocess
 import wave
 from dataclasses import dataclass, field
 from pathlib import Path
+from fractions import Fraction
 from typing import Any
 
 import numpy as np
@@ -183,6 +184,237 @@ def drift_dropout(base: Path, *, duration_sec: float = 240.0, sr: int = SR, seed
     return Scenario("drift_dropout", files, truth)
 
 
+W, H = 320, 180
+
+
+def write_av(path: Path, frame_fn: Any, n_frames: int, fps: str | float, audio: np.ndarray | None = None, sr: int = SR, *, vcodec: list[str] | None = None, acodec: list[str] | None = None, extra: list[str] | None = None, setpts: str | None = None) -> Path:
+    """Encode frames from ``frame_fn(i) -> uint8 HxWx3`` (+ optional mono audio) with ffmpeg."""
+    import tempfile
+
+    wav = None
+    args = ["-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}", "-r", str(fps), "-i", "pipe:0"]
+    if audio is not None:
+        wav = Path(tempfile.mkstemp(suffix=".wav", dir=str(path.parent))[1])
+        write_wav(wav, audio, sr)
+        args += ["-i", str(wav)]
+    args += ["-map", "0:v"] + (["-map", "1:a"] if audio is not None else [])
+    if setpts:
+        args += ["-vf", f"settb=1/30000,setpts={setpts}", "-fps_mode", "passthrough", "-video_track_timescale", "30000"]
+    args += vcodec or ["-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-g", "25"]
+    if audio is not None:
+        args += acodec or ["-c:a", "aac", "-b:a", "160k"]
+    args += (extra or []) + [str(path)]
+    proc = subprocess.Popen(["ffmpeg", "-y", "-v", "error", *args], stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert proc.stdin is not None
+    for i in range(n_frames):
+        proc.stdin.write(np.ascontiguousarray(frame_fn(i), dtype=np.uint8).tobytes())
+    proc.stdin.close()
+    err = proc.stderr.read().decode() if proc.stderr else ""
+    rc = proc.wait()
+    if wav is not None:
+        wav.unlink(missing_ok=True)
+    if rc != 0:
+        raise RuntimeError(f"ffmpeg failed for {path}: {err}")
+    return path
+
+
+def _scene(seed: int = 5) -> dict[str, np.ndarray]:
+    """Studio-like test scene in linear-ish display RGB 0..1: textured backdrop, grey card, face, patches."""
+    rng = np.random.default_rng(seed)
+    yy, xx = np.mgrid[0:H, 0:W]
+    back = np.stack([0.36 + 0.10 * (xx / W), 0.38 + 0.05 * (yy / H), 0.42 - 0.06 * (xx / W)], axis=-1)
+    back += 0.02 * rng.standard_normal((H, W, 1))
+    img = back.copy()
+    img[20:70, 20:80] = (0.55, 0.55, 0.55)  # neutral grey card
+    img[20:70, 240:300] = (0.85, 0.85, 0.84)  # white card
+    face = ((xx - 160) / 34.0) ** 2 + ((yy - 85) / 44.0) ** 2 <= 1.0
+    img[face] = (0.80, 0.56, 0.44)  # skin tone
+    body = (yy > 125) & (np.abs(xx - 160) < 60)
+    img[body] = (0.18, 0.22, 0.35)
+    for k, c in enumerate(((0.7, 0.2, 0.2), (0.2, 0.6, 0.25), (0.2, 0.3, 0.7))):
+        img[140:170, 20 + 30 * k : 45 + 30 * k] = c
+    return {"img": np.clip(img, 0, 1), "face": face, "grey": np.s_[20:70, 20:80], "white": np.s_[20:70, 240:300]}
+
+
+def _to8(img: np.ndarray) -> np.ndarray:
+    return (np.clip(img, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+
+
+# ---------------------------------------------------------------------------
+# 2. Mixed frame rates + VFR
+# ---------------------------------------------------------------------------
+MIXED_FPS = {"cam_25": ("25", 0.0), "cam_2997": ("30000/1001", 0.36), "cam_30": ("30", 0.72), "cam_50": ("50", 1.04), "cam_5994": ("60000/1001", 1.48)}
+
+
+def mixed_fps(base: Path, *, duration_sec: float = 10.0, sr: int = SR, seed: int = 31) -> Scenario:
+    d = base / "mixed_fps"
+    d.mkdir(parents=True, exist_ok=True)
+    acts = turn_activity(duration_sec + 3, sr, seed=seed)
+    speech = 0.5 * speech_like(duration_sec + 3, sr, seed=seed + 1, activity=acts[0]) + 0.4 * speech_like(duration_sec + 3, sr, seed=seed + 2, f0_hz=205, activity=acts[1])
+    sc = _scene(seed)["img"]
+    files: dict[str, Path] = {}
+    truth: dict[str, Any] = {"offsets_sec": {}, "fps": {}}
+    for name, (fps, off) in MIXED_FPS.items():
+        f = float(Fraction(fps))
+        n = round((duration_sec + off) * f)
+        audio = np.concatenate([0.0005 * np.random.default_rng(seed).standard_normal(round(off * sr)), speech[: round(duration_sec * sr)]])
+
+        def frame(i: int, _f: float = f) -> np.ndarray:
+            img = sc.copy()
+            x = int(40 + (i / _f) * 20) % (W - 30)
+            img[100:120, x : x + 20] = (0.9, 0.9, 0.2)
+            return _to8(img)
+
+        files[name] = write_av(d / f"{name}.mp4", frame, n, fps, audio, sr)
+        truth["offsets_sec"][name] = off
+        truth["fps"][name] = f
+    # Variable frame rate phone clip (timestamps irregular: 1.4/30, 1.4/30, 0.2/30 s ...)
+    files["phone_vfr"] = write_av(d / "phone_vfr.mp4", lambda i: _to8(sc), 240, 30, speech[: 8 * sr], sr, setpts="(N+0.4*mod(N\\,3))/(30*TB)")
+    truth["vfr"] = ["phone_vfr"]
+    return Scenario("mixed_fps", files, truth)
+
+
+# ---------------------------------------------------------------------------
+# 3. Duplicates and a truncated file
+# ---------------------------------------------------------------------------
+def duplicates_and_corrupt(base: Path, *, duration_sec: float = 8.0, sr: int = SR, seed: int = 41) -> Scenario:
+    d = base / "duplicates"
+    d.mkdir(parents=True, exist_ok=True)
+    acts = turn_activity(duration_sec, sr, seed=seed)
+    host = speech_like(duration_sec, sr, seed=seed + 1, activity=acts[0])
+    guest = speech_like(duration_sec, sr, seed=seed + 2, f0_hz=210, activity=acts[1])
+    sc = _scene(seed)["img"]
+    n = round(duration_sec * 25)
+
+    def frame(i: int) -> np.ndarray:
+        img = sc.copy()
+        img[90:110, (10 + 2 * i) % 300 : (10 + 2 * i) % 300 + 16] = (0.95, 0.9, 0.1)
+        return _to8(img)
+
+    files = {"cam_host": write_av(d / "cam_host.mp4", frame, n, 25, 0.6 * host + 0.15 * guest, sr)}
+    files["cam_guest"] = write_av(d / "cam_guest.mp4", lambda i: _to8(sc[:, ::-1]), n, 25, 0.15 * host + 0.6 * guest, sr)
+    shutil.copyfile(files["cam_host"], d / "cam_host_COPY.mp4")
+    files["cam_host_copy"] = d / "cam_host_COPY.mp4"
+    _ffmpeg(["-i", str(files["cam_host"]), "-c:v", "mpeg4", "-q:v", "5", "-c:a", "pcm_s16le", str(d / "A001_C003_proxy.mov")])
+    files["cam_host_proxy"] = d / "A001_C003_proxy.mov"
+    # Truncated without faststart: the index (moov) is at the end and gets cut off
+    raw = files["cam_host"].read_bytes()
+    (d / "cam_wide_truncated.mp4").write_bytes(raw[: int(len(raw) * 0.6)])
+    files["cam_wide_truncated"] = d / "cam_wide_truncated.mp4"
+    truth = {"duplicates": [{"cam_host", "cam_host_copy"}, {"cam_host", "cam_host_proxy"}, {"cam_host_copy", "cam_host_proxy"}], "not_duplicates": [{"cam_host", "cam_guest"}], "unreadable": ["cam_wide_truncated"]}
+    return Scenario("duplicates_and_corrupt", files, truth)
+
+
+# ---------------------------------------------------------------------------
+# 4-6. Audio: clipped mic, crosstalk/bleed, noisy room
+# ---------------------------------------------------------------------------
+def audio_mics(base: Path, *, duration_sec: float = 30.0, sr: int = SR, seed: int = 51) -> Scenario:
+    """Three lavalier recorders with known level, bleed, clipping and noise floor.
+
+    * ``mic_host``: host direct at -20 dBFS speech RMS, guest bleed at -14 dB relative, clean floor.
+    * ``mic_guest``: guest direct 7 dB quieter than the host mic, host bleed -18 dB, **hard clipped**
+      between 12 s and 18 s (gain x4 into a 0.98 ceiling).
+    * ``mic_noisy``: third speaker in a noisy room: broadband room noise at -42 dBFS RMS.
+    """
+    d = base / "audio_mics"
+    d.mkdir(parents=True, exist_ok=True)
+    acts = turn_activity(duration_sec, sr, seed=seed, n_speakers=3)
+    sp = [speech_like(duration_sec, sr, seed=seed + k, f0_hz=f, activity=acts[k]) for k, f in enumerate((130.0, 205.0, 170.0))]
+
+    def _rms_db(x: np.ndarray, act: np.ndarray) -> float:
+        sel = x[act > 0]
+        return float(20 * np.log10(np.sqrt(np.mean(sel * sel)) + 1e-12))
+
+    def _scale(x: np.ndarray, act: np.ndarray, target_db: float) -> np.ndarray:
+        return x * 10 ** ((target_db - _rms_db(x, act)) / 20.0)
+
+    rng = np.random.default_rng(seed + 7)
+    floor = 10 ** (-66 / 20.0)
+    host_d = _scale(sp[0], acts[0], -20.0)
+    guest_d = _scale(sp[1], acts[1], -27.0)
+    third_d = _scale(sp[2], acts[2], -22.0)
+    mic_host = host_d + _scale(sp[1], acts[1], -20.0 - 14.0) + floor * rng.standard_normal(host_d.size)
+    mic_guest = guest_d + _scale(sp[0], acts[0], -27.0 - 18.0) + floor * rng.standard_normal(host_d.size)
+    a, b = round(12 * sr), round(18 * sr)
+    seg = mic_guest[a:b] * 4.0
+    clipped = np.clip(seg, -0.98, 0.98)
+    clip_truth = float(np.mean(np.abs(seg) > 0.98))
+    mic_guest[a:b] = clipped
+    sos = butter(2, [200.0 / (0.5 * sr), 4000.0 / (0.5 * sr)], btype="bandpass", output="sos")
+    room = sosfilt(sos, rng.standard_normal(host_d.size))
+    room *= 10 ** (-42 / 20.0) / float(np.sqrt(np.mean(room * room)))
+    mic_noisy = third_d + room
+    files = {"mic_host": write_wav(d / "mic_host.wav", mic_host, sr), "mic_guest": write_wav(d / "mic_guest.wav", mic_guest, sr), "mic_noisy": write_wav(d / "mic_noisy.wav", mic_noisy, sr)}
+    truth = {
+        "speech_rms_dbfs": {"mic_host": -20.0, "mic_guest": -27.0, "mic_noisy": -22.0},
+        "bleed_db": {"mic_host<-guest": -14.0, "mic_guest<-host": -18.0},
+        "clipped": {"mic_guest": {"start_sec": 12.0, "end_sec": 18.0, "clipped_sample_share_in_region": round(clip_truth, 4)}},
+        "noise_floor_dbfs": {"mic_host": -66.0, "mic_guest": -66.0, "mic_noisy": -42.0},
+        "speech_band_snr_db_approx": {"mic_noisy": 20.0},
+        "activity_seed": seed,
+    }
+    return Scenario("audio_mics", files, truth)
+
+
+# ---------------------------------------------------------------------------
+# 7-8. Colour: colour-cast camera and lighting change mid-recording
+# ---------------------------------------------------------------------------
+CAST_GAINS = (1.16, 1.0, 0.80)
+CAST_EXPOSURE = 0.86
+
+
+def colour_cameras(base: Path, *, duration_sec: float = 8.0, seed: int = 61, change_at_sec: float = 4.0) -> Scenario:
+    """Two angles of one scene: ``cam_ref`` neutral, ``cam_cast`` with a warm cast and -1.3 EV-ish exposure,
+    plus ``cam_light`` whose lighting changes at ``change_at_sec`` (warmer and darker)."""
+    d = base / "colour"
+    d.mkdir(parents=True, exist_ok=True)
+    s = _scene(seed)
+    img = s["img"]
+    n = round(duration_sec * 25)
+    rng = np.random.default_rng(seed)
+    noise = [0.006 * rng.standard_normal((H, W, 1)) for _ in range(4)]
+    files = {"cam_ref": write_av(d / "cam_ref.mp4", lambda i: _to8(img + noise[i % 4]), n, 25)}
+    cast = np.clip(img * np.array(CAST_GAINS) * CAST_EXPOSURE, 0, 1)
+    files["cam_cast"] = write_av(d / "cam_cast.mp4", lambda i: _to8(cast[:, ::-1] + noise[(i + 1) % 4]), n, 25)
+    light_after = np.clip(img * np.array((1.10, 1.0, 0.86)) * 0.82, 0, 1)
+    files["cam_light"] = write_av(d / "cam_light.mp4", lambda i: _to8((img if i / 25.0 < change_at_sec else light_after) + noise[(i + 2) % 4]), n, 25)
+    truth = {"cast_gains": CAST_GAINS, "cast_exposure": CAST_EXPOSURE, "light_change_at_sec": change_at_sec, "light_after_gains": (1.10, 1.0, 0.86), "light_after_exposure": 0.82, "face_rgb": (0.80, 0.56, 0.44), "grey_rgb": (0.55, 0.55, 0.55)}
+    return Scenario("colour_cameras", files, truth)
+
+
+# ---------------------------------------------------------------------------
+# 9. Moving subject with analytic ground-truth matte
+# ---------------------------------------------------------------------------
+def moving_subject(base: Path, *, duration_sec: float = 6.0, fps: int = 25, seed: int = 71, static_tail_sec: float = 0.0) -> Scenario:
+    """Skin-toned head-and-shoulders shape moving left to right over a textured backdrop."""
+    d = base / "moving"
+    d.mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(seed)
+    yy, xx = np.mgrid[0:H, 0:W]
+    back = np.stack([0.30 + 0.25 * ((xx // 16 + yy // 16) % 2), 0.42 + 0.05 * np.sin(xx / 9.0), 0.48 - 0.1 * (yy / H)], axis=-1) + 0.015 * rng.standard_normal((H, W, 1))
+    n = round(duration_sec * fps)
+    move_frames = round((duration_sec - static_tail_sec) * fps)
+
+    def centre(i: int) -> float:
+        k = min(i, move_frames - 1)
+        return 70.0 + 180.0 * k / max(1, move_frames - 1)
+
+    def mask(i: int) -> np.ndarray:
+        cx = centre(i)
+        head = ((xx - cx) / 26.0) ** 2 + ((yy - 70) / 34.0) ** 2 <= 1.0
+        torso = ((xx - cx) / 52.0) ** 2 + ((yy - 165) / 60.0) ** 2 <= 1.0
+        return head | torso
+
+    def frame(i: int) -> np.ndarray:
+        img = back.copy()
+        m = mask(i)
+        img[m] = (0.82, 0.58, 0.46)
+        return _to8(img)
+
+    files = {"cam_host": write_av(d / "cam_host.mp4", frame, n, fps, 0.3 * speech_like(duration_sec, SR, seed=seed, f0_hz=150.0))}
+    return Scenario("moving_subject", files, {"fps": fps, "n_frames": n, "mask_fn": mask, "centre_fn": centre, "static_tail_sec": static_tail_sec})
+
+
 def true_source_time(cam_truth: dict[str, Any], master_sec: float) -> float | None:
     for seg in cam_truth["segments"]:
         if seg["master_start_sec"] <= master_sec < seg["master_end_sec"]:
@@ -197,7 +429,13 @@ def in_gap(cam_truth: dict[str, Any], master_sec: float, pad: float = 0.0) -> bo
 __all__ = [
     "SR",
     "Scenario",
+    "audio_mics",
+    "colour_cameras",
     "drift_dropout",
+    "duplicates_and_corrupt",
+    "mixed_fps",
+    "moving_subject",
+    "write_av",
     "have_media_tools",
     "in_gap",
     "speech_like",

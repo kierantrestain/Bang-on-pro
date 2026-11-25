@@ -299,12 +299,15 @@ _ROLE_HINTS = (
     ("reaction", r"react|audience|crowd"),
     ("audio_recorder", r"\b(mic|lav|zoom|recorder|audio)\b"),
 )
+_KIND_ROLES = {"screen_capture": "screen_capture", "graphics_or_still": "graphics"}
 
 
-def _guess_role(path: str, has_video: bool) -> str:
+def _guess_role(path: str, has_video: bool, source_kind: str | None = None) -> str:
     name = Path(path).stem.lower().replace("_", " ").replace("-", " ")
-    if not has_video:
+    if not has_video or (source_kind or "").startswith("audio_recorder"):
         return "audio_recorder"
+    if source_kind in _KIND_ROLES:
+        return _KIND_ROLES[source_kind]
     for role, pat in _ROLE_HINTS:
         if re.search(pat, name):
             return role
@@ -312,6 +315,8 @@ def _guess_role(path: str, has_video: bool) -> str:
 
 
 def run_media_ingest(ctx: AgentContext) -> AgentOutcome:
+    from bangonpro.ai_engine.department import media_ingest as mi
+
     st = ctx.state
     profile_fps = st.fps
     cams = dict(st.input_camera_files)
@@ -322,9 +327,11 @@ def run_media_ingest(ctx: AgentContext) -> AgentOutcome:
     total_duration = 0.0
     fps_seen: Counter[str] = Counter()
     roles = (st.profile.get("camera_roles") or {})
+    issues: list[dict[str, Any]] = []
+    fps_map: dict[str, Any] = {}
     for idx, (cam_id, path) in enumerate(sorted(cams.items())):
         ctx.token.check(f"ingest {cam_id}")
-        ctx.progress(idx / max(1, len(cams)), f"Inspecting {cam_id}")
+        ctx.progress(0.6 * idx / max(1, len(cams)), f"Inspecting {cam_id}")
         p = Path(path)
         if not p.is_file():
             missing.append(cam_id)
@@ -338,7 +345,17 @@ def run_media_ingest(ctx: AgentContext) -> AgentOutcome:
         sha = compute_file_sha256(p)
         if not cached_sha:
             ctx.cache.put("sha256", "1", list(ident), sha)
-        probe = probe_media_file(p)
+        insp = mi.inspect_source(p, sha, ctx.cache)
+        if insp.get("cache_hit"):
+            hits.append(f"ingest:{cam_id}")
+        for iss in insp.get("issues", []):
+            issues.append({**iss, "camera_id": cam_id})
+        try:
+            probe = probe_media_file(p)
+        except (OSError, RuntimeError, ValueError) as exc:
+            missing.append(cam_id)
+            inventory.append({"camera_id": cam_id, "path": str(p), "status": "unreadable", "sha256": sha, "error": str(exc), "action": insp.get("action", "")})
+            continue
         has_video = bool(probe.get("video_codec")) and int(probe.get("width", 0) or 0) > 0
         fps_num = int(probe.get("fps_num", 0) or 0) if has_video else 0
         fps_den = int(probe.get("fps_den", 1) or 1)
@@ -349,7 +366,12 @@ def run_media_ingest(ctx: AgentContext) -> AgentOutcome:
         total_bytes += size
         dur = float(probe.get("duration_sec", 0.0) or 0.0)
         total_duration = max(total_duration, dur)
-        role = roles.get(cam_id) or _guess_role(str(p), has_video)
+        kind = insp.get("source_kind")
+        role = roles.get(cam_id) or _guess_role(str(p), has_video, kind)
+        ident_info = insp.get("identity") or {}
+        conform = mi.conform_plan(fps, profile_fps) if has_video and fps else None
+        if conform:
+            fps_map[cam_id] = conform
         inventory.append(
             {
                 "camera_id": cam_id,
@@ -364,26 +386,52 @@ def run_media_ingest(ctx: AgentContext) -> AgentOutcome:
                 "width": int(probe.get("width", 0) or 0),
                 "height": int(probe.get("height", 0) or 0),
                 "role_label": role,
-                "role_source": "profile" if cam_id in roles else "filename_heuristic",
+                "role_source": "profile" if cam_id in roles else ("media_classification" if kind in _KIND_ROLES or not has_video else "filename_heuristic"),
                 "conform_required": bool(has_video and fps and abs(fps - profile_fps) > 0.01),
+                # V1.2.2 identification / validation
+                "source_kind": kind,
+                "classification_reasons": insp.get("classification_reasons", []),
+                "device": {k: ident_info.get(k) for k in ("make", "model", "software", "originator", "serial", "handler_names", "creation_time", "timecode", "timecode_sec", "bwf_time_reference_sec")},
+                "streams": {k: ident_info.get(k) for k in ("container", "video_codec", "pix_fmt", "fps_avg", "fps_r", "video_duration_sec", "audio_codec", "audio_sample_rate", "audio_channels", "audio_channel_layout", "audio_bit_depth", "audio_duration_sec", "container_duration_sec")},
+                "vfr": insp.get("vfr", {}),
+                "decode_probes": insp.get("decode_probes", []),
+                "video_dhash": insp.get("video_dhash", []),
+                "audio_channels_check": {k: v for k, v in (insp.get("audio") or {}).items() if k != "level_env_db"},
+                "_lev": (insp.get("audio") or {}).get("level_env_db"),
+                "frame_rate_conform": conform,
+                "validation_issue_codes": [i["code"] for i in insp.get("issues", [])],
+                "_fp": np.frombuffer(bytes.fromhex(insp.get("fingerprint_hex", "")), dtype=np.uint16) if insp.get("fingerprint_hex") else None,
             }
         )
+    duplicates = mi.find_duplicates(inventory)
+    continuations = mi.continuation_groups(inventory)
+    for e in inventory:
+        e.pop("_fp", None)
+        e.pop("_lev", None)
     mixed = len(fps_seen) > 1 or any(i.get("conform_required") for i in inventory)
     out_dir = Path(st.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    visual = mi.run_visual_sampling(ctx, inventory)
     free = shutil.disk_usage(out_dir).free
     # Analysis artefacts are small; a render needs ~ bitrate x duration (+ derivatives)
     need = int(ctx.options.min_free_bytes)
     if st.intent.export_video:
         need += int(total_duration * (12_000_000 / 8) * 2.5)
     storage = {"free_bytes": int(free), "required_bytes_estimate": need, "sufficient": free >= need}
+    unreadable = [i["camera_id"] for i in inventory if i.get("status") == "unreadable"]
     report = {
         "inputs": inventory,
         "missing_camera_ids": missing,
+        "unreadable_camera_ids": unreadable,
         "mixed_frame_rates": mixed,
         "frame_rates_seen": dict(fps_seen),
         "project_fps": profile_fps,
         "storage": storage,
+        "duplicates": duplicates,
+        "continuation_files": continuations,
+        "validation_issues": issues,
+        "frame_rate_conform": fps_map,
+        "visual_analysis": visual.get("summary", {}),
     }
     inv_path = write_json_atomic(out_dir / "media_inventory.json", report)
     st.metadata["media_inventory"] = report
@@ -395,20 +443,33 @@ def run_media_ingest(ctx: AgentContext) -> AgentOutcome:
         )
     if missing and len(missing) == len(cams):
         raise FileNotFoundError(f"All source media are missing: {', '.join(missing)}")
-    review = [f"Missing media: {', '.join(missing)}. The job continued with the remaining sources"] if missing else []
+    absent = [c for c in missing if c not in unreadable]
+    review = [f"Missing media: {', '.join(absent)}. The job continued with the remaining sources"] if absent else []
+    for i in inventory:
+        if i.get("status") == "unreadable":
+            review.append(f"Unreadable media {i['camera_id']} ({Path(i['path']).name}): {i.get('action') or i.get('error')}. The job continued without it")
     if mixed:
-        review.append(f"Mixed frame rates ({', '.join(f'{k} fps ×{v}' for k, v in sorted(fps_seen.items()))}) conformed to {profile_fps:g} fps")
+        plans = "; ".join(f"{c}: {v['method']}" for c, v in sorted(fps_map.items()) if v.get("method") != "native")
+        review.append(f"Mixed frame rates ({', '.join(f'{k} fps ×{v}' for k, v in sorted(fps_seen.items()))}) conformed to {profile_fps:g} fps" + (f" ({plans})" if plans else ""))
     unl = [i["camera_id"] for i in inventory if i.get("role_label") == "unlabelled"]
     if unl:
         review.append(f"Unlabelled angles {', '.join(unl)}: assign camera roles in the profile for better coverage")
+    for dup in duplicates:
+        a, b = dup["camera_ids"]
+        why = {"identical_sha256": "identical file contents (SHA-256)", "same_audio_fingerprint": "the same audio and duration under a different name (re-wrap or transcode)", "same_video_hash": "the same pictures and duration"}[dup["kind"]]
+        review.append(f"Duplicate source: {b} and {a} have {why}. Remove one from the job, or the same angle is synced and cut twice")
+    for c in continuations:
+        review.append(f"{c['camera_ids'][1]} continues {c['camera_ids'][0]} from the same {c['device']} after a {c['gap_sec']:.0f}s stop; both are synced independently")
+    review += [i["message"] for i in issues if i.get("severity") in ("warning", "error") and i.get("code") != "UNREADABLE_MEDIA"]
     ctx.progress(1.0, f"Inventoried {len(inventory)} sources")
     return AgentOutcome(
-        confidence=0.99 if not missing else 0.8,
-        summary=f"{len(inventory) - len(missing)} sources verified, {len(missing)} missing, mixed_fps={mixed}",
+        confidence=(0.99 if not missing else 0.8) * (0.9 if any(i.get("severity") == "error" for i in issues) else 1.0),
+        summary=f"{len(inventory) - len(missing)} sources verified, {len(missing)} missing, mixed_fps={mixed}" + (f", {len(duplicates)} duplicate(s)" if duplicates else "") + (f", {len(issues)} validation finding(s)" if issues else ""),
         outputs={"media_inventory_json": str(inv_path)},
         review_items=review,
-        cache_hits=hits,
-        metrics={"total_bytes": total_bytes, "max_duration_sec": round(total_duration, 3)},
+        cache_hits=hits + visual.get("cache_hits", []),
+        metrics={"total_bytes": total_bytes, "max_duration_sec": round(total_duration, 3), "duplicates_found": len(duplicates), "validation_issues": dict(Counter(i["code"] for i in issues)), "visual_analysis_sec": visual.get("elapsed_sec"), "visual_cameras": visual.get("cameras", [])},
+        est_external_cost_usd=0.0,
     )
 
 
@@ -416,8 +477,11 @@ def run_media_ingest(ctx: AgentContext) -> AgentOutcome:
 # Synchronisation Agent (engine: GCC-PHAT)
 # ---------------------------------------------------------------------------
 def run_synchronisation(ctx: AgentContext) -> AgentOutcome:
+    from bangonpro.ai_engine.department.media_intel import finish_synchronisation
+
     st = ctx.state
     batches = _norm_batches(run_ingest_sync_agent(st, ctx.token, ctx.progress))
+    extra = finish_synchronisation(ctx, batches)  # V1.2.2: drift, segments, visual analysis on the master clock
     sr = st.sync_result
     conf = dict(sr.confidences) if sr else {}
     low = [c for c, v in conf.items() if v < 0.5 and sr and c != sr.reference_camera_id]
@@ -425,10 +489,12 @@ def run_synchronisation(ctx: AgentContext) -> AgentOutcome:
     return AgentOutcome(
         batches=batches,
         confidence=mean_conf,
-        summary=f"Synchronised {len(conf)} sources to {sr.reference_camera_id if sr else 'n/a'} via {sr.method if sr else 'n/a'}",
-        rationale="Audio cross-correlation (GCC-PHAT) against the reference recording",
-        review_items=[f"Low sync confidence for {', '.join(low)}: verify alignment"] if low else [],
-        metrics={"offsets_sec": dict(sr.offsets_sec) if sr else {}, "confidences": conf},
+        summary=f"Synchronised {len(conf)} sources to {sr.reference_camera_id if sr else 'n/a'} via {sr.method if sr else 'n/a'}" + extra.get("summary_suffix", ""),
+        rationale="Audio cross-correlation (GCC-PHAT) against the reference recording, measured in windows across the whole recording for clock drift and restarts",
+        review_items=([f"Low sync confidence for {', '.join(low)}: verify alignment"] if low else []) + extra.get("review", []),
+        metrics={"offsets_sec": dict(sr.offsets_sec) if sr else {}, "confidences": conf, **extra.get("metrics", {})},
+        cache_hits=extra.get("cache_hits", []),
+        est_external_cost_usd=0.0,
     )
 
 

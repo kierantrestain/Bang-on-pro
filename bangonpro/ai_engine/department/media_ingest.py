@@ -29,7 +29,7 @@ from typing import Any
 
 import numpy as np
 
-INGEST_VERSION = "1.2.2-ingest-1"
+INGEST_VERSION = "1.2.2-ingest-2"
 _ERROR_PATTERNS = re.compile(
     r"(moov atom not found|invalid data found|error while decoding|corrupt|partial file|truncat|"
     r"invalid nal|missing picture|end of file|could not find codec|error splitting|concealing)",
@@ -326,7 +326,13 @@ def inspect_source(path: str | Path, sha256: str, cache: Any = None) -> dict[str
                 issues.append({"code": "SILENT_AUDIO", "severity": "warning", "message": f"{ident['filename']}: the audio is silent in the first minute (mic muted, unplugged or wrong input). It cannot be used for sync or dialogue."})
             elif silent:
                 issues.append({"code": "SILENT_CHANNEL", "severity": "info", "message": f"{ident['filename']}: channel(s) {', '.join(str(i + 1) for i in silent)} of {ch} are silent; map the live channel(s) only so the mix is not 6 dB low."})
-            fp = fingerprint(pcm.mean(axis=1))
+            mono = pcm.mean(axis=1)
+            fp = fingerprint(mono)
+            hop = 400  # 50 ms at 8 kHz, aligned with the fingerprint frames
+            k = mono.size // hop
+            if k:
+                lev = 10 * np.log10(np.mean(mono[: k * hop].astype(np.float64).reshape(k, hop) ** 2, axis=1) + 1e-12)
+                audio["level_env_db"] = [int(round(max(-99.0, v))) for v in lev]
     elif ident.get("video_codec") and kind in ("camera_video_only",):
         issues.append({"code": "NO_AUDIO", "severity": "warning", "message": f"{ident['filename']}: camera has no audio track, so it cannot be synchronised by sound. Align it by timecode or a visual slate, or record scratch audio."})
     result = {
@@ -348,7 +354,20 @@ def inspect_source(path: str | Path, sha256: str, cache: Any = None) -> dict[str
     return {**result, "cache_hit": False}
 
 
-def find_duplicates(entries: list[dict[str, Any]], *, max_ber: float = 0.15) -> list[dict[str, Any]]:
+def _level_ratio_std(la: list[int] | None, lb: list[int] | None, shift: int) -> float | None:
+    if not la or not lb:
+        return None
+    x = np.asarray(la[max(0, shift) :], dtype=float)
+    y = np.asarray(lb[max(0, -shift) :], dtype=float)
+    n = min(x.size, y.size)
+    x, y = x[:n], y[:n]
+    act = (x > -55.0) & (y > -55.0)
+    if act.sum() < 20:
+        return None
+    return float(np.std(x[act] - y[act]))
+
+
+def find_duplicates(entries: list[dict[str, Any]], *, max_ber: float = 0.15, max_level_std_db: float = 1.5) -> list[dict[str, Any]]:
     """Group duplicate sources: identical SHA-256, same audio fingerprint + duration, or same video hash."""
     dups: list[dict[str, Any]] = []
     seen_pairs: set[tuple[str, str]] = set()
@@ -361,19 +380,28 @@ def find_duplicates(entries: list[dict[str, Any]], *, max_ber: float = 0.15) -> 
                 seen_pairs.add(pair)
                 continue
             da, db = float(a.get("duration_sec", 0)), float(b.get("duration_sec", 0))
-            same_dur = abs(da - db) <= max(0.25, 0.005 * max(da, db))
-            fa, fb = a.get("_fp"), b.get("_fp")
-            if same_dur and fa is not None and fb is not None and fa.size and fb.size:
-                ber, shift = fingerprint_ber(fa, fb)
-                if ber <= max_ber:
-                    dups.append({"camera_ids": list(pair), "kind": "same_audio_fingerprint", "evidence": {"bit_error_rate": round(ber, 4), "shift_ms": shift * 50, "duration_diff_sec": round(abs(da - db), 3)}})
-                    seen_pairs.add(pair)
-                    continue
+            if abs(da - db) > max(0.25, 0.005 * max(da, db)) or bool(a.get("has_video")) != bool(b.get("has_video")):
+                continue
             ha, hb = a.get("video_dhash") or [], b.get("video_dhash") or []
-            if same_dur and len(ha) == 3 and len(hb) == 3 and not (fa is not None and fa.size and fb is not None and fb.size):
-                dist = [bin(int(x, 16) ^ int(y, 16)).count("1") for x, y in zip(ha, hb, strict=True)]
-                if max(dist) <= 6:
-                    dups.append({"camera_ids": list(pair), "kind": "same_video_hash", "evidence": {"hamming": dist}})
+            video_dist = [bin(int(x, 16) ^ int(y, 16)).count("1") for x, y in zip(ha, hb, strict=True)] if len(ha) == len(hb) and ha else None
+            video_same = video_dist is not None and max(video_dist) <= 8
+            if a.get("has_video") and not video_same:
+                continue  # different pictures: never a duplicate, whatever the sound
+            fa, fb = a.get("_fp"), b.get("_fp")
+            if fa is not None and fb is not None and fa.size and fb.size:
+                ber, shift = fingerprint_ber(fa, fb)
+                lev_std = _level_ratio_std(a.get("_lev"), b.get("_lev"), shift)
+                # Same spectral fingerprint AND a constant level ratio over time: two microphones in one
+                # room share the fingerprint but their level ratio swings as speakers alternate.
+                if ber <= max_ber and lev_std is not None and lev_std <= max_level_std_db:
+                    ev = {"bit_error_rate": round(ber, 4), "level_ratio_std_db": round(lev_std, 2), "shift_ms": shift * 50, "duration_diff_sec": round(abs(da - db), 3)}
+                    if video_dist is not None:
+                        ev["video_hamming"] = video_dist
+                    dups.append({"camera_ids": list(pair), "kind": "same_audio_fingerprint", "evidence": ev})
+                    seen_pairs.add(pair)
+                continue
+            if video_same:
+                dups.append({"camera_ids": list(pair), "kind": "same_video_hash", "evidence": {"hamming": video_dist}})
     return dups
 
 
@@ -405,4 +433,63 @@ def continuation_groups(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
-__all__ = ["INGEST_VERSION", "classify", "continuation_groups", "find_duplicates", "fingerprint", "fingerprint_ber", "identify", "inspect_source"]
+def conform_plan(src_fps: float, seq_fps: float) -> dict[str, Any]:
+    """How a source frame rate maps onto the sequence (25/29.97/30/50/59.94 families)."""
+    if src_fps <= 0 or seq_fps <= 0:
+        return {"method": "unknown"}
+    r = src_fps / seq_fps
+    out: dict[str, Any] = {"source_fps": round(src_fps, 3), "sequence_fps": round(seq_fps, 3), "ratio": round(r, 5)}
+    if abs(r - 1.0) < 1e-3:
+        return {**out, "method": "native", "motion_quality": "exact"}
+    if abs(r - round(r)) < 2e-3 and round(r) >= 2:
+        return {**out, "method": f"drop {round(r) - 1} of every {round(r)} frames", "motion_quality": "clean"}
+    if abs(1.0 / r - round(1.0 / r)) < 2e-3 and round(1.0 / r) >= 2:
+        return {**out, "method": f"repeat each frame {round(1.0 / r)}x", "motion_quality": "clean"}
+    if abs(r - 1.0) < 0.0015:
+        every = 1.0 / abs(src_fps - seq_fps)
+        return {**out, "method": f"NTSC pull: one frame {'dropped' if r > 1 else 'repeated'} every {every:.0f}s", "motion_quality": "near_exact"}
+    return {**out, "method": "cadence conversion (uneven frame repetition)", "motion_quality": "judder_on_motion", "advice": "Motion will judder; shoot at the sequence rate or conform with optical-flow retiming for fast action"}
+
+
+_VISUAL_CONSUMERS = ("multicam_director", "colourist", "vfx")
+
+
+def run_visual_sampling(ctx: Any, inventory: list[dict[str, Any]]) -> dict[str, Any]:
+    """Sample every usable camera once (cached by content hash) for the visual consumers."""
+    import time
+
+    from bangonpro.ai_engine.department.media_visual import VISUAL_VERSION, analyse_camera, decimate
+
+    st = ctx.state
+    act = (ctx.plan or {}).get("activation", {}) or {}
+    flags = (ctx.plan or {}).get("brief_flags", {}) or {}
+    want = any((act.get(a) or {}).get("active") for a in _VISUAL_CONSUMERS) or bool(flags.get("social"))
+    if not want:
+        st.metadata.pop("visual_analysis_source", None)
+        return {"summary": {"skipped": "no visual consumer active (director, colourist, VFX, social)"}, "cache_hits": [], "cameras": []}
+    rules = st.profile.get("colour_rules", {}) or {}
+    interval = rules.get("visual_sample_interval_sec")
+    t0 = time.perf_counter()
+    out: dict[str, Any] = {}
+    summary: dict[str, Any] = {}
+    hits: list[str] = []
+    for e in inventory:
+        if e.get("status") != "ok" or not e.get("has_video") or e.get("source_kind") in ("graphics_or_still",):
+            continue
+        ctx.token.check(f"visual sampling {e['camera_id']}")
+        ctx.progress(0.6 + 0.35 * len(out) / max(1, len(inventory)), f"Sampling pictures of {e['camera_id']}")
+        key = {"sha": e["sha256"], "interval": interval, "w": e["width"], "h": e["height"], "dur": e["duration_sec"]}
+        va = ctx.cache.get("visual_samples", VISUAL_VERSION, key)
+        if va:
+            hits.append(f"visual:{e['camera_id']}")
+        else:
+            va = analyse_camera(e["path"], duration=float(e["duration_sec"]), width=int(e["width"]), height=int(e["height"]), interval_sec=interval)
+            va = decimate(va)
+            ctx.cache.put("visual_samples", VISUAL_VERSION, key, va)
+        out[e["camera_id"]] = va
+        summary[e["camera_id"]] = {"samples": va.get("sampling", {}).get("samples"), "mode": va.get("sampling", {}).get("mode"), "unavailable_source_clock": va.get("unavailable_intervals", []), "static_video": va.get("static_video"), "scene_cuts": len(va.get("scene_cuts_sec", []))}
+    st.metadata["visual_analysis_source"] = out
+    return {"summary": summary, "cache_hits": hits, "cameras": sorted(out), "elapsed_sec": round(time.perf_counter() - t0, 3)}
+
+
+__all__ = ["INGEST_VERSION", "classify", "conform_plan", "continuation_groups", "find_duplicates", "fingerprint", "fingerprint_ber", "identify", "inspect_source", "run_visual_sampling"]
