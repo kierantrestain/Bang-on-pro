@@ -83,6 +83,20 @@ class SyncResult:
     peak_snr: dict[str, float] = field(default_factory=dict)
     common_duration_sec: float = 0.0
     warnings: list[str] = field(default_factory=list)
+    # V1.2.2: clock drift and interrupted recordings.
+    # Convention: source_sec = master_sec + offset + drift_ppm * 1e-6 * master_sec, where
+    # ``offset`` is the offset at master t=0 (regression intercept). ``segment_offsets``
+    # optionally overrides this piecewise: [{"master_start_sec", "master_end_sec",
+    # "offset_sec", "drift_ppm"}] for recordings that stopped and restarted.
+    drift_ppm: dict[str, float] = field(default_factory=dict)
+    segment_offsets: dict[str, list[dict[str, float]]] = field(default_factory=dict)
+
+    def source_time(self, camera_id: str, master_sec: float) -> float:
+        """Map a master-clock time to the source file's own clock (drift and segments aware)."""
+        for seg in self.segment_offsets.get(camera_id, []) or []:
+            if float(seg.get("master_start_sec", 0.0)) <= master_sec < float(seg.get("master_end_sec", float("inf"))):
+                return master_sec + float(seg.get("offset_sec", 0.0)) + float(seg.get("drift_ppm", 0.0)) * 1e-6 * master_sec
+        return master_sec + float(self.offsets_sec.get(camera_id, 0.0)) + float(self.drift_ppm.get(camera_id, 0.0)) * 1e-6 * master_sec
 
 
 @dataclass

@@ -778,7 +778,6 @@ def run_rough_cut_multicam_agent(
 
         cam_id = sp["camera_id"]
         v_asset = state.media_assets[cam_id]
-        v_offset = state.sync_result.offsets_sec.get(cam_id, 0.0)
 
         # Pick master independent recorder if present, else active speaker's mic for A1
         if master_recorder_id is not None:
@@ -791,10 +790,10 @@ def run_rough_cut_multicam_agent(
             ):
                 audio_cam_id = audio_fallback_cam
         a_asset = state.media_assets[audio_cam_id]
-        a_offset = state.sync_result.offsets_sec.get(audio_cam_id, 0.0)
 
-        v_src_in_sec = max(0.0, min(v_asset.duration_sec - (1.0 / fps), m_in + v_offset))
-        a_src_in_sec = max(0.0, min(a_asset.duration_sec - (1.0 / fps), m_in + a_offset))
+        # V1.2.2: drift/segment-aware mapping (identical to m_in + offset when no drift is measured)
+        v_src_in_sec = max(0.0, min(v_asset.duration_sec - (1.0 / fps), state.sync_result.source_time(cam_id, m_in)))
+        a_src_in_sec = max(0.0, min(a_asset.duration_sec - (1.0 / fps), state.sync_result.source_time(audio_cam_id, m_in)))
 
         v_src_in_frame = state.sec_to_frame(v_src_in_sec)
         a_src_in_frame = state.sec_to_frame(a_src_in_sec)
