@@ -1,4 +1,4 @@
-# Bang On Pro — Core Python Dependencies (Runtime & Verification, V1.2.0)
+# Bang On Pro — Core Python Dependencies (Runtime & Verification, V1.2.2)
 # For exact reproducible installs (including transitive dependencies), use:
 #   pip install -r requirements-bangonpro.lock
 # Optional heavy ML backends (faster-whisper, whisperx, sam2, auto-editor) are

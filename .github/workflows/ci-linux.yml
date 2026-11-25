@@ -9,6 +9,7 @@ on:
       - main
       - "bangonpro/**"
       - "feat/**"
+      - "claude/**"
   pull_request:
     branches:
       - main
