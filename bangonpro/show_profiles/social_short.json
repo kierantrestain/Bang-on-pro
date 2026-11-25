@@ -2,7 +2,7 @@
   "schema_version": "1.0",
   "profile_id": "social_short",
   "display_name": "Social Short (9:16)",
-  "description": "Fast-paced vertical social cut from a single or multi-camera source: tight silence removal, burned-in captions and -14 LUFS mobile loudness.",
+  "description": "Vertical 9:16 social short: fast pacing, burned-in large captions, subject-first framing; -14 LUFS / -1 dBTP to match platform normalisation.",
   "format_type": "social",
   "video_spec": {
     "width": 1080,
@@ -88,13 +88,14 @@
   "audio_rules": {
     "target_lufs": -14.0,
     "loudness_target_lufs": -14.0,
-    "true_peak_dbtp": -1.5,
+    "true_peak_dbtp": -1.0,
     "highpass_hz": 80.0,
     "enable_denoise": true,
     "enable_compressor": true,
     "enable_mic_level_matching": true,
     "max_mic_trim_db": 24.0,
-    "music_duck_db": -18.0
+    "music_duck_db": -18.0,
+    "loudness_standard": "Social platforms (-14 LUFS integrated)"
   },
   "graphics_rules": {
     "enable_captions": true,
@@ -137,7 +138,7 @@
     "audio_sample_rate": 48000,
     "audio_channels": 2,
     "target_lufs": -14.0,
-    "true_peak_dbtp": -1.5,
+    "true_peak_dbtp": -1.0,
     "video_bitrate": "10M",
     "audio_bitrate": "192k"
   },

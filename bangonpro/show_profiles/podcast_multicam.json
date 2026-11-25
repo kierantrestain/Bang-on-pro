@@ -2,7 +2,7 @@
   "schema_version": "1.0",
   "profile_id": "podcast_multicam",
   "display_name": "Podcast 4-Camera Studio",
-  "description": "4-camera podcast and studio interview profile with conversational pacing, speaker close-ups, periodic wide resets, and -16 LUFS web/podcast mastering.",
+  "description": "4-camera podcast and studio interview: conversational pacing, speaker close-ups, reaction cutaways, periodic wide resets; -16 LUFS / -1.5 dBTP for podcast and online platforms.",
   "format_type": "podcast",
   "video_spec": {
     "width": 1920,
@@ -94,7 +94,8 @@
     "enable_compressor": true,
     "enable_mic_level_matching": true,
     "max_mic_trim_db": 24.0,
-    "music_duck_db": -18.0
+    "music_duck_db": -18.0,
+    "loudness_standard": "Podcast / online video (-16 LUFS integrated)"
   },
   "graphics_rules": {
     "enable_captions": true,

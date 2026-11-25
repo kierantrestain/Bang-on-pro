@@ -2,7 +2,7 @@
   "schema_version": "1.0",
   "profile_id": "daily_news",
   "display_name": "Daily News Broadcast Desk",
-  "description": "Broadcast news desk and B-roll bulletin profile with crisp silence removal, anchor lower-thirds, newsroom chyron styling, and strict delivery specs.",
+  "description": "Daily news bulletin: anchor desk plus B-roll, tight pacing between items, broadcast-neutral colour; EBU R128 (-23 LUFS, -1 dBTP). For ATSC A/85 delivery create a custom profile at -24 LKFS.",
   "format_type": "daily_news",
   "video_spec": {
     "width": 1920,
@@ -42,7 +42,7 @@
   "min_shot_duration_sec": 2.0,
   "max_shot_duration_sec": 10.0,
   "silence_threshold_db": -34.0,
-  "loudness_target_lufs": -16.0,
+  "loudness_target_lufs": -23.0,
   "intro_outro_rules": {
     "open_on_wide": false,
     "opening_wide_sec": 0.0,
@@ -71,15 +71,16 @@
     "review_confidence_threshold": 0.78
   },
   "audio_rules": {
-    "target_lufs": -16.0,
-    "loudness_target_lufs": -16.0,
-    "true_peak_dbtp": -1.5,
+    "target_lufs": -23.0,
+    "loudness_target_lufs": -23.0,
+    "true_peak_dbtp": -1.0,
     "highpass_hz": 90.0,
     "enable_denoise": true,
     "enable_compressor": true,
     "enable_mic_level_matching": true,
     "max_mic_trim_db": 18.0,
-    "music_duck_db": -20.0
+    "music_duck_db": -20.0,
+    "loudness_standard": "EBU R128"
   },
   "graphics_rules": {
     "enable_captions": true,
@@ -105,10 +106,10 @@
     "outline_color_hex": "#0B090A",
     "outline_width": 3.0,
     "alignment": "bottom_center",
-    "max_chars_per_line": 44,
+    "max_chars_per_line": 37,
     "uppercase": false,
     "burn_in": false,
-    "max_chars_per_sec": 17.0
+    "max_chars_per_sec": 15.0
   },
   "delivery_spec": {
     "container": "mp4",
@@ -121,8 +122,8 @@
     "color_space": "bt709",
     "audio_sample_rate": 48000,
     "audio_channels": 2,
-    "target_lufs": -16.0,
-    "true_peak_dbtp": -1.5,
+    "target_lufs": -23.0,
+    "true_peak_dbtp": -1.0,
     "video_bitrate": "12M",
     "audio_bitrate": "192k"
   },

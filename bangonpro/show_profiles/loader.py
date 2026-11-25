@@ -669,7 +669,8 @@ def save_custom_profile(profile: dict[str, Any], dest_path: str | Path) -> Path:
     """Validate a custom Show Profile strictly against schema and write it to disk."""
     validated = validate_show_profile(profile)
     target = Path(dest_path).expanduser()
-    if target.is_dir():
+    # A folder that does not exist yet (no .json suffix) is a folder, not a file name.
+    if target.is_dir() or (not target.exists() and target.suffix.lower() != ".json"):
         target = target / f"{validated['profile_id']}.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(validated, indent=2) + "\n", encoding="utf-8")
