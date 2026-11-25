@@ -216,6 +216,186 @@ def qc_sync_drift(st: Any) -> list[QCIssue]:
 
 
 # ---------------------------------------------------------------------------
+# Colourist
+# ---------------------------------------------------------------------------
+def colour_from_visual_analysis(ctx: Any, video: dict[str, Any]) -> Any:
+    """V1.2.2 Colourist from sampled statistics; ``None`` falls back to the V1.2.1 frame sampler."""
+    from pathlib import Path
+
+    from bangonpro.ai_engine.agents import audio_graphics_qc as agq
+    from bangonpro.ai_engine.department.agents import AgentOutcome
+    from bangonpro.ai_engine.department.checkpoint import write_json_atomic
+    from bangonpro.ai_engine.department.media_colour import plan_colour
+
+    st = ctx.state
+    if not (st.metadata.get("visual_analysis") or {}) or not video:
+        return None
+    plan = plan_colour(st, video)
+    if not plan:
+        return None
+    ref, exposure = plan["reference_camera"], plan["exposure_gain"]
+    cr = st.profile.get("colour_rules", {}) or {}
+    lut = cr.get("lut_path")
+    lut_ok = bool(lut and Path(str(lut)).expanduser().is_file())
+    b = agq.new_agent_builder(st, agent_id="colourist", agent_role="colourist", transaction_label="Colourist: white balance, exposure, skin & shot-level match")
+    applied = 0
+    shot_level = 0
+    for sh in st.rough_cut_shots:
+        sp = plan["shots"].get(sh.shot_id)
+        if not sp:
+            continue
+        g = sp["gains"]
+        clip_id = f"{sh.shot_id}_v"
+        if any(abs(v - 1.0) > 0.02 for v in g):
+            props = {"lift_r": 0.0, "lift_g": 0.0, "lift_b": 0.0, "gamma_r": 1.0, "gamma_g": 1.0, "gamma_b": 1.0, "gain_r": g[0], "gain_g": g[1], "gain_b": g[2]}
+            cam = plan["cameras"][sh.camera_id]
+            de = sp.get("de_after") or {}
+            why = "Reference look kept" if sh.camera_id == ref else f"Match {sh.camera_id} to {ref} ({cam['wb_source'].replace('_', ' ')} white balance, exposure, skin)"
+            if sp["mode"] == "shot":
+                why += "; lighting changed in this shot, corrected per shot"
+                shot_level += 1
+            b.add_operation(
+                "add_effect",
+                clip_id=clip_id,
+                track_id="V1",
+                params={"effect_id": "lift_gamma_gain", "mlt_service": "lift_gamma_gain", "kdenlive_id": "lift_gamma_gain", "parameters": props, "properties": props, "agent_id": "colourist"},
+                confidence=0.88 if sh.camera_id != ref else 0.9,
+                rationale=why + (f"; predicted Delta E to reference {de.get('neutral_de', 0):.1f}" if de else "") + (f"; exposure x{exposure:.2f}" if exposure != 1.0 else ""),
+            )
+            applied += 1
+        if lut_ok:
+            b.add_operation(
+                "add_effect",
+                clip_id=clip_id,
+                track_id="V1",
+                params={"effect_id": "avfilter.lut3d", "mlt_service": "avfilter.lut3d", "kdenlive_id": "avfilter.lut3d", "parameters": {"av.file": str(Path(str(lut)).expanduser())}, "properties": {"av.file": str(Path(str(lut)).expanduser())}, "agent_id": "colourist"},
+                confidence=0.95,
+                rationale=f"Approved series colour treatment LUT {Path(str(lut)).name} (applied after the match)",
+            )
+    corrections = {c: {"gain_r": v["gains"][0], "gain_g": v["gains"][1], "gain_b": v["gains"][2]} for c, v in plan["cameras"].items()}
+    report = {**plan, "corrections": corrections, "lut": str(lut) if lut else None, "lut_found": lut_ok}
+    path = write_json_atomic(Path(st.output_dir) / "colour_report.json", report)
+    st.metadata["colour_report"] = report
+    review = [f"Profile LUT not found: {lut}"] if (lut and not lut_ok) else []
+    clamped = [c for c, v in plan["cameras"].items() if v.get("clamped")]
+    if clamped:
+        review.append(f"Colour match for {', '.join(clamped)} hit the gain limit (colour_rules.max_channel_gain): check the camera's white balance on set")
+    grey = [c for c, v in plan["cameras"].items() if v.get("wb_source") == "grey_world" and c != ref]
+    if grey:
+        review.append(f"Few neutral surfaces seen by {', '.join(grey)}: white balance used the grey-world fallback")
+    de_b = [v["de_before"]["neutral_de"] for c, v in plan["cameras"].items() if c != ref]
+    de_a = [v["de_after"]["neutral_de"] for c, v in plan["cameras"].items() if c != ref]
+    ctx.progress(1.0, f"{b.operation_count} colour operations")
+    return AgentOutcome(
+        batches=[b.build()] if b.operation_count else [],
+        confidence=0.85 if not clamped else 0.7,
+        summary=f"Reference {ref}; {applied} shot corrections ({shot_level} shot-level); exposure x{exposure:.2f}" + (f"; neutral Delta E {np.mean(de_b):.1f} -> {np.mean(de_a):.1f}" if de_b else "") + ("; LUT applied" if lut_ok else ""),
+        rationale="White balance from near-neutral pixels (grey-world fallback), mid-tone exposure and skin-tone consistency matched to the reference angle with clamped native lift/gamma/gain; per-shot only where lighting changed",
+        outputs={"colour_report_json": str(path)},
+        review_items=review,
+        metrics={"corrections": corrections, "neutral_de_before": round(float(np.mean(de_b)), 3) if de_b else None, "neutral_de_after": round(float(np.mean(de_a)), 3) if de_a else None, "shot_level_corrections": shot_level},
+        est_external_cost_usd=0.0,
+    )
+
+
+def colour_quality(st: Any) -> tuple[float, list[Defect], dict[str, Any]]:
+    """Predicted inter-camera colour distance after the applied gains, penalising clipped skin/highlights
+    and any change to the reference angle's look when ``preserve_look`` is set.
+
+    Per used non-reference shot ``q = 1 / (1 + (dE / 4)^2)`` (dE = mean of neutral and skin Delta E),
+    times ``(1 - min(0.8, highlight_overflow * 4 + 0.25 * clipped_skin_channels))``.
+    """
+    rep = st.metadata.get("colour_report") or {}
+    if not rep.get("shots"):
+        return 1.0, [], {}
+    from bangonpro.ai_engine.department.media_colour import corrected_distance
+
+    ref = rep["reference_camera"]
+    cams = rep.get("camera_stats") or {}
+    expo = float(rep.get("exposure_gain", 1.0))
+    qs: list[float] = []
+    defects: list[Defect] = []
+    worst = (0.0, None)
+    for sid, sp in rep["shots"].items():
+        if sp["camera_id"] == ref or not sp.get("stats"):
+            continue
+        d = corrected_distance(sp["stats"], cams[ref], np.asarray(sp["gains"]), np.ones(3) * expo)
+        de = float(np.mean([d["neutral_de"]] + ([d["skin_de"]] if "skin_de" in d else [])))
+        pen = min(0.8, d["highlight_clip"] * 4.0 + 0.25 * d.get("skin_clipped_channels", 0))
+        qs.append((1.0 / (1.0 + (de / 4.0) ** 2)) * (1.0 - pen))
+        if de > worst[0]:
+            worst = (de, sp)
+        if d.get("skin_clipped_channels"):
+            defects.append(Defect("COLOUR_SKIN_CLIPPED", "warning", f"{sp['camera_id']} shot {sid}: correction pushes skin tones into clipping", sp.get("master_in_sec")))
+    if worst[1] is not None and worst[0] > 6.0:
+        defects.append(Defect("COLOUR_MISMATCH", "warning", f"{worst[1]['camera_id']} still differs from {ref} by Delta E {worst[0]:.1f} after matching", worst[1].get("master_in_sec")))
+    look = 1.0
+    rules = rep.get("rules") or {}
+    if rules.get("preserve_look", True):
+        ref_shots = [sp for sp in rep["shots"].values() if sp["camera_id"] == ref and sp.get("mode") == "camera"]
+        if ref_shots:
+            g = np.asarray(ref_shots[0]["gains"]) / max(1e-6, expo)
+            look = 1.0 / (1.0 + (float(np.max(np.abs(g - 1.0))) / 0.05) ** 2)
+    score = (float(np.mean(qs)) if qs else 1.0) * look
+    return round(score, 4), defects, {"shots_scored": len(qs), "worst_de": round(worst[0], 3), "reference_look_kept": round(look, 4)}
+
+
+@register_assessor("colourist")
+def assess_colourist(ctx: Any, outcome: Any) -> Assessment | None:
+    st = ctx.state
+    if not (st.metadata.get("colour_report") or {}).get("shots"):
+        return None
+    score, defects, details = colour_quality(st)
+    rep = st.metadata["colour_report"]
+    correction, reason = None, ""
+    cr = st.profile.get("colour_rules", {}) or {}
+    clamped = [c for c, v in (rep.get("cameras") or {}).items() if v.get("clamped")]
+    mg = float(cr.get("max_channel_gain", 1.33))
+    if clamped and details.get("worst_de", 0) > 6.0 and mg < 1.6:
+        correction, reason = {"colour_rules": {"max_channel_gain": round(min(1.6, mg + 0.15), 2)}}, f"Gain limit reached on {', '.join(clamped)}; allow a slightly stronger match"
+    return Assessment(agent_id="colourist", score=score, metric="predicted_intercamera_delta_e", defects=defects, correction=correction, correction_reason=reason, details=details)
+
+
+@register_qc_check("media_colour_cut")
+def qc_colour_cut(st: Any) -> list[QCIssue]:
+    """Visible colour jump at a cut between two matched cameras (predicted, from sampled statistics)."""
+    from bangonpro.ai_engine.department.media_colour import delta_e
+
+    rep = st.metadata.get("colour_report") or {}
+    shots_rep = rep.get("shots") or {}
+    thr = float((rep.get("rules") or {}).get("cut_jump_de", (st.profile.get("colour_rules") or {}).get("cut_jump_de", 6.0)))
+    issues: list[QCIssue] = []
+    shots = st.rough_cut_shots
+    for a, b in zip(shots, shots[1:], strict=False):
+        if a.camera_id == b.camera_id:
+            continue
+        ra, rb = shots_rep.get(a.shot_id), shots_rep.get(b.shot_id)
+        if not ra or not rb or not ra.get("stats") or not rb.get("stats"):
+            continue
+        ca = np.asarray(ra["stats"]["wb_rgb"]) * np.asarray(ra["gains"])
+        cb = np.asarray(rb["stats"]["wb_rgb"]) * np.asarray(rb["gains"])
+        de = delta_e(ca, cb)
+        if de > thr:
+            issues.append(QCIssue("COLOUR_JUMP_AT_CUT", "warning", f"Colour jumps by Delta E {de:.1f} at the cut {a.camera_id} -> {b.camera_id}", b.timeline_in_sec, {"from_shot": a.shot_id, "to_shot": b.shot_id, "delta_e": round(de, 2), "master_sec": b.master_sync_in_sec}))
+    return issues
+
+
+@register_qc_check("media_camera_unavailable")
+def qc_camera_unavailable(st: Any) -> list[QCIssue]:
+    """A used shot falls in a black, frozen, missing-picture or not-recording interval of its camera."""
+    va = st.metadata.get("visual_analysis") or {}
+    issues: list[QCIssue] = []
+    for s in st.rough_cut_shots:
+        for iv in (va.get(s.camera_id) or {}).get("unavailable_intervals", []):
+            ov = min(s.master_sync_out_sec, iv["end_sec"]) - max(s.master_sync_in_sec, iv["start_sec"])
+            if ov > 0.2:
+                at = max(s.master_sync_in_sec, iv["start_sec"])
+                issues.append(QCIssue("CAMERA_UNAVAILABLE_IN_SHOT", "error", f"Shot {s.shot_id} shows {s.camera_id} while its picture is {iv['reason'].replace('_', ' ')} ({iv['start_sec']:.1f}-{iv['end_sec']:.1f}s); cut to another angle", round(s.timeline_in_sec + (at - s.master_sync_in_sec), 3), {"shot_id": s.shot_id, "camera_id": s.camera_id, "reason": iv["reason"], "master_sec": round(at, 3), "overlap_sec": round(ov, 3)}))
+                break
+    return issues
+
+
+# ---------------------------------------------------------------------------
 # Audio Engineer
 # ---------------------------------------------------------------------------
 def engineer_audio(ctx: Any) -> dict[str, Any]:

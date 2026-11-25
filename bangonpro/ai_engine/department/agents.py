@@ -873,9 +873,14 @@ def camera_colour_stats(path: str, duration: float, samples: int = 5) -> dict[st
 
 
 def run_colourist(ctx: AgentContext) -> AgentOutcome:
+    from bangonpro.ai_engine.department.media_intel import colour_from_visual_analysis
+
     st = ctx.state
     rules = st.profile.get("colour_rules", {}) or {}
     video = _video_assets(st)
+    v122 = colour_from_visual_analysis(ctx, video)  # V1.2.2: neutral WB, skin, shot-level (sampled stats)
+    if v122 is not None:
+        return v122
     stats: dict[str, Any] = {}
     for i, (cid, a) in enumerate(sorted(video.items())):
         ctx.token.check(f"colour analysis {cid}")

@@ -29,7 +29,7 @@ from typing import Any
 import numpy as np
 from scipy import ndimage
 
-VISUAL_VERSION = "1.2.2-visual-1"
+VISUAL_VERSION = "1.2.2-visual-2"
 THUMB_W = 96
 MAX_METADATA_SAMPLES = 1200
 
@@ -54,7 +54,10 @@ def neutral_mask(rgb01: np.ndarray) -> np.ndarray:
 def frame_stats(rgb01: np.ndarray, prev: np.ndarray | None) -> dict[str, Any]:
     luma = 0.2126 * rgb01[..., 0] + 0.7152 * rgb01[..., 1] + 0.0722 * rgb01[..., 2]
     flat = rgb01.reshape(-1, 3)
-    neu = neutral_mask(rgb01)
+    # Cast-tolerant neutrals: find low-chroma pixels after a grey-world normalisation (a strong cast
+    # would otherwise hide the grey card), then measure those pixels in the original frame.
+    gw = np.maximum(flat.mean(axis=0), 1e-3)
+    neu = neutral_mask(np.clip(rgb01 / gw * float(gw.mean()), 0.0, 1.0)) & (rgb01.max(axis=-1) < 0.96)
     skin = skin_mask_ycbcr(rgb01)
     neu_share = float(neu.mean())
     skin_share = float(skin.mean())

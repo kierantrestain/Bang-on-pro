@@ -374,8 +374,8 @@ def audio_mics(base: Path, *, duration_sec: float = 60.0, sr: int = SR, seed: in
 # ---------------------------------------------------------------------------
 # 7-8. Colour: colour-cast camera and lighting change mid-recording
 # ---------------------------------------------------------------------------
-CAST_GAINS = (1.16, 1.0, 0.80)
-CAST_EXPOSURE = 0.86
+CAST_GAINS = (1.12, 1.0, 0.86)
+CAST_EXPOSURE = 0.90
 
 
 def colour_cameras(base: Path, *, duration_sec: float = 8.0, seed: int = 61, change_at_sec: float = 4.0) -> Scenario:
@@ -391,9 +391,9 @@ def colour_cameras(base: Path, *, duration_sec: float = 8.0, seed: int = 61, cha
     files = {"cam_ref": write_av(d / "cam_ref.mp4", lambda i: _to8(img + noise[i % 4]), n, 25)}
     cast = np.clip(img * np.array(CAST_GAINS) * CAST_EXPOSURE, 0, 1)
     files["cam_cast"] = write_av(d / "cam_cast.mp4", lambda i: _to8(cast[:, ::-1] + noise[(i + 1) % 4]), n, 25)
-    light_after = np.clip(img * np.array((1.10, 1.0, 0.86)) * 0.82, 0, 1)
+    light_after = np.clip(img * np.array((1.06, 1.0, 0.90)) * 0.85, 0, 1)
     files["cam_light"] = write_av(d / "cam_light.mp4", lambda i: _to8((img if i / 25.0 < change_at_sec else light_after) + noise[(i + 2) % 4]), n, 25)
-    truth = {"cast_gains": CAST_GAINS, "cast_exposure": CAST_EXPOSURE, "light_change_at_sec": change_at_sec, "light_after_gains": (1.10, 1.0, 0.86), "light_after_exposure": 0.82, "face_rgb": (0.80, 0.56, 0.44), "grey_rgb": (0.55, 0.55, 0.55)}
+    truth = {"cast_gains": CAST_GAINS, "cast_exposure": CAST_EXPOSURE, "light_change_at_sec": change_at_sec, "light_after_gains": (1.06, 1.0, 0.90), "light_after_exposure": 0.85, "face_rgb": (0.80, 0.56, 0.44), "grey_rgb": (0.55, 0.55, 0.55)}
     return Scenario("colour_cameras", files, truth)
 
 
