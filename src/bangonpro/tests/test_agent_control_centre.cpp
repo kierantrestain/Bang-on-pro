@@ -4,6 +4,7 @@
 */
 
 #include "ui/AgentControlCentre.h"
+#include "ui/ModelManagerDialog.h"
 
 #include <QCheckBox>
 #include <QComboBox>
@@ -330,6 +331,57 @@ private Q_SLOTS:
         QCOMPARE(profiles->findData(QStringLiteral("weekly_chat")), profiles->count() - 1);
         profiles->setCurrentIndex(profiles->count() - 1);
         QVERIFY(acc.buildRunArguments({}).contains(QStringLiteral("weekly_chat")));
+    }
+
+    void systemCheckShowsFixesAndHandsOverPrimaryAction()
+    {
+        const auto item = [](const char *id, const char *status, const char *fix, const char *action) {
+            return QJsonObject{{QStringLiteral("id"), QString::fromLatin1(id)},
+                               {QStringLiteral("title"), QString::fromLatin1(id)},
+                               {QStringLiteral("status"), QString::fromLatin1(status)},
+                               {QStringLiteral("detail"), QStringLiteral("detail")},
+                               {QStringLiteral("fix"), QString::fromLatin1(fix)},
+                               {QStringLiteral("fix_action"), QString::fromLatin1(action)}};
+        };
+        QJsonObject blocked{{QStringLiteral("overall"), QStringLiteral("blocked")},
+                            {QStringLiteral("summary"), QJsonObject{{QStringLiteral("error"), 1}}},
+                            {QStringLiteral("paths"), QJsonObject{{QStringLiteral("job_root"), QStringLiteral("/Volumes/SSD/jobs")}}},
+                            {QStringLiteral("items"),
+                             QJsonArray{item("tool_ffmpeg", "error", "Reinstall Bang On Pro from the DMG.", "run_system_check"),
+                                        item("model_speech", "warning", "Install Whisper tiny in Model Manager.", "open_model_manager"),
+                                        item("cache", "ok", "", "")}}};
+        SystemCheckDialog dlg;
+        QVERIFY(!dlg.loadReport(QJsonObject{}));
+        QVERIFY(dlg.loadReport(blocked));
+        QCOMPARE(dlg.itemCount(), 3);
+        QCOMPARE(dlg.overallStatus(), QStringLiteral("blocked"));
+        QVERIFY(dlg.itemText(QStringLiteral("tool_ffmpeg")).contains(QStringLiteral("Reinstall Bang On Pro")));
+        QCOMPARE(dlg.storageFolder(), QStringLiteral("/Volumes/SSD/jobs"));
+        auto *recheck = dlg.findChild<QPushButton *>(QStringLiteral("sc_recheck"));
+        auto *done = dlg.findChild<QPushButton *>(QStringLiteral("sc_done"));
+        QVERIFY(recheck && done);
+        QVERIFY(recheck->property("bangOnProPrimary").toBool() && !done->property("bangOnProPrimary").toBool());
+        QSignalSpy recheckReq(&dlg, &SystemCheckDialog::recheckRequested);
+        QSignalSpy models(&dlg, &SystemCheckDialog::modelManagerRequested);
+        QSignalSpy cache(&dlg, &SystemCheckDialog::cacheActionRequested);
+        QSignalSpy diag(&dlg, &SystemCheckDialog::exportDiagnosticsRequested);
+        auto *list = dlg.findChild<QListWidget *>(QStringLiteral("sc_items"));
+        Q_EMIT list->itemActivated(list->item(1)); // double-click the speech-model warning
+        QCOMPARE(models.count(), 1);
+        QTest::mouseClick(recheck, Qt::LeftButton);
+        QCOMPARE(recheckReq.count(), 1);
+        QTest::mouseClick(dlg.findChild<QPushButton *>(QStringLiteral("sc_cache_prune")), Qt::LeftButton);
+        QTest::mouseClick(dlg.findChild<QPushButton *>(QStringLiteral("sc_cache_clear")), Qt::LeftButton);
+        QCOMPARE(cache.count(), 2);
+        QCOMPARE(cache.at(0).at(0).toString(), QStringLiteral("prune"));
+        QTest::mouseClick(dlg.findChild<QPushButton *>(QStringLiteral("sc_diagnostics")), Qt::LeftButton);
+        QCOMPARE(diag.count(), 1);
+        dlg.setBusy(true);
+        QVERIFY(!recheck->isEnabled());
+        blocked.insert(QStringLiteral("overall"), QStringLiteral("ready"));
+        QVERIFY(dlg.loadReport(blocked));
+        QVERIFY(recheck->isEnabled());
+        QVERIFY(done->property("bangOnProPrimary").toBool() && !recheck->property("bangOnProPrimary").toBool());
     }
 };
 

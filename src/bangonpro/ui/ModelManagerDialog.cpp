@@ -4,6 +4,7 @@
 */
 
 #include "ModelManagerDialog.h"
+#include "BangOnProTheme.h"
 
 #include <QBrush>
 #include <QColor>
@@ -15,6 +16,9 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QLabel>
+#include <QLineEdit>
+#include <QListWidget>
+#include <QListWidgetItem>
 #include <QProcess>
 #include <QProcessEnvironment>
 #include <QProgressBar>
@@ -576,6 +580,242 @@ void ModelManagerDialog::handleCancelClicked()
         m_activeProcess->kill();
         m_statusLabel->setText(QStringLiteral("Cancelled active model operation; partial downloads cleaned up."));
     }
+}
+
+// ---------------------------------------------------------------------------
+// V1.2.2 System check
+// ---------------------------------------------------------------------------
+namespace {
+constexpr int kCheckIdRole = Qt::UserRole + 11;
+constexpr int kFixActionRole = Qt::UserRole + 12;
+
+TallyState checkTally(const QString &status)
+{
+    if (status == QLatin1String("ok")) {
+        return TallyState::Done;
+    }
+    if (status == QLatin1String("warning")) {
+        return TallyState::Review;
+    }
+    if (status == QLatin1String("error")) {
+        return TallyState::Failed;
+    }
+    return TallyState::Idle;
+}
+} // namespace
+
+SystemCheckDialog::SystemCheckDialog(QWidget *parent)
+    : QDialog(parent)
+{
+    using M = StudioMetrics;
+    setObjectName(QStringLiteral("bangonpro_system_check"));
+    setWindowTitle(tr("System check"));
+    resize(640, 560);
+    auto *root = new QVBoxLayout(this);
+    root->setContentsMargins(M::kSpace4, M::kSpace4, M::kSpace4, M::kSpace4);
+    root->setSpacing(M::kSpace2);
+
+    auto *title = new QLabel(tr("System check"), this);
+    setTextRole(title, "title");
+    m_overallLabel = new QLabel(tr("Checking this computer…"), this);
+    m_overallLabel->setObjectName(QStringLiteral("sc_overall"));
+    m_overallLabel->setWordWrap(true);
+    setTextRole(m_overallLabel, "secondary");
+    root->addWidget(title);
+    root->addWidget(m_overallLabel);
+
+    m_items = new QListWidget(this);
+    m_items->setObjectName(QStringLiteral("sc_items"));
+    m_items->setWordWrap(true);
+    m_items->setIconSize(QSize(12, 12));
+    m_items->setAccessibleName(tr("System check results"));
+    m_items->setToolTip(tr("Double-click a check to fix it"));
+    root->addWidget(m_items, 1);
+
+    auto *folderLabel = new QLabel(tr("Productions and cache"), this);
+    setTextRole(folderLabel, "section");
+    auto *folderRow = new QHBoxLayout;
+    folderRow->setSpacing(M::kSpace2);
+    m_folderEdit = new QLineEdit(this);
+    m_folderEdit->setObjectName(QStringLiteral("sc_folder"));
+    m_folderEdit->setReadOnly(true);
+    m_folderEdit->setPlaceholderText(tr("Default folder in your user library"));
+    m_folderBtn = new QPushButton(tr("Choose…"), this);
+    m_folderBtn->setObjectName(QStringLiteral("sc_choose_folder"));
+    m_folderBtn->setToolTip(tr("Choose where productions, drafts and the analysis cache are kept. An external SSD works."));
+    folderLabel->setBuddy(m_folderBtn);
+    folderRow->addWidget(m_folderEdit, 1);
+    folderRow->addWidget(m_folderBtn);
+    root->addWidget(folderLabel);
+    root->addLayout(folderRow);
+
+    auto *cacheRow = new QHBoxLayout;
+    cacheRow->setSpacing(M::kSpace2);
+    m_cacheLabel = new QLabel(tr("Analysis cache"), this);
+    m_cacheLabel->setObjectName(QStringLiteral("sc_cache"));
+    setTextRole(m_cacheLabel, "secondary");
+    m_pruneBtn = new QPushButton(tr("Prune"), this);
+    m_pruneBtn->setObjectName(QStringLiteral("sc_cache_prune"));
+    m_pruneBtn->setToolTip(tr("Remove the least recently used analysis until the cache is half its size limit. Source media are never touched."));
+    setRole(m_pruneBtn, "quiet");
+    m_clearBtn = new QPushButton(tr("Clear"), this);
+    m_clearBtn->setObjectName(QStringLiteral("sc_cache_clear"));
+    m_clearBtn->setToolTip(tr("Delete all cached analysis. The next production analyses the footage again."));
+    setRole(m_clearBtn, "quiet");
+    cacheRow->addWidget(m_cacheLabel, 1);
+    cacheRow->addWidget(m_pruneBtn);
+    cacheRow->addWidget(m_clearBtn);
+    root->addLayout(cacheRow);
+
+    auto *buttons = new QHBoxLayout;
+    buttons->setSpacing(M::kSpace2);
+    m_modelsBtn = new QPushButton(tr("Model Manager…"), this);
+    m_modelsBtn->setObjectName(QStringLiteral("sc_models"));
+    m_diagnosticsBtn = new QPushButton(tr("Export diagnostics…"), this);
+    m_diagnosticsBtn->setObjectName(QStringLiteral("sc_diagnostics"));
+    m_diagnosticsBtn->setToolTip(tr("Save a zip for the team. Passwords, keys and footage are never included."));
+    setRole(m_diagnosticsBtn, "quiet");
+    m_recheckBtn = new QPushButton(tr("Run check again"), this);
+    m_recheckBtn->setObjectName(QStringLiteral("sc_recheck"));
+    m_doneBtn = new QPushButton(tr("Done"), this);
+    m_doneBtn->setObjectName(QStringLiteral("sc_done"));
+    buttons->addWidget(m_modelsBtn);
+    buttons->addWidget(m_diagnosticsBtn);
+    buttons->addStretch(1);
+    buttons->addWidget(m_recheckBtn);
+    buttons->addWidget(m_doneBtn);
+    root->addLayout(buttons);
+
+    connect(m_folderBtn, &QPushButton::clicked, this, &SystemCheckDialog::chooseFolder);
+    connect(m_pruneBtn, &QPushButton::clicked, this, [this]() { Q_EMIT cacheActionRequested(QStringLiteral("prune")); });
+    connect(m_clearBtn, &QPushButton::clicked, this, [this]() { Q_EMIT cacheActionRequested(QStringLiteral("clear")); });
+    connect(m_modelsBtn, &QPushButton::clicked, this, &SystemCheckDialog::modelManagerRequested);
+    connect(m_diagnosticsBtn, &QPushButton::clicked, this, &SystemCheckDialog::exportDiagnosticsRequested);
+    connect(m_recheckBtn, &QPushButton::clicked, this, &SystemCheckDialog::recheckRequested);
+    connect(m_doneBtn, &QPushButton::clicked, this, &QDialog::accept);
+    connect(m_items, &QListWidget::itemActivated, this, [this](QListWidgetItem *item) {
+        if (item) {
+            triggerFixAction(item->data(kFixActionRole).toString());
+        }
+    });
+    updatePrimary();
+}
+
+bool SystemCheckDialog::loadReport(const QJsonObject &report)
+{
+    const QJsonArray items = report.value(QStringLiteral("items")).toArray();
+    if (items.isEmpty()) {
+        return false;
+    }
+    m_items->clear();
+    for (const QJsonValue &v : items) {
+        const QJsonObject i = v.toObject();
+        QString text = QStringLiteral("%1 · %2").arg(i.value(QStringLiteral("title")).toString(), i.value(QStringLiteral("detail")).toString());
+        const QString fix = i.value(QStringLiteral("fix")).toString();
+        if (!fix.isEmpty()) {
+            text += QLatin1Char('\n') + fix;
+        }
+        auto *row = new QListWidgetItem(tallyIcon(checkTally(i.value(QStringLiteral("status")).toString())), text, m_items);
+        row->setData(kCheckIdRole, i.value(QStringLiteral("id")).toString());
+        row->setData(kFixActionRole, i.value(QStringLiteral("fix_action")).toString());
+        if (i.value(QStringLiteral("id")).toString() == QLatin1String("cache")) {
+            m_cacheLabel->setText(tr("Analysis cache · %1").arg(i.value(QStringLiteral("detail")).toString()));
+        }
+    }
+    m_overall = report.value(QStringLiteral("overall")).toString();
+    const QJsonObject summary = report.value(QStringLiteral("summary")).toObject();
+    if (m_overall == QLatin1String("ready")) {
+        m_overallLabel->setText(tr("Ready for your first production."));
+        setTone(m_overallLabel, "success");
+    } else if (m_overall == QLatin1String("attention")) {
+        m_overallLabel->setText(tr("Ready, with %n thing(s) worth a look.", nullptr, summary.value(QStringLiteral("warning")).toInt()));
+        setTone(m_overallLabel, "warning");
+    } else {
+        m_overallLabel->setText(tr("Fix %n problem(s) before your first production.", nullptr, summary.value(QStringLiteral("error")).toInt()));
+        setTone(m_overallLabel, "danger");
+    }
+    const QString folder = report.value(QStringLiteral("paths")).toObject().value(QStringLiteral("job_root")).toString();
+    if (m_folderEdit->text().isEmpty() && !folder.isEmpty()) {
+        m_folderEdit->setText(folder);
+    }
+    setBusy(false);
+    return true;
+}
+
+QString SystemCheckDialog::overallStatus() const
+{
+    return m_overall;
+}
+
+int SystemCheckDialog::itemCount() const
+{
+    return m_items->count();
+}
+
+QString SystemCheckDialog::itemText(const QString &itemId) const
+{
+    for (int i = 0; i < m_items->count(); ++i) {
+        if (m_items->item(i)->data(kCheckIdRole).toString() == itemId) {
+            return m_items->item(i)->text();
+        }
+    }
+    return {};
+}
+
+void SystemCheckDialog::setStorageFolder(const QString &folder)
+{
+    m_folderEdit->setText(folder);
+}
+
+QString SystemCheckDialog::storageFolder() const
+{
+    return m_folderEdit->text();
+}
+
+void SystemCheckDialog::setBusy(bool busy, const QString &text)
+{
+    m_recheckBtn->setEnabled(!busy);
+    m_pruneBtn->setEnabled(!busy);
+    m_clearBtn->setEnabled(!busy);
+    m_folderBtn->setEnabled(!busy);
+    if (busy) {
+        m_overallLabel->setText(text.isEmpty() ? tr("Checking this computer…") : text);
+        setTone(m_overallLabel, "");
+    }
+    updatePrimary();
+}
+
+void SystemCheckDialog::triggerFixAction(const QString &fixAction)
+{
+    if (fixAction == QLatin1String("open_model_manager")) {
+        Q_EMIT modelManagerRequested();
+    } else if (fixAction == QLatin1String("choose_job_folder")) {
+        chooseFolder();
+    } else if (fixAction == QLatin1String("export_diagnostics")) {
+        Q_EMIT exportDiagnosticsRequested();
+    } else if (fixAction == QLatin1String("run_system_check")) {
+        Q_EMIT recheckRequested();
+    }
+}
+
+void SystemCheckDialog::chooseFolder()
+{
+    const QString dir = QFileDialog::getExistingDirectory(this, tr("Choose a folder for productions and the cache"), m_folderEdit->text());
+    if (!dir.isEmpty()) {
+        m_folderEdit->setText(dir);
+        Q_EMIT storageFolderChosen(dir);
+    }
+}
+
+void SystemCheckDialog::updatePrimary()
+{
+    // One primary action at a time: fix-and-recheck while something blocks, otherwise Done.
+    const bool blocked = m_overall == QLatin1String("blocked");
+    m_recheckBtn->setProperty("bangOnProPrimary", blocked);
+    m_doneBtn->setProperty("bangOnProPrimary", !blocked);
+    setRole(m_recheckBtn, blocked ? "primary" : "secondary");
+    setRole(m_doneBtn, blocked ? "secondary" : "primary");
+    (blocked ? m_recheckBtn : m_doneBtn)->setDefault(true);
 }
 
 } // namespace BangOnPro
