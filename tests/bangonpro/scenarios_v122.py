@@ -308,7 +308,7 @@ def duplicates_and_corrupt(base: Path, *, duration_sec: float = 8.0, sr: int = S
 # ---------------------------------------------------------------------------
 # 4-6. Audio: clipped mic, crosstalk/bleed, noisy room
 # ---------------------------------------------------------------------------
-def audio_mics(base: Path, *, duration_sec: float = 30.0, sr: int = SR, seed: int = 51) -> Scenario:
+def audio_mics(base: Path, *, duration_sec: float = 60.0, sr: int = SR, seed: int = 51) -> Scenario:
     """Three lavalier recorders with known level, bleed, clipping and noise floor.
 
     * ``mic_host``: host direct at -20 dBFS speech RMS, guest bleed at -14 dB relative, clean floor.
@@ -330,28 +330,43 @@ def audio_mics(base: Path, *, duration_sec: float = 30.0, sr: int = SR, seed: in
 
     rng = np.random.default_rng(seed + 7)
     floor = 10 ** (-66 / 20.0)
-    host_d = _scale(sp[0], acts[0], -20.0)
-    guest_d = _scale(sp[1], acts[1], -27.0)
-    third_d = _scale(sp[2], acts[2], -22.0)
-    mic_host = host_d + _scale(sp[1], acts[1], -20.0 - 14.0) + floor * rng.standard_normal(host_d.size)
-    mic_guest = guest_d + _scale(sp[0], acts[0], -27.0 - 18.0) + floor * rng.standard_normal(host_d.size)
-    a, b = round(12 * sr), round(18 * sr)
-    seg = mic_guest[a:b] * 4.0
-    clipped = np.clip(seg, -0.98, 0.98)
-    clip_truth = float(np.mean(np.abs(seg) > 0.98))
-    mic_guest[a:b] = clipped
+    own = {"mic_host": -20.0, "mic_guest": -27.0, "mic_noisy": -22.0}
+    direct = {m: _scale(sp[k], acts[k], own[m]) for k, m in enumerate(own)}
+    # bleed[j][i]: speaker i's level in mic j relative to speaker i on their own mic (as measured)
+    bleed = {"mic_host": {"mic_guest": -7.0, "mic_noisy": -18.0}, "mic_guest": {"mic_host": -25.0, "mic_noisy": -20.0}, "mic_noisy": {"mic_host": -16.0, "mic_guest": -14.0}}
+    mix = {}
+    for j in own:
+        x = direct[j].copy()
+        for i, b_db in bleed[j].items():
+            x += direct[i] * 10 ** (b_db / 20.0)
+        mix[j] = x + floor * rng.standard_normal(x.size)
+    # A 1.5 s shout inside the guest's first long turn drives the guest mic into a 0.98 ceiling
+    on = np.where(acts[1] > 0)[0]
+    a = int(on[0] + round(0.5 * sr)) if on.size else round(12 * sr)
+    b = a + round(1.5 * sr)
+    shout = mix["mic_guest"].copy()
+    shout[a:b] += direct["mic_guest"][a:b] * 5.0
+    unclipped = shout.copy()
+    mix["mic_guest"] = np.clip(shout, -0.98, 0.98)
+    over = np.abs(unclipped) > 0.98
+    sp_samples = int(np.sum(acts[1][: unclipped.size] > 0))
     sos = butter(2, [200.0 / (0.5 * sr), 4000.0 / (0.5 * sr)], btype="bandpass", output="sos")
-    room = sosfilt(sos, rng.standard_normal(host_d.size))
+    room = sosfilt(sos, rng.standard_normal(unclipped.size))
     room *= 10 ** (-42 / 20.0) / float(np.sqrt(np.mean(room * room)))
-    mic_noisy = third_d + room
-    files = {"mic_host": write_wav(d / "mic_host.wav", mic_host, sr), "mic_guest": write_wav(d / "mic_guest.wav", mic_guest, sr), "mic_noisy": write_wav(d / "mic_noisy.wav", mic_noisy, sr)}
+    mix["mic_noisy"] = mix["mic_noisy"] + room
+    band = butter(4, [300.0 / (0.5 * sr), 3400.0 / (0.5 * sr)], btype="bandpass", output="sos")
+    sp_band = sosfilt(band, direct["mic_noisy"])[acts[2] > 0]
+    nz_band = sosfilt(band, room)
+    snr_truth = 10 * np.log10(np.mean(sp_band**2) / np.mean(nz_band**2))
+    files = {m: write_wav(d / f"{m}.wav", x, sr) for m, x in mix.items()}
+    write_wav(d / "reference_mic_guest_unclipped.wav", np.clip(unclipped, -1.0, 1.0) * 0.5, sr)  # metrics only (-6 dB), not an input
     truth = {
-        "speech_rms_dbfs": {"mic_host": -20.0, "mic_guest": -27.0, "mic_noisy": -22.0},
-        "bleed_db": {"mic_host<-guest": -14.0, "mic_guest<-host": -18.0},
-        "clipped": {"mic_guest": {"start_sec": 12.0, "end_sec": 18.0, "clipped_sample_share_in_region": round(clip_truth, 4)}},
+        "speech_rms_dbfs": own,
+        "bleed_db": bleed,
+        "clipped": {"mic_guest": {"start_sec": round(a / sr, 3), "end_sec": round(b / sr, 3), "clipped_samples": int(over.sum()), "clipped_share_of_speech": round(float(over.sum()) / max(1, sp_samples), 6)}},
         "noise_floor_dbfs": {"mic_host": -66.0, "mic_guest": -66.0, "mic_noisy": -42.0},
-        "speech_band_snr_db_approx": {"mic_noisy": 20.0},
-        "activity_seed": seed,
+        "speech_band_snr_db": {"mic_noisy": round(float(snr_truth), 2)},
+        "unclipped_reference_gain_db": -6.02,
     }
     return Scenario("audio_mics", files, truth)
 

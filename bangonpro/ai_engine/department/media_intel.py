@@ -213,3 +213,152 @@ def qc_sync_drift(st: Any) -> list[QCIssue]:
         if total > frame_ms:
             issues.append(QCIssue("SYNC_SHOT_LIPSYNC", "error" if total > 3 * frame_ms else "warning", f"Shot {s.shot_id}: picture ({cv}) and sound ({ca}) drift {total:.0f} ms apart (> 1 frame)", s.timeline_in_sec, {"shot_id": s.shot_id, "placement_ms": round(delta, 2), "drift_over_shot_ms": round(rel, 2), "model_residual_ms": round(res, 2), "master_sec": s.master_sync_in_sec}))
     return issues
+
+
+# ---------------------------------------------------------------------------
+# Audio Engineer
+# ---------------------------------------------------------------------------
+def engineer_audio(ctx: Any) -> dict[str, Any]:
+    """Measure mics and turn the plan into the track chain + per-clip operations (no rendering)."""
+    from bangonpro.ai_engine.department.media_audio import compand_points_compressor, compand_points_expander, plan_audio
+
+    st = ctx.state
+    plan = plan_audio(st, ctx.cache, ctx.token, ctx.progress)
+    comp = plan["compression"]
+    chain = {
+        "compressor_points": compand_points_compressor(comp["threshold_dbfs"], comp["ratio"]),
+        "compressor_gain_db": 0.0,
+        "compressor_rationale": f"{comp['ratio']:g}:1 above {comp['threshold_dbfs']:.0f} dBFS from measured speech level {plan['matching']['target_speech_dbfs']:.1f} dBFS (crest {comp['speech_crest_db']:.1f} dB); natural dynamics kept",
+    }
+    trims = plan["matching"]["trims_db"]
+    eq = plan["matching"]["eq"]
+    clip_ops: list[dict[str, Any]] = []
+    for s in st.rough_cut_shots:
+        sp = plan["shots"].get(s.shot_id) or {}
+        m = sp.get("mic")
+        cid = f"{s.shot_id}_a"
+        tr = float(trims.get(m, 0.0))
+        if abs(tr) >= 1.0:
+            clip_ops.append({"clip_id": cid, "mlt_service": "volume", "properties": {"level": round(tr, 2)}, "rationale": f"Match {m} to {plan['matching']['target_speech_dbfs']:.1f} dBFS speech level ({tr:+.1f} dB, measured)", "confidence": 0.92})
+        e = eq.get(m) or {}
+        if e.get("bass_db"):
+            clip_ops.append({"clip_id": cid, "mlt_service": "avfilter.bass", "properties": {"av.g": e["bass_db"], "av.f": 150}, "rationale": f"Tone-match {m}: low shelf {e['bass_db']:+.1f} dB toward the other mics", "confidence": 0.85})
+        if e.get("highshelf_db"):
+            clip_ops.append({"clip_id": cid, "mlt_service": "avfilter.highshelf", "properties": {"av.g": e["highshelf_db"], "av.f": 4000}, "rationale": f"Tone-match {m}: high shelf {e['highshelf_db']:+.1f} dB toward the other mics", "confidence": 0.85})
+        ex = sp.get("bleed_expander")
+        if ex:
+            pts = compand_points_expander(ex["threshold_dbfs"], ex["reduction_db"])
+            clip_ops.append({"clip_id": cid, "mlt_service": "avfilter.compand", "properties": {"av.attacks": 0.005, "av.decays": 0.3, "av.points": pts, "av.soft-knee": 6.0, "av.gain": 0.0}, "rationale": f"Reduce room bleed in {m} by {ex['reduction_db']:.0f} dB between words (no other speaker active in this shot)", "confidence": 0.8})
+    st.metadata["audio_plan"] = {"chain": chain, "clip_ops": clip_ops}
+    st.metadata["audio_analysis"] = {k: v for k, v in plan.items() if k != "cache_hits"}
+    return plan
+
+
+def audio_quality(st: Any) -> tuple[float, list[Defect], dict[str, Any]]:
+    """Score the *predicted* result of the applied audio plan (no rendering).
+
+    ``q = 0.35*level_match + 0.35*clean_peaks + 0.15*natural_dynamics + 0.15*intelligibility`` where
+    level_match = exp(-spread_after_dB / 6), clean_peaks = 1 - min(1, residual_clipped_share / 0.5 %),
+    natural_dynamics = 1 for a predicted speech crest >= 9 dB falling to 0 at 3 dB, and
+    intelligibility = speech-band SNR mapped 6 dB -> 0, 20 dB -> 1. Operation counts never enter.
+    """
+    from bangonpro.ai_engine.department.media_sync import master_time
+
+    an = st.metadata.get("audio_analysis") or {}
+    if not an:
+        return 1.0, [], {}
+    rules = (st.profile.get("audio_rules") or {})
+    min_snr = float(rules.get("min_speech_snr_db", 15.0))
+    used = an.get("used_mics", [])
+    mics = an.get("mics", {})
+    spread = float((an.get("matching") or {}).get("level_spread_after_db", 0.0))
+    level_q = math.exp(-spread / 6.0)
+    residual: list[float] = []
+    defects: list[Defect] = []
+    for c in used:
+        cl = (mics.get(c) or {}).get("clipping", {}) or {}
+        share = float(cl.get("clipped_share_of_speech") or 0.0)
+        dc = (an.get("declip") or {}).get(c) or {}
+        after = dc.get("residual_clipped_share_of_speech") if dc.get("created") else None
+        residual.append(float(after) if after is not None else share)
+        if share > 0.0005:
+            ev = (cl.get("events") or [{}])[0]
+            at = master_time(st.sync_result, c, float(ev["start_sec"])) if (ev.get("start_sec") is not None and st.sync_result is not None) else None
+            msg = f"{c}: {share:.2%} of speech samples clipped ({cl.get('event_count', 0)} events)"
+            msg += "; a declipped copy is in the bin" if dc.get("created") else "; re-record or repair in an audio editor"
+            defects.append(Defect("AUDIO_CLIPPING", "warning", msg, None if at is None else round(at, 3)))
+    clean_q = 1.0 - min(1.0, (max(residual) if residual else 0.0) / 0.005)
+    crest_after = float((an.get("compression") or {}).get("predicted_crest_after_db", 12.0))
+    dyn_q = float(np.clip((crest_after - 3.0) / 6.0, 0.0, 1.0))
+    snrs = [float((mics.get(c) or {})["speech_band_snr_db"]) for c in used if (mics.get(c) or {}).get("speech_band_snr_db") is not None]
+    snr = min(snrs) if snrs else 30.0
+    intel_q = float(np.clip((snr - 6.0) / 14.0, 0.0, 1.0))
+    for c in used:
+        v = (mics.get(c) or {}).get("speech_band_snr_db")
+        if v is not None and v < min_snr:
+            defects.append(Defect("AUDIO_LOW_SNR", "error" if v < 3.0 else "warning", f"{c}: speech-band SNR {v:.1f} dB (< {min_snr:g} dB); dialogue may be hard to follow. Enable RNNoise or re-record"))
+    if spread > 3.0:
+        defects.append(Defect("AUDIO_LEVEL_MISMATCH", "warning", f"Microphones still differ by {spread:.1f} dB after matching (trim limit audio_rules.max_mic_trim_db)"))
+    if crest_after < 6.0:
+        defects.append(Defect("AUDIO_OVERCOMPRESSED", "warning", f"Predicted speech crest {crest_after:.1f} dB: dynamics will sound squashed", subjective=True))
+    score = 0.35 * level_q + 0.35 * clean_q + 0.15 * dyn_q + 0.15 * intel_q
+    return round(score, 4), defects, {"level_spread_after_db": spread, "residual_clipped_share": max(residual) if residual else 0.0, "predicted_crest_after_db": crest_after, "min_speech_band_snr_db": snr}
+
+
+@register_assessor("audio_engineer")
+def assess_audio_engineer(ctx: Any, outcome: Any) -> Assessment | None:
+    st = ctx.state
+    if not st.intent.restore_audio or not st.metadata.get("audio_analysis"):
+        return None
+    score, defects, details = audio_quality(st)
+    an = st.metadata["audio_analysis"]
+    rules = (st.profile.get("audio_rules") or {})
+    correction, reason = None, ""
+    trims = (an.get("matching") or {}).get("trims_db", {})
+    cap = float(rules.get("max_mic_trim_db", 24.0))
+    if details["level_spread_after_db"] > 3.0 and trims and max(abs(v) for v in trims.values()) >= cap - 0.01 and cap < 24.0:
+        correction, reason = {"audio_rules": {"max_mic_trim_db": min(24.0, cap + 6.0)}}, "Microphone trims hit the limit; allow 6 dB more"
+    elif details["predicted_crest_after_db"] < 6.0 and float(rules.get("compression_ratio", 3.0)) > 2.0:
+        correction, reason = {"audio_rules": {"compression_ratio": 2.0}}, "Predicted over-compression; use a gentler 2:1 ratio"
+    return Assessment(agent_id="audio_engineer", score=score, metric="predicted_mix_quality", defects=defects, correction=correction, correction_reason=reason, details=details)
+
+
+@register_qc_check("media_audio")
+def qc_audio(st: Any) -> list[QCIssue]:
+    """Clipping in used shots, off-mic speech (crosstalk), wrong mic choice, unreachable loudness, low SNR."""
+    from bangonpro.ai_engine.department.media_sync import master_time
+
+    an = st.metadata.get("audio_analysis") or {}
+    if not an:
+        return []
+    issues: list[QCIssue] = []
+    mics = an.get("mics", {})
+    sr = st.sync_result
+    for s in st.rough_cut_shots:
+        sp = (an.get("shots") or {}).get(s.shot_id) or {}
+        m = sp.get("mic") or _audio_cam_of(st, s)
+        for ev in ((mics.get(m) or {}).get("clipping", {}) or {}).get("events", []):
+            a = master_time(sr, m, float(ev["start_sec"])) if sr is not None else ev["start_sec"]
+            if a is not None and s.master_sync_in_sec <= a < s.master_sync_out_sec:
+                dc = ((an.get("declip") or {}).get(m) or {})
+                issues.append(QCIssue("AUDIO_CLIPPING_IN_SHOT", "warning", f"Shot {s.shot_id}: {m} clips at {a:.1f}s" + (" (declipped copy in the bin)" if dc.get("created") else ""), round(s.timeline_in_sec + (a - s.master_sync_in_sec), 3), {"shot_id": s.shot_id, "mic": m, "master_sec": round(a, 3)}))
+                break
+        if sp.get("off_mic_speech_share", 0.0) > 0.3:
+            issues.append(QCIssue("AUDIO_OFF_MIC_SPEECH", "warning", f"Shot {s.shot_id}: {sp['off_mic_speech_share']:.0%} of the speech is another person heard only through bleed on {m}", s.timeline_in_sec, {"shot_id": s.shot_id, "mic": m, "dominant_mic": sp.get("dominant_mic"), "master_sec": s.master_sync_in_sec}))
+        elif sp and not sp.get("mic_is_dominant", True) and sp.get("own_speech_share", 0.0) < 0.2:
+            issues.append(QCIssue("AUDIO_MIC_CHOICE", "warning", f"Shot {s.shot_id}: speech is mostly on {sp.get('dominant_mic')} but the shot uses {m}", s.timeline_in_sec, {"shot_id": s.shot_id, "mic": m, "master_sec": s.master_sync_in_sec}))
+    target = float((an.get("matching") or {}).get("target_speech_dbfs", -20.0))
+    try:
+        from bangonpro.ai_engine.agents.audio_graphics_qc import _loudness_target
+
+        lufs = float(_loudness_target(st))
+    except Exception:  # noqa: BLE001 - profile without loudness settings
+        lufs = -16.0
+    if abs((lufs - 3.0) - target) > 15.0:  # dialogue loudness sits ~3 LU above speech RMS
+        issues.append(QCIssue("AUDIO_LOUDNESS_UNREACHABLE", "warning", f"Speech at {target:.1f} dBFS needs more than the 15 dB the loudness normaliser can add to reach {lufs:g} LUFS", 0.0))
+    min_snr = float((st.profile.get("audio_rules") or {}).get("min_speech_snr_db", 15.0))
+    for c in an.get("used_mics", []):
+        v = (mics.get(c) or {}).get("speech_band_snr_db")
+        if v is not None and v < min_snr:
+            issues.append(QCIssue("AUDIO_LOW_SNR", "error" if v < 3.0 else "warning", f"{c}: speech-band SNR {v:.1f} dB", 0.0, {"mic": c}))
+    return issues

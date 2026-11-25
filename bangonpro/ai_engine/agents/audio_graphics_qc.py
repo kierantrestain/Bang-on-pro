@@ -96,8 +96,13 @@ def build_audio_restoration_chain(
     target_track_id: str = "A1",
     loudness_override_lufs: float | None = None,
     include_music_duck: bool = True,
+    measured: dict[str, Any] | None = None,
 ) -> tuple[list[AudioFilterSpec], str]:
-    """Construct real MLT + FFmpeg audio restoration chain from Show Profile ``audio_rules``."""
+    """Construct real MLT + FFmpeg audio restoration chain from Show Profile ``audio_rules``.
+
+    ``measured`` (V1.2.2 Audio Engineer, optional) carries the measured compressor threshold/ratio
+    so dynamics follow the material; without it the V1.1 fixed chain is produced unchanged.
+    """
     target_lufs = float(
         loudness_override_lufs
         if loudness_override_lufs is not None
@@ -162,7 +167,21 @@ def build_audio_restoration_chain(
                 )
             )
 
-    if enable_compressor:
+    if enable_compressor and measured and measured.get("compressor_points"):
+        pts = str(measured["compressor_points"])
+        gain = float(measured.get("compressor_gain_db", 0.0))
+        filters.append(
+            AudioFilterSpec(
+                filter_id=f"flt_{track_slug}_compressor",
+                mlt_service="avfilter.compand",
+                mlt_params={"av.attacks": 0.01, "av.decays": 0.15, "av.points": pts, "av.soft-knee": 6.0, "av.gain": gain},
+                ffmpeg_filter=f"compand=attacks=0.01:decays=0.15:points={pts}:soft-knee=6:gain={gain:g}",
+                track_id=target_track_id,
+                enabled=True,
+                rationale=str(measured.get("compressor_rationale") or "Measured dialogue compression"),
+            )
+        )
+    elif enable_compressor:
         filters.append(
             AudioFilterSpec(
                 filter_id=f"flt_{track_slug}_compressor",
@@ -894,6 +913,7 @@ def prepare_audio_restoration(state: ProjectAnalysisState) -> list[AudioFilterSp
                 target_track_id=trk,
                 loudness_override_lufs=loudness_override,
                 include_music_duck=(trk == "A1" and len(audio_target_tracks) == 1),
+                measured=(state.metadata.get("audio_plan") or {}).get("chain"),
             )
             audio_filters.extend(flts)
             if chain_str:
@@ -927,7 +947,19 @@ def emit_audio_ops(state: ProjectAnalysisState, builder: TimelineCommandBuilder)
             rationale=flt.rationale,
         )
 
-    per_cam_trim_db = state.metadata.get("per_camera_gain_trim_db", {})
+    plan = state.metadata.get("audio_plan") or {}
+    per_cam_trim_db = {} if plan.get("clip_ops") is not None else state.metadata.get("per_camera_gain_trim_db", {})
+    for cop in plan.get("clip_ops") or []:
+        # V1.2.2 measured per-clip matching (volume / shelf EQ / bleed expander) as native clip effects;
+        # they replace the V1.1 set_audio_level trims, which never reached the draft project.
+        builder.add_operation(
+            "add_effect",
+            clip_id=cop["clip_id"],
+            track_id=audio_target_tracks[0],
+            params={"effect_id": cop["mlt_service"], "mlt_service": cop["mlt_service"], "kdenlive_id": cop["mlt_service"], "parameters": cop["properties"], "properties": cop["properties"], "agent_id": "audio_engineer"},
+            confidence=float(cop.get("confidence", 0.9)),
+            rationale=cop["rationale"],
+        )
     if per_cam_trim_db and state.rough_cut_shots:
         for shot in state.rough_cut_shots:
             src_cam = shot.camera_id

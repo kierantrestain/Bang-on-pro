@@ -717,21 +717,43 @@ def run_rough_cut(ctx: AgentContext) -> AgentOutcome:
 # Audio Engineer / Captions / Graphics (split V1.1 finishing engine)
 # ---------------------------------------------------------------------------
 def run_audio_engineer(ctx: AgentContext) -> AgentOutcome:
+    from bangonpro.ai_engine.department.media_intel import engineer_audio
+
     st = ctx.state
+    plan = engineer_audio(ctx) if st.intent.restore_audio else {}
     agq.prepare_audio_restoration(st)
     b = agq.new_agent_builder(st, agent_id="audio_engineer", agent_role="audio_engineer", transaction_label="Audio Engineer: dialogue cleanup, mic balance & loudness")
     n = agq.emit_audio_ops(st, b)
-    trims = st.metadata.get("per_camera_gain_trim_db", {})
+    for cam, dc in (plan.get("declip") or {}).items():
+        if dc.get("created"):
+            src = st.media_assets[cam]
+            b.add_operation(
+                "import_media",
+                media_ref=f"media_{cam}_declipped",
+                params={"camera_id": f"{cam}_declipped", "name": f"{cam} (declipped)", "path": dc["path"], "source_path": dc["path"], "file_path": dc["path"], "duration_sec": round(src.duration_sec, 4), "is_audio_only": True, "audio_codec": "pcm_f32le", "derived_from": cam, "process": "adeclip", "read_only_verified": False},
+                confidence=0.85,
+                rationale=f"Declipped copy of {cam} ({dc.get('clipped_share_of_speech', 0):.2%} of speech clipped); swap it in for the affected shots after listening",
+            )
+            n += 1
+    m = plan.get("matching") or {}
+    trims = m.get("trims_db", st.metadata.get("per_camera_gain_trim_db", {}))
     ctx.progress(1.0, f"{n} audio operations")
     denoise = [f.filter_id for f in st.audio_filters if "noise" in f.filter_id or "rnn" in f.filter_id or "afftdn" in f.ffmpeg_filter]
+    review = []
+    for cam, dc in (plan.get("declip") or {}).items():
+        review.append(f"{cam} clips on {dc.get('clipped_share_of_speech', 0):.2%} of speech: " + ("a declipped copy is in the bin; listen and swap it in" if dc.get("created") else f"not repaired ({dc.get('reason', 'declip disabled')})"))
     return AgentOutcome(
         batches=[b.build()] if n else [],
         confidence=0.95,
-        summary=f"{len(st.audio_filters)} filters, {len(trims)} mic trims, target {agq._loudness_target(st)} LUFS",
-        rationale="High-pass, denoise, compression, mic level matching and EBU R128 loudness normalisation",
+        summary=f"{len(st.audio_filters)} filters, {len([t for t in trims.values() if abs(t) >= 1.0])} mic trims, target {agq._loudness_target(st)} LUFS"
+        + (f"; mic spread {m.get('level_spread_before_db', 0):.1f} -> {m.get('level_spread_after_db', 0):.1f} dB" if m else ""),
+        rationale="Measured per-mic levels, tone, clipping, bleed and noise; high-pass, denoise, natural compression, mic matching and EBU R128 loudness",
         neural_inference=bool(st.rnnoise_model_path),
         fallback_reason=None if st.rnnoise_model_path else "RNNoise model not configured; non-neural noise-floor expander (avfilter.compand) used",
-        metrics={"filters": [f.filter_id for f in st.audio_filters], "mic_trims_db": trims, "denoise": denoise},
+        review_items=review,
+        cache_hits=list(plan.get("cache_hits", [])),
+        metrics={"filters": [f.filter_id for f in st.audio_filters], "mic_trims_db": trims, "denoise": denoise, "audio_analysis_sec": plan.get("elapsed_sec")},
+        est_external_cost_usd=0.0,
     )
 
 
