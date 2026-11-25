@@ -56,6 +56,18 @@ private Q_SLOTS:
         QCOMPARE(AgentControlCentre::automationModes().size(), 4);
     }
 
+    void compactControlCentreKeepsPrimaryActionAndStableIds()
+    {
+        AgentControlCentre acc;
+        QCOMPARE(acc.minimumWidth(), 280);
+        auto *start = acc.findChild<QPushButton *>(QStringLiteral("acc_start"));
+        QVERIFY(start);
+        QVERIFY(start->property("bangOnProPrimary").toBool());
+        QVERIFY(acc.findChild<QPushButton *>(QStringLiteral("acc_review_draft")));
+        QVERIFY(acc.findChild<QPushButton *>(QStringLiteral("acc_open_draft")));
+        QVERIFY(acc.findChild<QPushButton *>(QStringLiteral("acc_promote")));
+    }
+
     void buildsRunArgumentsFromUi()
     {
         AgentControlCentre acc;

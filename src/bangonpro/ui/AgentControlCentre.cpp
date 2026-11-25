@@ -13,6 +13,7 @@
 #include <QFileInfo>
 #include <QFormLayout>
 #include <QGroupBox>
+#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QJsonArray>
@@ -23,6 +24,7 @@
 #include <QPlainTextEdit>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QSizePolicy>
 #include <QSplitter>
 #include <QTimer>
 #include <QTreeWidget>
@@ -99,19 +101,33 @@ QStringList AgentControlCentre::automationModes()
 void AgentControlCentre::buildUi()
 {
     auto *root = new QVBoxLayout(this);
-    root->setContentsMargins(6, 6, 6, 6);
+    root->setContentsMargins(8, 8, 8, 8);
+    root->setSpacing(8);
 
-    auto *jobBox = new QGroupBox(tr("Production Job"), this);
+    auto *jobBox = new QGroupBox(tr("Production setup"), this);
     auto *form = new QFormLayout(jobBox);
+    form->setContentsMargins(8, 8, 8, 8);
+    form->setHorizontalSpacing(8);
+    form->setVerticalSpacing(4);
+    form->setRowWrapPolicy(QFormLayout::WrapLongRows);
+    form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
     m_modeCombo = new QComboBox(jobBox);
     m_modeCombo->setObjectName(QStringLiteral("acc_mode"));
-    m_modeCombo->addItem(tr("Manual editing (agents on request)"), QStringLiteral("manual"));
-    m_modeCombo->addItem(tr("Assisted (every edit needs approval)"), QStringLiteral("assisted"));
-    m_modeCombo->addItem(tr("Autonomous first cut (isolated draft)"), QStringLiteral("autonomous_first_cut"));
-    m_modeCombo->addItem(tr("Full production draft (isolated draft)"), QStringLiteral("full_production_draft"));
+    m_modeCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    m_modeCombo->setMinimumContentsLength(16);
+    m_modeCombo->addItem(tr("Manual"), QStringLiteral("manual"));
+    m_modeCombo->addItem(tr("Assisted"), QStringLiteral("assisted"));
+    m_modeCombo->addItem(tr("Autonomous first cut"), QStringLiteral("autonomous_first_cut"));
+    m_modeCombo->addItem(tr("Full production draft"), QStringLiteral("full_production_draft"));
+    m_modeCombo->setItemData(0, tr("Agents run only on request"), Qt::ToolTipRole);
+    m_modeCombo->setItemData(1, tr("Each edit requires approval"), Qt::ToolTipRole);
+    m_modeCombo->setItemData(2, tr("Create a reversible first cut in an isolated draft"), Qt::ToolTipRole);
+    m_modeCombo->setItemData(3, tr("Create a complete isolated production draft"), Qt::ToolTipRole);
     m_modeCombo->setCurrentIndex(2);
     m_profileCombo = new QComboBox(jobBox);
     m_profileCombo->setObjectName(QStringLiteral("acc_profile"));
+    m_profileCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    m_profileCombo->setMinimumContentsLength(16);
     m_profileCombo->addItem(tr("Podcast Multicam"), QStringLiteral("podcast_multicam"));
     m_profileCombo->addItem(tr("Gameshow Multicam"), QStringLiteral("gameshow_multicam"));
     m_profileCombo->addItem(tr("Sports Discussion"), QStringLiteral("sports_discussion"));
@@ -120,15 +136,14 @@ void AgentControlCentre::buildUi()
     m_profileCombo->addItem(tr("Social Short (9:16)"), QStringLiteral("social_short"));
     m_seriesEdit = new QLineEdit(jobBox);
     m_seriesEdit->setObjectName(QStringLiteral("acc_series"));
-    m_seriesEdit->setPlaceholderText(tr("Series id (reuses approved preferences)"));
+    m_seriesEdit->setPlaceholderText(tr("Series ID"));
     m_episodeEdit = new QLineEdit(jobBox);
     m_episodeEdit->setObjectName(QStringLiteral("acc_episode"));
-    m_episodeEdit->setPlaceholderText(tr("Episode title for the title card"));
+    m_episodeEdit->setPlaceholderText(tr("Episode title"));
     m_briefEdit = new QPlainTextEdit(jobBox);
     m_briefEdit->setObjectName(QStringLiteral("acc_brief"));
     m_briefEdit->setPlaceholderText(tr("Production instructions, e.g. \"Tight 25-minute cut, match cameras, captions, social clips\""));
     m_briefEdit->setMaximumHeight(70);
-    auto *optRow = new QHBoxLayout;
     m_exportCheck = new QCheckBox(tr("Render master"), jobBox);
     m_exportCheck->setObjectName(QStringLiteral("acc_export"));
     m_budgetSpin = new QDoubleSpinBox(jobBox);
@@ -136,21 +151,20 @@ void AgentControlCentre::buildUi()
     m_budgetSpin->setPrefix(QStringLiteral("$"));
     m_budgetSpin->setRange(0.0, 500.0);
     m_budgetSpin->setToolTip(tr("External model budget for this job (0 = local only)"));
-    optRow->addWidget(m_exportCheck);
-    optRow->addStretch(1);
-    optRow->addWidget(new QLabel(tr("External budget"), jobBox));
-    optRow->addWidget(m_budgetSpin);
     form->addRow(tr("Mode"), m_modeCombo);
     form->addRow(tr("Profile"), m_profileCombo);
     form->addRow(tr("Series"), m_seriesEdit);
     form->addRow(tr("Episode"), m_episodeEdit);
     form->addRow(tr("Brief"), m_briefEdit);
-    form->addRow(optRow);
+    form->addRow(tr("External budget"), m_budgetSpin);
+    form->addRow(m_exportCheck);
     root->addWidget(jobBox);
 
     auto *runRow = new QHBoxLayout;
-    m_startBtn = new QPushButton(tr("Start Job"), this);
+    runRow->setSpacing(4);
+    m_startBtn = new QPushButton(tr("Start production"), this);
     m_startBtn->setObjectName(QStringLiteral("acc_start"));
+    m_startBtn->setProperty("bangOnProPrimary", true);
     m_cancelBtn = new QPushButton(tr("Cancel"), this);
     m_cancelBtn->setObjectName(QStringLiteral("acc_cancel"));
     m_resumeBtn = new QPushButton(tr("Resume"), this);
@@ -163,6 +177,7 @@ void AgentControlCentre::buildUi()
     m_progress = new QProgressBar(this);
     m_progress->setObjectName(QStringLiteral("acc_progress"));
     m_progress->setRange(0, 100);
+    m_progress->setAccessibleName(tr("Production progress"));
     m_statusLabel = new QLabel(tr("No job running"), this);
     m_statusLabel->setObjectName(QStringLiteral("acc_status"));
     m_statusLabel->setWordWrap(true);
@@ -175,7 +190,9 @@ void AgentControlCentre::buildUi()
     m_agentTree->setHeaderLabels({tr("Agent"), tr("Status"), tr("Conf."), tr("Ops"), tr("Engine"), tr("Result / reason")});
     m_agentTree->setRootIsDecorated(false);
     m_agentTree->setUniformRowHeights(true);
+    m_agentTree->header()->setMinimumSectionSize(40);
     m_agentTree->header()->setStretchLastSection(true);
+    m_agentTree->setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
     for (const AgentRow &r : kAgents) {
         auto *item = new QTreeWidgetItem(m_agentTree);
         item->setText(ColAgent, tr(r.name));
@@ -189,26 +206,32 @@ void AgentControlCentre::buildUi()
             item->setToolTip(ColAgent, tr("Untick to disable this agent for the next job"));
         }
     }
-    m_agentTree->resizeColumnToContents(ColAgent);
+    m_agentTree->setColumnWidth(ColAgent, 160);
+    m_agentTree->setColumnWidth(ColStatus, 100);
+    m_agentTree->setColumnWidth(ColConfidence, 60);
+    m_agentTree->setColumnWidth(ColOps, 44);
+    m_agentTree->setColumnWidth(ColEngine, 84);
     m_agentTree->setTextElideMode(Qt::ElideRight);
-    m_agentTree->setMinimumHeight(220);
-    setMinimumWidth(340);
+    m_agentTree->setMinimumHeight(144);
+    setMinimumWidth(280);
+    setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
 
     auto *lower = new QWidget(split);
     auto *lowerLay = new QVBoxLayout(lower);
     lowerLay->setContentsMargins(0, 0, 0, 0);
     auto *agentRow = new QHBoxLayout;
-    m_acceptBtn = new QPushButton(tr("Accept Agent"), lower);
+    agentRow->setSpacing(4);
+    m_acceptBtn = new QPushButton(tr("Accept"), lower);
     m_acceptBtn->setObjectName(QStringLiteral("acc_accept"));
-    m_rejectBtn = new QPushButton(tr("Reject Agent"), lower);
+    m_rejectBtn = new QPushButton(tr("Reject"), lower);
     m_rejectBtn->setObjectName(QStringLiteral("acc_reject"));
-    m_rerunBtn = new QPushButton(tr("Rerun Agent"), lower);
+    m_rerunBtn = new QPushButton(tr("Rerun"), lower);
     m_rerunBtn->setObjectName(QStringLiteral("acc_rerun"));
     agentRow->addWidget(m_acceptBtn);
     agentRow->addWidget(m_rejectBtn);
     agentRow->addWidget(m_rerunBtn);
     lowerLay->addLayout(agentRow);
-    lowerLay->addWidget(new QLabel(tr("Needs your attention"), lower));
+    lowerLay->addWidget(new QLabel(tr("Review required"), lower));
     m_reviewList = new QListWidget(lower);
     m_reviewList->setObjectName(QStringLiteral("acc_review"));
     lowerLay->addWidget(m_reviewList, 1);
@@ -217,17 +240,18 @@ void AgentControlCentre::buildUi()
     m_summaryView->setReadOnly(true);
     m_summaryView->setPlaceholderText(tr("Final production summary appears here"));
     lowerLay->addWidget(m_summaryView, 1);
-    auto *draftRow = new QHBoxLayout;
-    m_reviewBtn = new QPushButton(tr("Review Draft in Timeline"), lower);
+    auto *draftRow = new QGridLayout;
+    draftRow->setSpacing(4);
+    m_reviewBtn = new QPushButton(tr("Review timeline"), lower);
     m_reviewBtn->setObjectName(QStringLiteral("acc_review_draft"));
-    m_openDraftBtn = new QPushButton(tr("Open Draft Project"), lower);
+    m_openDraftBtn = new QPushButton(tr("Open draft"), lower);
     m_openDraftBtn->setObjectName(QStringLiteral("acc_open_draft"));
-    m_promoteBtn = new QPushButton(tr("Promote…"), lower);
+    m_promoteBtn = new QPushButton(tr("Save approved draft…"), lower);
     m_promoteBtn->setObjectName(QStringLiteral("acc_promote"));
     m_promoteBtn->setToolTip(tr("Copy the draft into a project file. Replacing an existing edit requires approval."));
-    draftRow->addWidget(m_reviewBtn);
-    draftRow->addWidget(m_openDraftBtn);
-    draftRow->addWidget(m_promoteBtn);
+    draftRow->addWidget(m_reviewBtn, 0, 0);
+    draftRow->addWidget(m_openDraftBtn, 0, 1);
+    draftRow->addWidget(m_promoteBtn, 1, 0, 1, 2);
     lowerLay->addLayout(draftRow);
     split->addWidget(m_agentTree);
     split->addWidget(lower);

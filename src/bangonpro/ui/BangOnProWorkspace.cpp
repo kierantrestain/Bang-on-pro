@@ -474,16 +474,16 @@ QString brandStyleSheet()
                "}"
                "QLabel#bangOnProTitle {"
                "  font-size: 13px;"
-               "  font-weight: 700;"
+               "  font-weight: 600;"
                "  color: #FFFFFF;"
                "}"
                "QLabel#bangOnProBadge {"
-               "  background-color: %5;"
-               "  color: #FFFFFF;"
-               "  font-size: 10px;"
-               "  font-weight: 700;"
-               "  padding: 2px 6px;"
-               "  border-radius: 3px;"
+               "  background-color: transparent;"
+               "  color: %2;"
+               "  font-size: 12px;"
+               "  font-weight: 600;"
+               "  padding: 4px 8px;"
+               "  border-left: 2px solid %5;"
                "}"
                "QLabel#bangOnProStatusBadge {"
                "  background-color: %6;"
@@ -491,7 +491,7 @@ QString brandStyleSheet()
                "  font-size: 10px;"
                "  font-weight: 600;"
                "  padding: 2px 7px;"
-               "  border-radius: 9px;"
+               "  border-radius: 4px;"
                "}"
                "QLabel#bangOnProStatusBadge[statusState=\"proposal\"] { background-color: #4A2810; color: #FFB07C; }"
                "QLabel#bangOnProStatusBadge[statusState=\"ok\"] { background-color: #133B2A; color: #6CE5AD; }"
@@ -544,7 +544,7 @@ QString brandStyleSheet()
                "QPushButton[bangOnProChip=\"true\"] {"
                "  background-color: %5;"
                "  border: 1px solid %3;"
-               "  border-radius: 10px;"
+               "  border-radius: 4px;"
                "  padding: 4px 8px;"
                "  font-size: 10px;"
                "  text-align: left;"
@@ -556,15 +556,15 @@ QString brandStyleSheet()
                "QPushButton[bangOnProPrimary=\"true\"] {"
                "  background-color: %1;"
                "  border-color: %1;"
-               "  color: #FFFFFF;"
-               "  font-weight: 700;"
+               "  color: #161616;"
+               "  font-weight: 600;"
                "}"
                "QPushButton[bangOnProPrimary=\"true\"]:hover { background-color: #FF733F; }"
                "QPushButton[bangOnProAccept=\"true\"] {"
                "  background-color: %2;"
                "  border-color: %2;"
-               "  color: #FFFFFF;"
-               "  font-weight: 700;"
+               "  color: #161616;"
+               "  font-weight: 600;"
                "}"
                "QPushButton[bangOnProAccept=\"true\"]:hover { background-color: #28BA7C; }"
                "QPushButton[bangOnProDanger=\"true\"]:hover { background-color: %3; border-color: %3; color: #FFFFFF; }"
@@ -582,7 +582,7 @@ QString brandStyleSheet()
                "  font-size: 10px;"
                "  color: %7;"
                "}"
-               "QProgressBar#agentProgressBar::chunk { background-color: %1; border-radius: 2px; }"
+               "QProgressBar#agentProgressBar::chunk { background-color: #A43D17; border-radius: 2px; }"
                "QToolButton#activityLogToggleButton { color: %7; font-weight: 600; font-size: 11px; }")
                .arg(accent, green, red, selection, well, hairline, text);
 
@@ -611,7 +611,7 @@ QString brandStyleSheet()
                "  background-color: %5;"
                "  color: %4;"
                "  border: 1px solid %2;"
-               "  border-radius: 11px;"
+               "  border-radius: 4px;"
                "  padding: 3px 10px;"
                "  font-size: 11px;"
                "  font-weight: 600;"
@@ -975,7 +975,7 @@ WorkspaceSwitcherBar::WorkspaceSwitcherBar(QWidget *parent)
 {
     qRegisterMetaType<BangOnPro::WorkspaceMode>("BangOnPro::WorkspaceMode");
     setObjectName(QStringLiteral("bangOnProWorkspaceSwitcher"));
-    setFixedHeight(34);
+    setFixedHeight(36);
     buildUi();
     setStyleSheet(brandStyleSheet());
 }
@@ -983,10 +983,10 @@ WorkspaceSwitcherBar::WorkspaceSwitcherBar(QWidget *parent)
 void WorkspaceSwitcherBar::buildUi()
 {
     auto *layout = new QHBoxLayout(this);
-    layout->setContentsMargins(10, 0, 10, 0);
+    layout->setContentsMargins(8, 0, 8, 0);
     layout->setSpacing(2);
 
-    auto *brandTag = new QLabel(QStringLiteral("BANG ON PRO"), this);
+    auto *brandTag = new QLabel(QStringLiteral("Bang On Pro"), this);
     brandTag->setObjectName(QStringLiteral("bangOnProBadge"));
     layout->addWidget(brandTag);
     layout->addSpacing(8);
@@ -1024,7 +1024,7 @@ void WorkspaceSwitcherBar::buildUi()
     m_aiPanelToggleButton->setToolTip(tr("Show or collapse the Bang On Pro AI Assistant dock"));
     layout->addWidget(m_aiPanelToggleButton);
 
-    layout->addSpacing(6);
+    layout->addSpacing(8);
 
     m_saveLayoutButton = new QToolButton(this);
     m_saveLayoutButton->setObjectName(QStringLiteral("workspaceSaveLayoutButton"));

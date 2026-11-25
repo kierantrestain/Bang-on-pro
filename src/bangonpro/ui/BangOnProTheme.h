@@ -21,19 +21,19 @@ namespace BangOnPro {
  */
 struct StudioPaletteTokens
 {
-    static constexpr const char *kWindowChrome = "#0B0D11";
-    static constexpr const char *kPanelSurface = "#12151B";
-    static constexpr const char *kElevatedSurface = "#181C24";
-    static constexpr const char *kElevatedHover = "#222733";
-    static constexpr const char *kSunkenWell = "#080A0D";
-    static constexpr const char *kBorderHairline = "#272D39";
-    static constexpr const char *kBorderActive = "#3A4356";
-    static constexpr const char *kTextPrimary = "#E8ECF2";
-    static constexpr const char *kTextSecondary = "#96A0B2";
-    static constexpr const char *kTextDisabled = "#5C6578";
+    static constexpr const char *kWindowChrome = "#101011";
+    static constexpr const char *kPanelSurface = "#19191B";
+    static constexpr const char *kElevatedSurface = "#232325";
+    static constexpr const char *kElevatedHover = "#2D2D30";
+    static constexpr const char *kSunkenWell = "#0C0C0D";
+    static constexpr const char *kBorderHairline = "#303034";
+    static constexpr const char *kBorderActive = "#55555A";
+    static constexpr const char *kTextPrimary = "#EDEDEF";
+    static constexpr const char *kTextSecondary = "#ACACB2";
+    static constexpr const char *kTextDisabled = "#74747B";
     static constexpr const char *kAccentPrimary = "#FF5A1F";
     static constexpr const char *kAccentPrimaryHover = "#FF733F";
-    static constexpr const char *kAccentSelection = "#2D81FF";
+    static constexpr const char *kAccentSelection = "#285B9A";
     static constexpr const char *kStatusSuccess = "#22A06B";
     static constexpr const char *kStatusWarning = "#E5A00D";
     static constexpr const char *kStatusDanger = "#E04F5F";
