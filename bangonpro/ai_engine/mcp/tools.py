@@ -101,7 +101,7 @@ class BopTools:
     def on_initialize(self, params: dict[str, Any]) -> None:
         info = params.get("clientInfo") or {}
         self.client = str(info.get("title") or info.get("name") or "unknown client")
-        self._presence({"client": self.client, "session_id": self.session_id, "connected_at": _now(), "status": "connected"})
+        self._presence({"client": self.client, "session_id": self.session_id, "connected_at": _now(), "status": "connected", **_reasoning_presence(self.ws)})
 
     def on_call(self, name: str, args: dict[str, Any], ctx: CallContext, phase: str) -> None:
         if phase == "start":
@@ -175,11 +175,61 @@ class BopTools:
             p["file_path"] = str(self.ws.path_allowed(p["file_path"]))
         return out
 
-    def _apply(self, ops: list[dict[str, Any]], args: dict[str, Any], agent: str, label: str) -> dict[str, Any]:
-        res = self.ws.apply(ops, agent_id=agent, expected_revision=args.get("expected_revision"), label=label, task_id=args.get("task_id"), dry_run=bool(args.get("dry_run")))
+    def _apply(self, ops: list[dict[str, Any]], args: dict[str, Any], agent: str, label: str, step: str | None = None) -> dict[str, Any]:
+        try:
+            res = self.ws.apply(ops, agent_id=agent, expected_revision=args.get("expected_revision"), label=label, task_id=args.get("task_id"), dry_run=bool(args.get("dry_run")))
+        except ToolError as exc:
+            if args.get("task_id") and exc.code not in ("STALE_REVISION",):
+                self._task_event(args["task_id"], {"agent": agent, "rejected": exc.code, "message": exc.message[:200], "at": _now()})
+            raise
         if args.get("task_id") and not res.get("dry_run"):
-            self._task_event(args["task_id"], {"agent": agent, "edit": res.get("entry_id"), "label": label, "revision": res["revision"]})
+            ev: dict[str, Any] = {"agent": agent, "edit": res.get("entry_id"), "label": label, "revision": res["revision"]}
+            if step:  # the compound call itself, so a verified task can become a reusable skill
+                ev["step"] = {"tool": step, "args": {k: v for k, v in args.items() if k not in ("expected_revision", "task_id", "dry_run")}}
+            if getattr(self, "_applied_strategy", None):
+                ev["applied_strategy"] = list(self._applied_strategy)
+            self._task_event(args["task_id"], ev)
         return res
+
+    def plan_ops(self, name: str, args: dict[str, Any], v: DraftView) -> tuple[list[dict[str, Any]], str, str]:
+        """The native operations a compound call makes on this draft (shared by editing and in-memory evaluation)."""
+        if name == "bop_edit":
+            ops = [self._frame_op(op, v) for op in args["ops"]]
+            return ops, args["agent"], args.get("label") or f"{args['agent']}: {', '.join(o['type'] for o in ops)[:80]}"
+        if name == "bop_switch_camera":
+            try:
+                ops = switch_camera_ops(v, float(args["start"]), float(args["end"]), args["camera"], reason=str(args.get("reason") or ""))
+            except ValueError as exc:
+                raise ToolError("INVALID_OPERATION", str(exc)) from exc
+            return ops, args.get("agent", "multicam_director"), f"Show {args['camera']} {args['start']}-{args['end']}s{' (' + args['reason'] + ')' if args.get('reason') else ''}"
+        if name == "bop_remove_range":
+            try:
+                ops = remove_range_ops(v, float(args["start"]), float(args["end"]))
+            except ValueError as exc:
+                raise ToolError("INVALID_OPERATION", str(exc)) from exc
+            return ops, args.get("agent", "rough_cut"), f"Remove {args['start']}-{args['end']}s and close the gap"
+        if name == "bop_place_asset":
+            file_path = str(self.ws.path_allowed(args["file"])) if args.get("file") else None
+            media_ref = args.get("media_ref") or ("asset_" + Path(file_path).stem.replace(" ", "_").lower()[:24] if file_path else None)
+            if not media_ref:
+                raise ToolError("INVALID_ARGUMENT", "Give file or media_ref")
+            is_image = bool(file_path and Path(file_path).suffix.lower() in (".png", ".jpg", ".jpeg"))
+            media_dur = None
+            if file_path and not is_image:
+                from bangonpro.ai_engine.agents.ingest_sync import probe_media_file
+
+                media_dur = float(probe_media_file(file_path).get("duration_sec") or 0.0)
+                if float(args.get("source_in", 0.0)) + float(args["duration"]) > media_dur + 1e-3:
+                    raise ToolError("INVALID_OPERATION", f"The file is {media_dur:.2f}s long")
+            rect = _rect(args.get("position"), v.c.width, v.c.height)
+            ops = place_asset_ops(v, media_ref, file_path, float(args["start"]), float(args["duration"]), source_in_sec=float(args.get("source_in", 0.0)), is_image=is_image,
+                                  rect=rect, fade_sec=float(args.get("fade", 0.0)), media_duration_sec=media_dur, name=Path(file_path).name if file_path else "")
+            return ops, args.get("agent", "graphics"), f"Place {Path(file_path).name if file_path else media_ref} at {args['start']}s"
+        if name == "bop_add_title":
+            op = {"type": "add_lower_third", "start": args["start"], "duration": args.get("duration", 4.0),
+                  "params": {"speaker_name": args["text"], "title": args["text"], "subtitle": args.get("subtitle", ""), "position": args.get("position", "bottom_left")}}
+            return [self._frame_op(op, v)], args.get("agent", "graphics"), f"Title '{args['text']}' at {args['start']}s"
+        raise ToolError("INVALID_ARGUMENT", f"{name} is not an editing tool")
 
     # ------------------------------------------------------------ read tools
     def status(self, args: dict[str, Any], ctx: CallContext) -> dict[str, Any]:
@@ -399,52 +449,30 @@ class BopTools:
 
     # ------------------------------------------------------------ write tools
     def edit(self, args: dict[str, Any], ctx: CallContext) -> dict[str, Any]:
-        v = self._view()
-        ops = [self._frame_op(op, v) for op in args["ops"]]
-        return self._apply(ops, args, args["agent"], args.get("label") or f"{args['agent']}: {', '.join(o['type'] for o in ops)[:80]}")
+        return self._compound("bop_edit", args)
 
     def switch_camera(self, args: dict[str, Any], ctx: CallContext) -> dict[str, Any]:
-        v = self._view()
-        try:
-            ops = switch_camera_ops(v, float(args["start"]), float(args["end"]), args["camera"], reason=str(args.get("reason") or ""))
-        except ValueError as exc:
-            raise ToolError("INVALID_OPERATION", str(exc)) from exc
-        if not ops:
-            return {"revision": self.ws.revision, "unchanged": True, "message": f"{args['camera']} is already on screen there"}
-        return self._apply(ops, args, args.get("agent", "multicam_director"), f"Show {args['camera']} {args['start']}-{args['end']}s{' (' + args['reason'] + ')' if args.get('reason') else ''}")
+        return self._compound("bop_switch_camera", args)
 
     def remove_range(self, args: dict[str, Any], ctx: CallContext) -> dict[str, Any]:
-        v = self._view()
-        try:
-            ops = remove_range_ops(v, float(args["start"]), float(args["end"]))
-        except ValueError as exc:
-            raise ToolError("INVALID_OPERATION", str(exc)) from exc
-        return self._apply(ops, args, args.get("agent", "rough_cut"), f"Remove {args['start']}-{args['end']}s and close the gap")
+        return self._compound("bop_remove_range", args)
 
     def place_asset(self, args: dict[str, Any], ctx: CallContext) -> dict[str, Any]:
-        v = self._view()
-        file_path = str(self.ws.path_allowed(args["file"])) if args.get("file") else None
-        media_ref = args.get("media_ref") or ("asset_" + Path(file_path).stem.replace(" ", "_").lower()[:24] if file_path else None)
-        if not media_ref:
-            raise ToolError("INVALID_ARGUMENT", "Give file or media_ref")
-        is_image = bool(file_path and Path(file_path).suffix.lower() in (".png", ".jpg", ".jpeg"))
-        media_dur = None
-        if file_path and not is_image:
-            from bangonpro.ai_engine.agents.ingest_sync import probe_media_file
-
-            media_dur = float(probe_media_file(file_path).get("duration_sec") or 0.0)
-            if float(args.get("source_in", 0.0)) + float(args["duration"]) > media_dur + 1e-3:
-                raise ToolError("INVALID_OPERATION", f"The file is {media_dur:.2f}s long")
-        rect = _rect(args.get("position"), v.c.width, v.c.height)
-        ops = place_asset_ops(v, media_ref, file_path, float(args["start"]), float(args["duration"]), source_in_sec=float(args.get("source_in", 0.0)), is_image=is_image,
-                              rect=rect, fade_sec=float(args.get("fade", 0.0)), media_duration_sec=media_dur, name=Path(file_path).name if file_path else "")
-        return self._apply(ops, args, args.get("agent", "graphics"), f"Place {Path(file_path).name if file_path else media_ref} at {args['start']}s")
+        return self._compound("bop_place_asset", args)
 
     def add_title(self, args: dict[str, Any], ctx: CallContext) -> dict[str, Any]:
-        v = self._view()
-        op = {"type": "add_lower_third", "start": args["start"], "duration": args.get("duration", 4.0),
-              "params": {"speaker_name": args["text"], "title": args["text"], "subtitle": args.get("subtitle", ""), "position": args.get("position", "bottom_left")}}
-        return self._apply([self._frame_op(op, v)], args, args.get("agent", "graphics"), f"Title '{args['text']}' at {args['start']}s")
+        return self._compound("bop_add_title", args)
+
+    def _compound(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+        ops, agent, label = self.plan_ops(name, args, self._view())
+        if not ops and name == "bop_switch_camera":
+            return {"revision": self.ws.revision, "unchanged": True, "message": f"{args['camera']} is already on screen there"}
+        return self._apply(ops, args, agent, label, step=name)
+
+    def learn(self, args: dict[str, Any], ctx: CallContext) -> dict[str, Any]:
+        from bangonpro.ai_engine.department.learning_controls import learn_action
+
+        return learn_action(self, args)
 
     def history(self, args: dict[str, Any], ctx: CallContext) -> dict[str, Any]:
         act = args.get("action", "list")
@@ -661,6 +689,14 @@ class BopTools:
                                                          "finding": {"type": "object"}, "expect": {"type": "array", "items": EXPECT_ITEM}, "auto_correct": {"type": "boolean"}}}, self.task),
             Tool("bop_preview", "Render preview", "Render a low-resolution preview of a range (default 30 s) and check it; returns a contact sheet of the rendered shots.",
                  {"properties": rng}, self.preview, read_only=True),
+            Tool("bop_learn", "Department learning", "The Learning Agent's shared memory: status, lessons (retrieve for agents), skills, strategies (with evaluations), performance by agent and strategy version; "
+                 "the editor's controls approve / reject / disable / rollback, settings, optimise (bounded test of candidates), export, forget.",
+                 {"properties": {"action": {"type": "string", "enum": ["status", "lessons", "skills", "strategies", "performance", "history", "optimise", "approve", "reject", "disable", "enable",
+                                                                       "rollback", "settings", "export", "forget"]},
+                                 "agents": {"type": "array", "items": T_AGENT}, "agent": T_AGENT, "text": {"type": "string", "maxLength": 300}, "id": {"type": "string", "maxLength": 64},
+                                 "version": {"type": "integer", "minimum": 0}, "kind": {"type": "string", "enum": ["knowledge", "skill", "strategy"]},
+                                 "setting": {"type": "string", "maxLength": 40}, "value": {}, "series": {"type": "string", "maxLength": 80}, "path": {"type": "string", "maxLength": 400},
+                                 "everything": {"type": "boolean"}}, "required": ["action"]}, self.learn),
             Tool("bop_live", "Live app", "The running Bang On Pro editor: status, state (its real timeline incl. manual changes), propose native ops for the editor's per-operation approval, undo, redo.",
                  {"required": ["action"], "properties": {"action": {"type": "string", "enum": ["status", "state", "propose", "undo", "redo"]}, "agent": T_AGENT, "ops": {"type": "array", "items": {"type": "object"}},
                                                          "expected_revision": {"type": "integer"}, "label": {"type": "string"}, "project_id": {"type": "string"}, "sequence_id": {"type": "string"},
@@ -702,6 +738,34 @@ def _preferences(job: Any) -> dict[str, Any]:
         return {"series": job.doc.get("series_id") or "default", "version": store.active_version(), "approved": store.active_overlay()}
     except Exception as exc:  # noqa: BLE001 - preferences are advisory context
         return {"unavailable": str(exc)[:120]}
+
+
+def _reasoning_presence(ws: Workspace) -> dict[str, Any]:
+    """Lines for the Agent Control Centre header: app-driven providers and department learning."""
+    out: dict[str, Any] = {}
+    try:
+        from bangonpro.ai_engine.mcp.reasoning import PROVIDER_INFO, reasoning_status
+
+        rs = reasoning_status()
+        auth = [p for p in rs["priority"] if rs["providers"][p]["authorised"]]
+        if auth:
+            line = "Reasoning: " + " > ".join(PROVIDER_INFO[p]["title"] + ("" if rs["providers"][p]["available"] else " (waiting)") for p in auth)
+            if rs.get("active") in auth:
+                line += f" · active {PROVIDER_INFO[rs['active']]['title']}"
+            ev = (rs.get("failover_events") or [])[-1:]
+            if ev:
+                line += f" · last switch {ev[0]['from']} > {ev[0].get('to') or 'none'} ({ev[0]['kind']})"
+            out["providers"] = line
+        from bangonpro.ai_engine.department.intelligence import Intelligence
+        from bangonpro.ai_engine.mcp.execution import learning_line
+
+        intel = Intelligence.for_job(ws.job)
+        out["learning"] = learning_line(intel)
+        pend = intel.summary()["awaiting_approval"]
+        out["learning_review"] = [{"agent": s["agent"], "message": f"Strategy v{s['version']} awaits your approval: {s['reason'][:100]}"} for s in pend["strategies"]][:5]
+    except Exception:  # noqa: BLE001 - presence is cosmetic
+        pass
+    return out
 
 
 def _live_status() -> dict[str, Any]:

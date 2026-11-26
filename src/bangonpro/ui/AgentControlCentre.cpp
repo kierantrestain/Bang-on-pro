@@ -32,6 +32,7 @@
 #include <QSizePolicy>
 #include <QSpinBox>
 #include <QSplitter>
+#include <QStringList>
 #include <QTimer>
 #include <QTreeWidget>
 #include <QVBoxLayout>
@@ -997,8 +998,19 @@ void AgentControlCentre::loadAgentSession(const QJsonObject &presence, const QJs
     if (edits > 0) {
         text = tr("%1 · %n agent edit(s)", nullptr, edits).arg(text);
     }
+    // V1.5: app-driven reasoning providers (order, active, last automatic switch) and department learning.
+    // Both lines are written by the Python side; an external MCP client's own session is the line above.
+    QStringList extra;
+    for (const char *key : {"providers", "failover", "learning"}) {
+        const QString line = presence.value(QLatin1String(key)).toString();
+        if (!line.isEmpty()) {
+            extra << (QLatin1String(key) == QLatin1String("failover") ? tr("Switched provider: %1").arg(line) : line);
+        }
+    }
+    m_agentDetailText = extra.join(QStringLiteral("\n"));
     m_agentSessionText = text;
     m_jobMetaLabel->setText(tr("%1 · %2").arg(QFileInfo(m_jobDir).fileName(), text));
+    m_jobMetaLabel->setToolTip(m_agentDetailText);
     // Unresolved issues from finished agent tasks go to the same review list, under the owning agent.
     const QJsonObject tasks = agentEdits.value(QStringLiteral("tasks")).toObject();
     for (auto t = tasks.constBegin(); t != tasks.constEnd(); ++t) {
@@ -1012,12 +1024,27 @@ void AgentControlCentre::loadAgentSession(const QJsonObject &presence, const QJs
             row->setData(kIdRole, issue.value(QStringLiteral("agent")).toString());
         }
     }
+    // Learned strategies that wait for the editor's approval are review items of the Learning Agent.
+    for (const QJsonValue &u : presence.value(QStringLiteral("learning_review")).toArray()) {
+        const QJsonObject item = u.toObject();
+        QTreeWidgetItem *owner = agentItem(QStringLiteral("learning"));
+        auto *row = new QListWidgetItem(tallyIcon(TallyState::Review),
+                                        QStringLiteral("%1 · %2").arg(owner != nullptr ? owner->text(ColAgent) : QStringLiteral("Learning"),
+                                                                     item.value(QStringLiteral("message")).toString()),
+                                        m_reviewList);
+        row->setData(kIdRole, QStringLiteral("learning"));
+    }
     m_reviewTitle->setText(m_reviewList->count() > 0 ? tr("Review · %1").arg(m_reviewList->count()) : tr("Review"));
 }
 
 QString AgentControlCentre::agentSessionText() const
 {
     return m_agentSessionText;
+}
+
+QString AgentControlCentre::agentDetailText() const
+{
+    return m_agentDetailText;
 }
 
 bool AgentControlCentre::refreshFromDisk()

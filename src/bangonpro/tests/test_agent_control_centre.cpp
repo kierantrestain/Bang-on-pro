@@ -124,6 +124,27 @@ private Q_SLOTS:
         QCOMPARE(acc.reviewItemCount(), before + 1);
     }
 
+    void showsReasoningProvidersFailoverAndLearning()
+    {
+        // V1.5: app-driven provider order and switches plus department learning, in the same header; approvals in Review.
+        AgentControlCentre acc;
+        acc.loadJobStatus(sampleJob(QStringLiteral("draft_ready")));
+        const int before = acc.reviewItemCount();
+        QJsonObject pending{{QStringLiteral("agent"), QStringLiteral("graphics")}, {QStringLiteral("message"), QStringLiteral("Strategy v2 awaits your approval")}};
+        QJsonObject presence{{QStringLiteral("client"), QStringLiteral("Codex")},
+                             {QStringLiteral("status"), QStringLiteral("connected")},
+                             {QStringLiteral("providers"), QStringLiteral("Reasoning: Claude Code (waiting) > OpenAI Codex · active OpenAI Codex")},
+                             {QStringLiteral("failover"), QStringLiteral("claude usage_exhausted > codex")},
+                             {QStringLiteral("learning"), QStringLiteral("Learning: 1 lesson(s), 1 skill(s), 1 strategy update(s)")},
+                             {QStringLiteral("learning_review"), QJsonArray{pending}}};
+        acc.loadAgentSession(presence, QJsonObject());
+        QVERIFY(acc.agentSessionText().contains(QStringLiteral("Codex connected")));
+        QVERIFY(acc.agentDetailText().contains(QStringLiteral("active OpenAI Codex")));
+        QVERIFY(acc.agentDetailText().contains(QStringLiteral("Switched provider: claude usage_exhausted > codex")));
+        QVERIFY(acc.agentDetailText().contains(QStringLiteral("Learning: 1 lesson(s)")));
+        QCOMPARE(acc.reviewItemCount(), before + 1);
+    }
+
     void pollsJobFileAndEmitsFinishedWithSummary()
     {
         QTemporaryDir tmp;

@@ -221,6 +221,13 @@ class ProfilePreferenceStore:
         self.dir.mkdir(parents=True, exist_ok=True)
         with self.corrections_path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(entry, default=str) + "\n")
+        try:  # V1.5: the same human feedback becomes evidence in the department's shared intelligence
+            from bangonpro.ai_engine.department.intelligence import capture_correction
+
+            root = os.environ.get("BANGONPRO_INTEL_DIR") or str(self.dir.parent.parent.parent / "intelligence")
+            capture_correction(self.profile_id, self.series_id, entry, root=root)
+        except Exception:  # noqa: BLE001, S110 - learning is advisory
+            pass
         return entry
 
     def corrections(self) -> list[dict[str, Any]]:

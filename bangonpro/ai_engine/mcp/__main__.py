@@ -1,11 +1,15 @@
-"""``python -m bangonpro.ai_engine.mcp`` - connect Claude Code or Codex to Bang On Pro's agents.
+"""``python -m bangonpro.ai_engine.mcp`` - connect Claude Code, Codex, Grok Build or Antigravity to Bang On Pro's agents.
 
   serve --job DIR [--allow DIR ...]     stdio MCP server (what the AI client starts)
-  config --client claude|codex --job DIR [--allow DIR] [--apply]
+  config --client claude|codex|grok|agy --job DIR [--allow DIR] [--apply]
                                         print (or apply) the client's own connection command
-  authorise --client claude|codex       allow Bang On Pro to ask that CLI for plans (app-driven)
-  revoke                                withdraw that permission
-  instruct --job DIR "instruction"      rules first; the authorised client for anything else
+  authorise --client P [--priority ...] allow Bang On Pro to ask that CLI for plans (app-driven); several may be authorised
+  revoke [--client P]                   withdraw one provider's permission (default: all)
+  providers [--priority P ...] [--test] provider order, availability, cooldowns, failover events; --test makes one minimal call each
+  instruct --job DIR "instruction"      rules first; then a learned skill; then the authorised providers (with failover)
+  resume --job DIR --task ID            continue a blocked or interrupted task from its checkpoint
+  learn --job DIR ACTION [...]          department learning: status, lessons, skills, strategies, performance, optimise,
+                                        approve/reject/disable/enable/rollback, settings, export, forget
   status --job DIR                      connection and draft status
 
 SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
@@ -50,11 +54,19 @@ def client_config(client: str, job: str, allow: list[str]) -> dict[str, Any]:
         add = ["claude", "mcp", "add", "--scope", "user", "bangonpro", "--env", f"PYTHONPATH={pkg_root}", "--", *cmd]
         return {"client": "Claude Code", "command": shlex.join(add), "argv": add,
                 "note": "Claude Code uses your own signed-in account. Read-only tools are marked; Claude asks before edits unless you allow them."}
+    if client in ("grok", "agy"):
+        # Both CLIs read stdio MCP servers from their own settings; we print the standard entry rather than edit unverified files.
+        entry = {"mcpServers": {"bangonpro": {"command": cmd[0], "args": cmd[1:], "env": {"PYTHONPATH": pkg_root}}}}
+        return {"client": {"grok": "Grok Build", "agy": "Google Antigravity"}[client], "json": entry,
+                "note": "Add this stdio server in the client's MCP settings. It runs locally; nothing is exposed to the network. "
+                        "Grok Bot (web/X) can only reach remote MCP servers, so it is not connected to the local editor."}
     toml = "[mcp_servers.bangonpro]\n" + f"command = {json.dumps(cmd[0])}\n" + f"args = {json.dumps(cmd[1:])}\n" + f'env = {{ PYTHONPATH = {json.dumps(pkg_root)} }}\n'
     return {"client": "Codex", "config_file": str(Path.home() / ".codex" / "config.toml"), "toml": toml, "note": "Codex uses your own signed-in ChatGPT account or its configured login."}
 
 
 def apply_config(cfg: dict[str, Any]) -> str:
+    if "json" in cfg:
+        return "add the printed entry in the client's MCP settings"
     if "argv" in cfg:
         if not shutil.which("claude"):
             raise SystemExit("claude is not installed; run the printed command after installing Claude Code")
@@ -90,16 +102,26 @@ def reasoning_fallback(job: str, instruction: str, rec: dict[str, Any], *, allow
     from bangonpro.ai_engine.mcp.execution import run_cycle
     from bangonpro.ai_engine.mcp.reasoning import CliReasoner, ReasonerError
 
+    from bangonpro.ai_engine.mcp.execution import run_skill
+
+    _, bt = make_server(job, allow)
     try:
         rsn = reasoner or CliReasoner()
     except ReasonerError as exc:
+        # No provider: a learned, validated skill can still do it deterministically.
+        sk = run_skill(bt, instruction)
+        if sk is not None and sk["status"] == "verified":
+            return {"path": "skill", **sk}
         return {"path": "rules", "revision": rec, "reasoning": f"unavailable: {exc}"}
-    _, bt = make_server(job, allow)
     out = run_cycle(bt, instruction, rsn)
+    if out.get("reasoner") == "skill":
+        return {"path": "skill", **out}
     job_obj = ProductionJob(job)
     res = out.get("result") or {}
     msg = {"verified": f"Done by the agents ({res.get('edits', 0)} edits, verified by Quality Control)",
-           "needs_attention": f"The agents made {res.get('edits', 0)} edits; {len(res.get('unresolved') or [])} issue(s) need your review"}.get(out["status"], f"The agents could not complete this: {out['status']}")
+           "needs_attention": f"The agents made {res.get('edits', 0)} edits; {len(res.get('unresolved') or [])} issue(s) need your review",
+           "blocked": "No reasoning provider is available right now; the task is saved and resumes where it stopped",
+           "interrupted": "Stopped; the task resumes where it stopped"}.get(out["status"], f"The agents could not complete this: {out['status']}")
     job_obj.doc["last_revision"] = {"revision": rec["revision"], "instruction": instruction, "status": out["status"], "message": msg, "path": out.get("reasoner")}
     job_obj._save(force=True)
     return {"path": "reasoning", "reasoner": out.get("reasoner"), **out}
@@ -112,15 +134,39 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--job", required=True)
     s.add_argument("--allow", action="append", default=[])
     c = sub.add_parser("config")
-    c.add_argument("--client", choices=("claude", "codex"), required=True)
+    c.add_argument("--client", choices=("claude", "codex", "grok", "agy"), required=True)
     c.add_argument("--job", required=True)
     c.add_argument("--allow", action="append", default=[])
     c.add_argument("--apply", action="store_true")
     au = sub.add_parser("authorise")
-    au.add_argument("--client", choices=("claude", "codex"), required=True)
+    au.add_argument("--client", choices=("claude", "codex", "grok", "agy"), required=True)
     au.add_argument("--model")
-    au.add_argument("--max-calls", type=int, default=3)
-    sub.add_parser("revoke")
+    au.add_argument("--max-calls", type=int, default=None)
+    au.add_argument("--max-calls-per-day", type=int, default=None)
+    au.add_argument("--priority", nargs="+")
+    au.add_argument("--allow-api-billing", action="store_true", help="let the CLI use an API key from the environment (paid API usage); off by default")
+    rv = sub.add_parser("revoke")
+    rv.add_argument("--client", choices=("claude", "codex", "grok", "agy"))
+    pv = sub.add_parser("providers")
+    pv.add_argument("--priority", nargs="+")
+    pv.add_argument("--test", action="store_true")
+    rs = sub.add_parser("resume")
+    rs.add_argument("--job", required=True)
+    rs.add_argument("--task", required=True)
+    rs.add_argument("--allow", action="append", default=[])
+    ln = sub.add_parser("learn")
+    ln.add_argument("--job", required=True)
+    ln.add_argument("action")
+    ln.add_argument("--agent")
+    ln.add_argument("--id")
+    ln.add_argument("--version", type=int)
+    ln.add_argument("--kind", choices=("knowledge", "skill", "strategy"))
+    ln.add_argument("--setting")
+    ln.add_argument("--value", help="JSON value")
+    ln.add_argument("--series")
+    ln.add_argument("--path")
+    ln.add_argument("--text")
+    ln.add_argument("--everything", action="store_true")
     ins = sub.add_parser("instruct")
     ins.add_argument("--job", required=True)
     ins.add_argument("--allow", action="append", default=[])
@@ -153,13 +199,45 @@ def main(argv: list[str] | None = None) -> int:
     if a.cmd == "authorise":
         from bangonpro.ai_engine.mcp.reasoning import authorise
 
-        print(json.dumps(authorise(a.client, model=a.model, max_calls_per_task=a.max_calls), indent=1))
+        print(json.dumps(authorise(a.client, model=a.model, max_calls_per_task=a.max_calls, max_calls_per_day=a.max_calls_per_day, priority=a.priority,
+                                   allow_api_billing=a.allow_api_billing), indent=1))
         return 0
     if a.cmd == "revoke":
         from bangonpro.ai_engine.mcp.reasoning import revoke
 
-        revoke()
-        print(json.dumps({"revoked": True}))
+        revoke(a.client)
+        print(json.dumps({"revoked": a.client or "all"}))
+        return 0
+    if a.cmd == "providers":
+        from bangonpro.ai_engine.mcp.reasoning import provider_self_test, reasoning_status, set_priority
+
+        if a.priority:
+            set_priority(a.priority)
+        out: dict[str, Any] = reasoning_status()
+        if a.test:
+            out["self_test"] = provider_self_test()
+        print(json.dumps(out, indent=1, default=str))
+        return 0
+    if a.cmd == "resume":
+        from bangonpro.ai_engine.mcp.execution import resume_cycle
+        from bangonpro.ai_engine.mcp.reasoning import CliReasoner, ReasonerError
+
+        _, bt = make_server(a.job, a.allow)
+        try:
+            rsn: Any = CliReasoner()
+        except ReasonerError as exc:
+            print(json.dumps({"status": "blocked", "reason": str(exc)}))
+            return 1
+        print(json.dumps(resume_cycle(bt, a.task, rsn), indent=1, default=str))
+        return 0
+    if a.cmd == "learn":
+        from bangonpro.ai_engine.department.learning_controls import learn_action
+
+        _, bt = make_server(a.job)
+        largs = {k: v for k, v in {"action": a.action, "agent": a.agent, "id": a.id, "version": a.version, "kind": a.kind, "setting": a.setting,
+                                   "value": json.loads(a.value) if a.value is not None else None, "series": a.series, "path": a.path, "text": a.text,
+                                   "everything": a.everything or None}.items() if v is not None}
+        print(json.dumps(learn_action(bt, largs), indent=1, default=str))
         return 0
     if a.cmd == "instruct":
         print(json.dumps(instruct(a.job, a.instruction, allow=a.allow, range_timeline=tuple(a.range_timeline) if a.range_timeline else None), indent=1, default=str))

@@ -73,6 +73,8 @@ public:
      *  (draft/agent_presence.json and draft/agent_edits.json, written by the MCP adapter). */
     void loadAgentSession(const QJsonObject &presence, const QJsonObject &agentEdits);
     QString agentSessionText() const;
+    /** @brief V1.5: provider order / active provider / last automatic switch and the learning summary (header tooltip). */
+    QString agentDetailText() const;
     /** @brief Start polling <jobDir>/job.json (and summary.md when the job finishes). */
     void setActiveJobDir(const QString &jobDir);
     QString activeJobDir() const;
@@ -167,6 +169,7 @@ private:
     QTimer *m_pollTimer{nullptr};
     QString m_jobDir;
     QString m_agentSessionText;
+    QString m_agentDetailText;
     QString m_jobStatus;
     QString m_draftProject;
     QString m_lastStatusSeen;
