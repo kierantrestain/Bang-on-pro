@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import os
 import platform
 import shutil
@@ -75,7 +76,24 @@ S2_GT: dict[str, Any] = {
     "offsets": {"wide": 0.0, "host": 0.6, "guest": 1.3},
 }
 
-SCENARIOS = {"studio_4cam": S1_GT, "podcast_conversation": S2_GT}
+def _tile(gt: dict[str, Any], k: int, name: str) -> dict[str, Any]:
+    """Repeat a labelled scenario k times (long-form); the gap between blocks is dead air."""
+    period = float(gt["duration"])
+    out: dict[str, Any] = {"name": name, "description": f"{gt['name']} x{k} = {period * k / 60:.1f} min long-form", "duration": period * k, "setup": gt["setup"],
+                           "speech": [], "protected": [], "dead_air": [], "interjections": [], "offsets": gt["offsets"]}
+    for i in range(k):
+        o = i * period
+        out["speech"] += [(r, s + o, e + o) for r, s, e in gt["speech"]]
+        out["protected"] += [(lab, s + o, e + o, need) for lab, s, e, need in gt["protected"]]
+        out["dead_air"] += [(s + o, e + o) for s, e in gt["dead_air"]]
+        out["interjections"] += [(r, s + o, e + o) for r, s, e in gt["interjections"]]
+        if i:
+            out["dead_air"].append((o - 2.0, o + gt["setup"][1]))
+    return out
+
+
+S3_GT = _tile(S2_GT, 8, "podcast_longform")
+SCENARIOS = {"studio_4cam": S1_GT, "podcast_conversation": S2_GT, "podcast_longform": S3_GT}
 
 # Scenario camera role -> camera id per profile (so each profile's speaker/camera map applies).
 PROFILE_CAMERAS: dict[str, dict[str, str]] = {
@@ -112,9 +130,16 @@ def _laughter(duration: float, seed: int) -> np.ndarray:
 
 
 def generate_podcast_conversation(base: Path) -> dict[str, Path]:
+    return _generate_conversation(base, S2_GT)
+
+
+def generate_podcast_longform(base: Path) -> dict[str, Path]:
+    return _generate_conversation(base, S3_GT)
+
+
+def _generate_conversation(base: Path, gt: dict[str, Any]) -> dict[str, Path]:
     from test_ai_production import _synthesize_speech_like_signal, _write_wav_16bit
 
-    gt = S2_GT
     n = int(round(gt["duration"] * SR))
     host = np.zeros(n)
     guest = np.zeros(n)
@@ -136,13 +161,14 @@ def generate_podcast_conversation(base: Path) -> dict[str, Path]:
             place(guest, s, _synthesize_speech_like_signal(e - s, SR, f0_hz=215.0, syllable_hz=4.4, seed=seed + 1), 0.55 if role == "guest" else 0.23)
     for role, s, e in gt["interjections"]:
         place(host if role == "host" else guest, s, _synthesize_speech_like_signal(e - s, SR, f0_hz=150.0, syllable_hz=4.0, seed=999), 0.30)
-    lab, ls, le, _keep = gt["protected"][1]
-    place(host, ls, _laughter(le - ls, 11), 0.40)
-    place(guest, ls, _laughter(le - ls, 12), 0.45)
+    for k, (lab, ls, le, _keep) in enumerate(gt["protected"]):
+        if lab == "laughter":
+            place(host, ls, _laughter(le - ls, 11 + k), 0.40)
+            place(guest, ls, _laughter(le - ls, 12 + k), 0.45)
 
     mixes = {"wide": (0.45, 0.45, 0.6), "host": (1.0, 0.14, 0.55), "guest": (0.14, 1.0, 0.55)}
     colors = {"wide": "#1B3B6F", "host": "#9B2226", "guest": "#2D6A4F"}
-    out_dir = base / "podcast_conversation"
+    out_dir = base / gt["name"]
     out_dir.mkdir(parents=True, exist_ok=True)
     paths: dict[str, Path] = {}
     for idx, (role, (hg, gg, sg)) in enumerate(mixes.items()):
@@ -170,7 +196,7 @@ def generate_studio_4cam(base: Path) -> dict[str, Path]:
     return {k.removeprefix("cam_"): v for k, v in cams.items() if k.startswith("cam_")}
 
 
-GENERATORS = {"studio_4cam": generate_studio_4cam, "podcast_conversation": generate_podcast_conversation}
+GENERATORS = {"studio_4cam": generate_studio_4cam, "podcast_conversation": generate_podcast_conversation, "podcast_longform": generate_podcast_longform}
 
 # ----------------------------------------------------------------------------- runner
 _RUNNER = r"""
@@ -312,6 +338,8 @@ def evaluate(job_dir: Path, gt: dict[str, Any], path_roles: dict[str, str], min_
         "edited_duration_sec": round(sum(durs), 2),
         "sync_error_ms": sync_err,
         "review_items": len(summary.get("review_items", [])),
+        # One-time setup notices (no Whisper model, no speaker names) repeat on every unconfigured job
+        "setup_review_items": sum(1 for i in summary.get("review_items", []) if re.search(r"whisper|speaker names|speaker map|no names for", i, re.I)),
         "qc_findings": summary.get("qc_issue_count"),
         "qc_errors": sum(1 for i in st["qc_report"]["issues"] if i["severity"] == "error"),
         "processing_elapsed_sec": doc.get("processing_elapsed_sec"),
@@ -336,7 +364,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--profiles-from", choices=("baseline", "own"), default="baseline",
                     help="baseline = both versions use V1.2.1 profile files (identical settings); own = each its shipped profiles")
     ap.add_argument("--profiles", nargs="*", default=list(PROFILE_CAMERAS))
-    ap.add_argument("--scenarios", nargs="*", default=list(SCENARIOS))
+    ap.add_argument("--scenarios", nargs="*", default=["studio_4cam", "podcast_conversation"])
     ap.add_argument("--mode", default="full_production_draft")
     ap.add_argument("--export", action="store_true")
     ap.add_argument("--out", default=str(REPO / "docs" / "evidence" / "v1.2.2" / "v121_vs_v122_benchmark.json"))
@@ -397,7 +425,7 @@ def main(argv: list[str] | None = None) -> int:
         vals = [r[key] for r in rows if r["version"] == ver and isinstance(r[key], (int, float))]
         return round(float(np.mean(vals)), 3) if vals else float("nan")
 
-    totals = {ver: {k: agg(ver, k) for k in ("corrective_fixes_needed", "review_items", "qc_findings", "cuts", "speech_retained_pct",
+    totals = {ver: {k: agg(ver, k) for k in ("corrective_fixes_needed", "review_items", "setup_review_items", "qc_findings", "cuts", "speech_retained_pct",
                                               "speech_on_correct_camera_pct", "processing_elapsed_sec", "quality_loop_processing_sec",
                                               "peak_rss_mb", "peak_child_rss_mb", "external_cost_usd")} for ver in versions}
     for ver in versions:

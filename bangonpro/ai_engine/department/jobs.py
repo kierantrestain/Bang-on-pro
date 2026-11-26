@@ -1104,7 +1104,8 @@ _REVIEW_ROOT_CAUSES: tuple[tuple[str, str, re.Pattern[str]], ...] = (
     ("no_spoken_transcript", "editorial_intelligence", re.compile(r"whisper|spoken transcript|speech regions only|captions (are|will be) withheld|vad placeholders", re.I)),
     ("social_not_rendered", "distribution", re.compile(r"SOCIAL_WITHOUT_EXPORT|(social|highlight)[^.]*not rendered", re.I)),
     ("speaker_names_missing", "graphics", re.compile(r"no names for|no speakers identified for lower thirds|speaker_names", re.I)),
-    ("colour_unmatched", "colourist", re.compile(r"hit the gain limit|differs from \S+ by delta e", re.I)),
+    ("colour_unmatched", "colourist", re.compile(r"hit the gain limit|differs from \S+ by delta e|grey-world fallback", re.I)),
+    ("vertical_framing_uncertain", "distribution", re.compile(r"vertical clip \d+: no subject evidence", re.I)),
     ("uncertain_speaker", "rough_cut", re.compile(r"low-confidence transcript segment|shots? to check for pacing or angle", re.I)),
 )
 

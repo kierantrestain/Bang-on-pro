@@ -1,0 +1,1396 @@
+{
+  "evidence_class": "synthetic generated multicamera scenarios; ground-truth editorial evaluation; machine time only",
+  "identical_inputs": {
+    "footage": "same generated files for both versions",
+    "briefs": {
+      "podcast_multicam": "Conversational cut that keeps the natural rhythm, match the cameras, captions and social clips",
+      "gameshow_multicam": "Build the episode with reactions and laughter, lower thirds and highlights",
+      "sports_discussion": "Fast-paced panel cut, keep the banter, highlights for social",
+      "daily_news": "Tight news package, remove dead air, captions and lower thirds"
+    },
+    "mode": "full_production_draft",
+    "export": false,
+    "profiles_from": "baseline",
+    "budget_usd": 0.0
+  },
+  "human_editing_time": "NOT MEASURED - requires paired editor sessions (EXT-003)",
+  "host": {
+    "platform": "Linux-6.18.44-fc-v880-x86_64-with-glibc2.39",
+    "machine": "x86_64",
+    "cpu_count": 4,
+    "python": "3.13.18"
+  },
+  "scenarios": {
+    "studio_4cam": {
+      "name": "studio_4cam",
+      "description": "14 s, 4 cameras, mixed 25/30 fps, setup delay, 2 s dead air, crosstalk (existing V1.2 generator)",
+      "duration": 14.0,
+      "setup": [
+        0.0,
+        2.0
+      ],
+      "speech": [
+        [
+          "host",
+          2.0,
+          5.5
+        ],
+        [
+          "guest",
+          7.5,
+          11.2
+        ],
+        [
+          "both",
+          11.2,
+          12.6
+        ],
+        [
+          "host",
+          12.6,
+          14.0
+        ]
+      ],
+      "protected": [],
+      "dead_air": [
+        [
+          5.5,
+          7.5
+        ]
+      ],
+      "interjections": [],
+      "offsets": {
+        "wide": 0.0,
+        "host": 0.4,
+        "guest": 0.88,
+        "reaction": 1.2
+      }
+    },
+    "podcast_conversation": {
+      "name": "podcast_conversation",
+      "description": "47 s, 3 cameras, reflective pause inside a turn, laughter, a 0.35 s interjection, 4.5 s dead air, crosstalk",
+      "duration": 47.0,
+      "setup": [
+        0.0,
+        3.0
+      ],
+      "speech": [
+        [
+          "host",
+          3.0,
+          9.0
+        ],
+        [
+          "host",
+          10.2,
+          14.0
+        ],
+        [
+          "guest",
+          14.5,
+          21.0
+        ],
+        [
+          "host",
+          23.0,
+          29.0
+        ],
+        [
+          "guest",
+          33.5,
+          39.5
+        ],
+        [
+          "both",
+          39.5,
+          41.0
+        ],
+        [
+          "host",
+          41.0,
+          45.0
+        ]
+      ],
+      "protected": [
+        [
+          "reflective_pause",
+          9.0,
+          10.2,
+          0.7
+        ],
+        [
+          "laughter",
+          21.0,
+          22.6,
+          1.2
+        ]
+      ],
+      "dead_air": [
+        [
+          29.0,
+          33.5
+        ]
+      ],
+      "interjections": [
+        [
+          "host",
+          17.0,
+          17.35
+        ]
+      ],
+      "offsets": {
+        "wide": 0.0,
+        "host": 0.6,
+        "guest": 1.3
+      }
+    }
+  },
+  "pause_keep_sec_ground_truth": {
+    "podcast_multicam": 0.7,
+    "gameshow_multicam": 0.6,
+    "sports_discussion": 0.6,
+    "daily_news": 0.4
+  },
+  "totals": {
+    "v1.2.2": {
+      "corrective_fixes_needed": 1.25,
+      "review_items": 8.0,
+      "setup_review_items": 2.0,
+      "qc_findings": 9.5,
+      "cuts": 6.25,
+      "speech_retained_pct": 99.663,
+      "speech_on_correct_camera_pct": 88.013,
+      "processing_elapsed_sec": 5.26,
+      "quality_loop_processing_sec": 0.014,
+      "peak_rss_mb": 232.438,
+      "peak_child_rss_mb": 227.575,
+      "external_cost_usd": 0.0,
+      "reedit_editorial_sec_mean": 0.018,
+      "fixes_total": 10,
+      "fixes_by_type": {
+        "reflective_pause_removed": 4,
+        "shot_below_minimum": 2,
+        "speech_on_wrong_camera": 4
+      }
+    },
+    "v1.3": {
+      "corrective_fixes_needed": 0.125,
+      "review_items": 6.375,
+      "setup_review_items": 2.0,
+      "qc_findings": 9.0,
+      "cuts": 6.5,
+      "speech_retained_pct": 99.663,
+      "speech_on_correct_camera_pct": 99.0,
+      "processing_elapsed_sec": 6.932,
+      "quality_loop_processing_sec": 0.013,
+      "peak_rss_mb": 231.688,
+      "peak_child_rss_mb": 238.062,
+      "external_cost_usd": 0.0,
+      "reedit_editorial_sec_mean": 0.006,
+      "fixes_total": 1,
+      "fixes_by_type": {
+        "shot_below_minimum": 1
+      }
+    }
+  },
+  "rows": [
+    {
+      "version": "v1.2.2",
+      "profile": "podcast_multicam",
+      "scenario": "studio_4cam",
+      "corrective_fixes_needed": 0,
+      "fixes_by_type": {},
+      "speech_retained_pct": 99.4,
+      "protected": [],
+      "dead_air": [
+        {
+          "span": [
+            5.5,
+            7.5
+          ],
+          "remaining_sec": 0.69,
+          "ok": true
+        }
+      ],
+      "setup_kept_sec": 0.2,
+      "speech_on_correct_camera_pct": 100.0,
+      "cuts": 3,
+      "mean_shot_sec": 2.71,
+      "edited_duration_sec": 10.84,
+      "sync_error_ms": {
+        "wide": 0.0,
+        "host": 0.0,
+        "guest": 0.0,
+        "reaction": 0.0
+      },
+      "review_items": 9,
+      "setup_review_items": 2,
+      "qc_findings": 6,
+      "qc_errors": 0,
+      "processing_elapsed_sec": 4.484,
+      "quality_loop_processing_sec": 0.014,
+      "quality_loop_attempts": 2,
+      "corrections_applied": 0,
+      "external_cost_usd": 0.0,
+      "agent_sec": {
+        "executive": 0.015,
+        "learning": 0.0,
+        "media_ingest": 2.686,
+        "synchronisation": 0.699,
+        "editorial_intelligence": 0.077,
+        "multicam_director": 0.007,
+        "rough_cut": 0.295,
+        "audio_engineer": 0.571,
+        "colourist": 0.026,
+        "captions": 0.0,
+        "graphics": 0.006,
+        "quality_control": 0.009,
+        "distribution": 0.025
+      },
+      "editorial_cache_hits": [],
+      "status": "draft_ready",
+      "source_integrity_verified": true,
+      "wall_sec": 4.54,
+      "peak_rss_mb": 209.8,
+      "peak_child_rss_mb": 200.4,
+      "reedit": {
+        "processing_elapsed_sec": 0.949,
+        "editorial_sec": 0.016,
+        "editorial_cache_hits": [
+          "editorial:transcript"
+        ],
+        "wall_sec": 1.01
+      }
+    },
+    {
+      "version": "v1.3",
+      "profile": "podcast_multicam",
+      "scenario": "studio_4cam",
+      "corrective_fixes_needed": 0,
+      "fixes_by_type": {},
+      "speech_retained_pct": 99.4,
+      "protected": [],
+      "dead_air": [
+        {
+          "span": [
+            5.5,
+            7.5
+          ],
+          "remaining_sec": 0.69,
+          "ok": true
+        }
+      ],
+      "setup_kept_sec": 0.2,
+      "speech_on_correct_camera_pct": 100.0,
+      "cuts": 3,
+      "mean_shot_sec": 2.71,
+      "edited_duration_sec": 10.84,
+      "sync_error_ms": {
+        "wide": 0.0,
+        "host": 0.0,
+        "guest": 0.0,
+        "reaction": 0.0
+      },
+      "review_items": 7,
+      "setup_review_items": 2,
+      "qc_findings": 6,
+      "qc_errors": 0,
+      "processing_elapsed_sec": 6.275,
+      "quality_loop_processing_sec": 0.008,
+      "quality_loop_attempts": 2,
+      "corrections_applied": 0,
+      "external_cost_usd": 0.0,
+      "agent_sec": {
+        "executive": 0.003,
+        "learning": 0.001,
+        "media_ingest": 2.736,
+        "synchronisation": 0.741,
+        "editorial_intelligence": 0.067,
+        "multicam_director": 0.003,
+        "rough_cut": 0.322,
+        "audio_engineer": 0.597,
+        "colourist": 0.015,
+        "captions": 0.0,
+        "graphics": 0.002,
+        "quality_control": 0.008,
+        "distribution": 1.719
+      },
+      "editorial_cache_hits": [],
+      "status": "draft_ready",
+      "source_integrity_verified": true,
+      "wall_sec": 6.33,
+      "peak_rss_mb": 209.8,
+      "peak_child_rss_mb": 224.6,
+      "reedit": {
+        "processing_elapsed_sec": 2.443,
+        "editorial_sec": 0.005,
+        "editorial_cache_hits": [
+          "editorial:transcript"
+        ],
+        "wall_sec": 2.49
+      }
+    },
+    {
+      "version": "v1.3",
+      "profile": "podcast_multicam",
+      "scenario": "podcast_conversation",
+      "corrective_fixes_needed": 0,
+      "fixes_by_type": {},
+      "speech_retained_pct": 100.0,
+      "protected": [
+        {
+          "label": "reflective_pause",
+          "kept_sec": 1.2,
+          "required_sec": 0.7,
+          "ok": true
+        },
+        {
+          "label": "laughter",
+          "kept_sec": 1.6,
+          "required_sec": 1.2,
+          "ok": true
+        }
+      ],
+      "dead_air": [
+        {
+          "span": [
+            29.0,
+            33.5
+          ],
+          "remaining_sec": 0.69,
+          "ok": true
+        }
+      ],
+      "setup_kept_sec": 0.2,
+      "speech_on_correct_camera_pct": 99.6,
+      "cuts": 8,
+      "mean_shot_sec": 4.28,
+      "edited_duration_sec": 38.56,
+      "sync_error_ms": {
+        "wide": 0.0,
+        "host": 0.0,
+        "guest": 0.0
+      },
+      "review_items": 6,
+      "setup_review_items": 2,
+      "qc_findings": 11,
+      "qc_errors": 0,
+      "processing_elapsed_sec": 9.071,
+      "quality_loop_processing_sec": 0.014,
+      "quality_loop_attempts": 2,
+      "corrections_applied": 0,
+      "external_cost_usd": 0.0,
+      "agent_sec": {
+        "executive": 0.003,
+        "learning": 0.0,
+        "media_ingest": 2.565,
+        "synchronisation": 1.259,
+        "editorial_intelligence": 0.145,
+        "multicam_director": 0.005,
+        "rough_cut": 0.771,
+        "audio_engineer": 1.019,
+        "colourist": 0.026,
+        "captions": 0.0,
+        "graphics": 0.002,
+        "quality_control": 0.018,
+        "distribution": 3.186
+      },
+      "editorial_cache_hits": [],
+      "status": "draft_ready",
+      "source_integrity_verified": true,
+      "wall_sec": 9.14,
+      "peak_rss_mb": 253.6,
+      "peak_child_rss_mb": 253.6,
+      "reedit": {
+        "processing_elapsed_sec": 4.825,
+        "editorial_sec": 0.006,
+        "editorial_cache_hits": [
+          "editorial:transcript"
+        ],
+        "wall_sec": 4.88
+      }
+    },
+    {
+      "version": "v1.2.2",
+      "profile": "podcast_multicam",
+      "scenario": "podcast_conversation",
+      "corrective_fixes_needed": 3,
+      "fixes_by_type": {
+        "reflective_pause_removed": 1,
+        "shot_below_minimum": 2
+      },
+      "speech_retained_pct": 100.0,
+      "protected": [
+        {
+          "label": "reflective_pause",
+          "kept_sec": 0.59,
+          "required_sec": 0.7,
+          "ok": false
+        },
+        {
+          "label": "laughter",
+          "kept_sec": 1.6,
+          "required_sec": 1.2,
+          "ok": true
+        }
+      ],
+      "dead_air": [
+        {
+          "span": [
+            29.0,
+            33.5
+          ],
+          "remaining_sec": 0.69,
+          "ok": true
+        }
+      ],
+      "setup_kept_sec": 0.2,
+      "speech_on_correct_camera_pct": 99.6,
+      "cuts": 9,
+      "mean_shot_sec": 3.8,
+      "edited_duration_sec": 38.0,
+      "sync_error_ms": {
+        "wide": 0.0,
+        "host": 0.0,
+        "guest": 0.0
+      },
+      "review_items": 8,
+      "setup_review_items": 2,
+      "qc_findings": 13,
+      "qc_errors": 0,
+      "processing_elapsed_sec": 5.887,
+      "quality_loop_processing_sec": 0.018,
+      "quality_loop_attempts": 4,
+      "corrections_applied": 1,
+      "external_cost_usd": 0.0,
+      "agent_sec": {
+        "executive": 0.012,
+        "learning": 0.0,
+        "media_ingest": 2.496,
+        "synchronisation": 1.257,
+        "editorial_intelligence": 0.152,
+        "multicam_director": 0.013,
+        "rough_cut": 0.755,
+        "audio_engineer": 1.04,
+        "colourist": 0.041,
+        "captions": 0.0,
+        "graphics": 0.005,
+        "quality_control": 0.005,
+        "distribution": 0.036
+      },
+      "editorial_cache_hits": [],
+      "status": "draft_ready",
+      "source_integrity_verified": true,
+      "wall_sec": 5.95,
+      "peak_rss_mb": 255.0,
+      "peak_child_rss_mb": 255.0,
+      "reedit": {
+        "processing_elapsed_sec": 1.488,
+        "editorial_sec": 0.019,
+        "editorial_cache_hits": [
+          "editorial:transcript"
+        ],
+        "wall_sec": 1.56
+      }
+    },
+    {
+      "version": "v1.2.2",
+      "profile": "gameshow_multicam",
+      "scenario": "studio_4cam",
+      "corrective_fixes_needed": 0,
+      "fixes_by_type": {},
+      "speech_retained_pct": 99.3,
+      "protected": [],
+      "dead_air": [
+        {
+          "span": [
+            5.5,
+            7.5
+          ],
+          "remaining_sec": 0.49,
+          "ok": true
+        }
+      ],
+      "setup_kept_sec": 0.15,
+      "speech_on_correct_camera_pct": 98.4,
+      "cuts": 4,
+      "mean_shot_sec": 2.11,
+      "edited_duration_sec": 10.56,
+      "sync_error_ms": {
+        "wide": 0.0,
+        "host": 0.0,
+        "guest": 0.0,
+        "reaction": 0.0
+      },
+      "review_items": 9,
+      "setup_review_items": 2,
+      "qc_findings": 7,
+      "qc_errors": 0,
+      "processing_elapsed_sec": 4.582,
+      "quality_loop_processing_sec": 0.011,
+      "quality_loop_attempts": 2,
+      "corrections_applied": 0,
+      "external_cost_usd": 0.0,
+      "agent_sec": {
+        "executive": 0.012,
+        "learning": 0.0,
+        "media_ingest": 2.65,
+        "synchronisation": 0.778,
+        "editorial_intelligence": 0.083,
+        "multicam_director": 0.006,
+        "rough_cut": 0.318,
+        "audio_engineer": 0.608,
+        "colourist": 0.021,
+        "captions": 0.0,
+        "graphics": 0.004,
+        "quality_control": 0.009,
+        "distribution": 0.03
+      },
+      "editorial_cache_hits": [],
+      "status": "draft_ready",
+      "source_integrity_verified": true,
+      "wall_sec": 4.64,
+      "peak_rss_mb": 209.8,
+      "peak_child_rss_mb": 200.8,
+      "reedit": {
+        "processing_elapsed_sec": 0.969,
+        "editorial_sec": 0.015,
+        "editorial_cache_hits": [
+          "editorial:transcript"
+        ],
+        "wall_sec": 1.04
+      }
+    },
+    {
+      "version": "v1.3",
+      "profile": "gameshow_multicam",
+      "scenario": "studio_4cam",
+      "corrective_fixes_needed": 0,
+      "fixes_by_type": {},
+      "speech_retained_pct": 99.3,
+      "protected": [],
+      "dead_air": [
+        {
+          "span": [
+            5.5,
+            7.5
+          ],
+          "remaining_sec": 0.49,
+          "ok": true
+        }
+      ],
+      "setup_kept_sec": 0.15,
+      "speech_on_correct_camera_pct": 98.4,
+      "cuts": 4,
+      "mean_shot_sec": 2.11,
+      "edited_duration_sec": 10.56,
+      "sync_error_ms": {
+        "wide": 0.0,
+        "host": 0.0,
+        "guest": 0.0,
+        "reaction": 0.0
+      },
+      "review_items": 7,
+      "setup_review_items": 2,
+      "qc_findings": 7,
+      "qc_errors": 0,
+      "processing_elapsed_sec": 6.163,
+      "quality_loop_processing_sec": 0.018,
+      "quality_loop_attempts": 2,
+      "corrections_applied": 0,
+      "external_cost_usd": 0.0,
+      "agent_sec": {
+        "executive": 0.003,
+        "learning": 0.0,
+        "media_ingest": 2.717,
+        "synchronisation": 0.751,
+        "editorial_intelligence": 0.063,
+        "multicam_director": 0.003,
+        "rough_cut": 0.305,
+        "audio_engineer": 0.631,
+        "colourist": 0.033,
+        "captions": 0.0,
+        "graphics": 0.002,
+        "quality_control": 0.011,
+        "distribution": 1.574
+      },
+      "editorial_cache_hits": [],
+      "status": "draft_ready",
+      "source_integrity_verified": true,
+      "wall_sec": 6.21,
+      "peak_rss_mb": 209.8,
+      "peak_child_rss_mb": 223.3,
+      "reedit": {
+        "processing_elapsed_sec": 2.547,
+        "editorial_sec": 0.006,
+        "editorial_cache_hits": [
+          "editorial:transcript"
+        ],
+        "wall_sec": 2.61
+      }
+    },
+    {
+      "version": "v1.3",
+      "profile": "gameshow_multicam",
+      "scenario": "podcast_conversation",
+      "corrective_fixes_needed": 0,
+      "fixes_by_type": {},
+      "speech_retained_pct": 100.0,
+      "protected": [
+        {
+          "label": "reflective_pause",
+          "kept_sec": 0.73,
+          "required_sec": 0.6,
+          "ok": true
+        },
+        {
+          "label": "laughter",
+          "kept_sec": 1.6,
+          "required_sec": 1.2,
+          "ok": true
+        }
+      ],
+      "dead_air": [
+        {
+          "span": [
+            29.0,
+            33.5
+          ],
+          "remaining_sec": 0.49,
+          "ok": true
+        }
+      ],
+      "setup_kept_sec": 0.14,
+      "speech_on_correct_camera_pct": 94.6,
+      "cuts": 14,
+      "mean_shot_sec": 2.53,
+      "edited_duration_sec": 37.88,
+      "sync_error_ms": {
+        "wide": 0.0,
+        "host": 0.0,
+        "guest": 0.0
+      },
+      "review_items": 6,
+      "setup_review_items": 2,
+      "qc_findings": 16,
+      "qc_errors": 0,
+      "processing_elapsed_sec": 9.152,
+      "quality_loop_processing_sec": 0.021,
+      "quality_loop_attempts": 2,
+      "corrections_applied": 0,
+      "external_cost_usd": 0.0,
+      "agent_sec": {
+        "executive": 0.004,
+        "learning": 0.0,
+        "media_ingest": 2.525,
+        "synchronisation": 1.256,
+        "editorial_intelligence": 0.163,
+        "multicam_director": 0.004,
+        "rough_cut": 0.698,
+        "audio_engineer": 0.993,
+        "colourist": 0.038,
+        "captions": 0.0,
+        "graphics": 0.002,
+        "quality_control": 0.023,
+        "distribution": 3.369
+      },
+      "editorial_cache_hits": [],
+      "status": "draft_ready",
+      "source_integrity_verified": true,
+      "wall_sec": 9.24,
+      "peak_rss_mb": 253.6,
+      "peak_child_rss_mb": 253.6,
+      "reedit": {
+        "processing_elapsed_sec": 4.79,
+        "editorial_sec": 0.006,
+        "editorial_cache_hits": [
+          "editorial:transcript"
+        ],
+        "wall_sec": 4.86
+      }
+    },
+    {
+      "version": "v1.2.2",
+      "profile": "gameshow_multicam",
+      "scenario": "podcast_conversation",
+      "corrective_fixes_needed": 1,
+      "fixes_by_type": {
+        "reflective_pause_removed": 1
+      },
+      "speech_retained_pct": 100.0,
+      "protected": [
+        {
+          "label": "reflective_pause",
+          "kept_sec": 0.43,
+          "required_sec": 0.6,
+          "ok": false
+        },
+        {
+          "label": "laughter",
+          "kept_sec": 1.6,
+          "required_sec": 1.2,
+          "ok": true
+        }
+      ],
+      "dead_air": [
+        {
+          "span": [
+            29.0,
+            33.5
+          ],
+          "remaining_sec": 0.49,
+          "ok": true
+        }
+      ],
+      "setup_kept_sec": 0.14,
+      "speech_on_correct_camera_pct": 94.6,
+      "cuts": 14,
+      "mean_shot_sec": 2.5,
+      "edited_duration_sec": 37.56,
+      "sync_error_ms": {
+        "wide": 0.0,
+        "host": 0.0,
+        "guest": 0.0
+      },
+      "review_items": 7,
+      "setup_review_items": 2,
+      "qc_findings": 16,
+      "qc_errors": 0,
+      "processing_elapsed_sec": 5.99,
+      "quality_loop_processing_sec": 0.021,
+      "quality_loop_attempts": 2,
+      "corrections_applied": 0,
+      "external_cost_usd": 0.0,
+      "agent_sec": {
+        "executive": 0.012,
+        "learning": 0.0,
+        "media_ingest": 2.594,
+        "synchronisation": 1.229,
+        "editorial_intelligence": 0.137,
+        "multicam_director": 0.008,
+        "rough_cut": 0.782,
+        "audio_engineer": 1.049,
+        "colourist": 0.038,
+        "captions": 0.0,
+        "graphics": 0.004,
+        "quality_control": 0.023,
+        "distribution": 0.042
+      },
+      "editorial_cache_hits": [],
+      "status": "draft_ready",
+      "source_integrity_verified": true,
+      "wall_sec": 6.06,
+      "peak_rss_mb": 255.2,
+      "peak_child_rss_mb": 255.2,
+      "reedit": {
+        "processing_elapsed_sec": 1.763,
+        "editorial_sec": 0.019,
+        "editorial_cache_hits": [
+          "editorial:transcript"
+        ],
+        "wall_sec": 1.84
+      }
+    },
+    {
+      "version": "v1.2.2",
+      "profile": "sports_discussion",
+      "scenario": "studio_4cam",
+      "corrective_fixes_needed": 0,
+      "fixes_by_type": {},
+      "speech_retained_pct": 99.3,
+      "protected": [],
+      "dead_air": [
+        {
+          "span": [
+            5.5,
+            7.5
+          ],
+          "remaining_sec": 0.29,
+          "ok": true
+        }
+      ],
+      "setup_kept_sec": 0.15,
+      "speech_on_correct_camera_pct": 100.0,
+      "cuts": 3,
+      "mean_shot_sec": 2.59,
+      "edited_duration_sec": 10.36,
+      "sync_error_ms": {
+        "wide": 0.0,
+        "host": 0.0,
+        "guest": 0.0,
+        "reaction": 0.0
+      },
+      "review_items": 10,
+      "setup_review_items": 2,
+      "qc_findings": 5,
+      "qc_errors": 0,
+      "processing_elapsed_sec": 4.465,
+      "quality_loop_processing_sec": 0.011,
+      "quality_loop_attempts": 4,
+      "corrections_applied": 1,
+      "external_cost_usd": 0.0,
+      "agent_sec": {
+        "executive": 0.014,
+        "learning": 0.0,
+        "media_ingest": 2.616,
+        "synchronisation": 0.752,
+        "editorial_intelligence": 0.072,
+        "multicam_director": 0.009,
+        "rough_cut": 0.301,
+        "audio_engineer": 0.583,
+        "colourist": 0.021,
+        "captions": 0.0,
+        "graphics": 0.004,
+        "quality_control": 0.003,
+        "distribution": 0.028
+      },
+      "editorial_cache_hits": [],
+      "status": "draft_ready",
+      "source_integrity_verified": true,
+      "wall_sec": 4.52,
+      "peak_rss_mb": 209.8,
+      "peak_child_rss_mb": 199.3,
+      "reedit": {
+        "processing_elapsed_sec": 0.984,
+        "editorial_sec": 0.019,
+        "editorial_cache_hits": [
+          "editorial:transcript"
+        ],
+        "wall_sec": 1.04
+      }
+    },
+    {
+      "version": "v1.3",
+      "profile": "sports_discussion",
+      "scenario": "studio_4cam",
+      "corrective_fixes_needed": 0,
+      "fixes_by_type": {},
+      "speech_retained_pct": 99.3,
+      "protected": [],
+      "dead_air": [
+        {
+          "span": [
+            5.5,
+            7.5
+          ],
+          "remaining_sec": 0.29,
+          "ok": true
+        }
+      ],
+      "setup_kept_sec": 0.15,
+      "speech_on_correct_camera_pct": 100.0,
+      "cuts": 3,
+      "mean_shot_sec": 2.59,
+      "edited_duration_sec": 10.36,
+      "sync_error_ms": {
+        "wide": 0.0,
+        "host": 0.0,
+        "guest": 0.0,
+        "reaction": 0.0
+      },
+      "review_items": 8,
+      "setup_review_items": 2,
+      "qc_findings": 5,
+      "qc_errors": 0,
+      "processing_elapsed_sec": 5.863,
+      "quality_loop_processing_sec": 0.009,
+      "quality_loop_attempts": 4,
+      "corrections_applied": 1,
+      "external_cost_usd": 0.0,
+      "agent_sec": {
+        "executive": 0.003,
+        "learning": 0.0,
+        "media_ingest": 2.536,
+        "synchronisation": 0.698,
+        "editorial_intelligence": 0.057,
+        "multicam_director": 0.005,
+        "rough_cut": 0.296,
+        "audio_engineer": 0.545,
+        "colourist": 0.016,
+        "captions": 0.0,
+        "graphics": 0.001,
+        "quality_control": 0.003,
+        "distribution": 1.649
+      },
+      "editorial_cache_hits": [],
+      "status": "draft_ready",
+      "source_integrity_verified": true,
+      "wall_sec": 5.91,
+      "peak_rss_mb": 209.8,
+      "peak_child_rss_mb": 243.6,
+      "reedit": {
+        "processing_elapsed_sec": 2.599,
+        "editorial_sec": 0.005,
+        "editorial_cache_hits": [
+          "editorial:transcript"
+        ],
+        "wall_sec": 2.66
+      }
+    },
+    {
+      "version": "v1.3",
+      "profile": "sports_discussion",
+      "scenario": "podcast_conversation",
+      "corrective_fixes_needed": 0,
+      "fixes_by_type": {},
+      "speech_retained_pct": 100.0,
+      "protected": [
+        {
+          "label": "reflective_pause",
+          "kept_sec": 0.73,
+          "required_sec": 0.6,
+          "ok": true
+        },
+        {
+          "label": "laughter",
+          "kept_sec": 1.6,
+          "required_sec": 1.2,
+          "ok": true
+        }
+      ],
+      "dead_air": [
+        {
+          "span": [
+            29.0,
+            33.5
+          ],
+          "remaining_sec": 0.29,
+          "ok": true
+        }
+      ],
+      "setup_kept_sec": 0.15,
+      "speech_on_correct_camera_pct": 99.7,
+      "cuts": 10,
+      "mean_shot_sec": 3.42,
+      "edited_duration_sec": 37.64,
+      "sync_error_ms": {
+        "wide": 0.0,
+        "host": 0.0,
+        "guest": 0.0
+      },
+      "review_items": 6,
+      "setup_review_items": 2,
+      "qc_findings": 11,
+      "qc_errors": 0,
+      "processing_elapsed_sec": 8.776,
+      "quality_loop_processing_sec": 0.013,
+      "quality_loop_attempts": 2,
+      "corrections_applied": 0,
+      "external_cost_usd": 0.0,
+      "agent_sec": {
+        "executive": 0.002,
+        "learning": 0.0,
+        "media_ingest": 2.38,
+        "synchronisation": 1.349,
+        "editorial_intelligence": 0.124,
+        "multicam_director": 0.003,
+        "rough_cut": 0.679,
+        "audio_engineer": 0.979,
+        "colourist": 0.024,
+        "captions": 0.0,
+        "graphics": 0.001,
+        "quality_control": 0.02,
+        "distribution": 3.148
+      },
+      "editorial_cache_hits": [],
+      "status": "draft_ready",
+      "source_integrity_verified": true,
+      "wall_sec": 8.84,
+      "peak_rss_mb": 253.4,
+      "peak_child_rss_mb": 253.4,
+      "reedit": {
+        "processing_elapsed_sec": 4.569,
+        "editorial_sec": 0.006,
+        "editorial_cache_hits": [
+          "editorial:transcript"
+        ],
+        "wall_sec": 4.63
+      }
+    },
+    {
+      "version": "v1.2.2",
+      "profile": "sports_discussion",
+      "scenario": "podcast_conversation",
+      "corrective_fixes_needed": 1,
+      "fixes_by_type": {
+        "reflective_pause_removed": 1
+      },
+      "speech_retained_pct": 100.0,
+      "protected": [
+        {
+          "label": "reflective_pause",
+          "kept_sec": 0.25,
+          "required_sec": 0.6,
+          "ok": false
+        },
+        {
+          "label": "laughter",
+          "kept_sec": 1.6,
+          "required_sec": 1.2,
+          "ok": true
+        }
+      ],
+      "dead_air": [
+        {
+          "span": [
+            29.0,
+            33.5
+          ],
+          "remaining_sec": 0.29,
+          "ok": true
+        }
+      ],
+      "setup_kept_sec": 0.15,
+      "speech_on_correct_camera_pct": 99.6,
+      "cuts": 10,
+      "mean_shot_sec": 3.38,
+      "edited_duration_sec": 37.16,
+      "sync_error_ms": {
+        "wide": 0.0,
+        "host": 0.0,
+        "guest": 0.0
+      },
+      "review_items": 7,
+      "setup_review_items": 2,
+      "qc_findings": 11,
+      "qc_errors": 0,
+      "processing_elapsed_sec": 5.812,
+      "quality_loop_processing_sec": 0.015,
+      "quality_loop_attempts": 2,
+      "corrections_applied": 0,
+      "external_cost_usd": 0.0,
+      "agent_sec": {
+        "executive": 0.014,
+        "learning": 0.0,
+        "media_ingest": 2.541,
+        "synchronisation": 1.259,
+        "editorial_intelligence": 0.15,
+        "multicam_director": 0.009,
+        "rough_cut": 0.727,
+        "audio_engineer": 0.952,
+        "colourist": 0.028,
+        "captions": 0.0,
+        "graphics": 0.004,
+        "quality_control": 0.022,
+        "distribution": 0.037
+      },
+      "editorial_cache_hits": [],
+      "status": "draft_ready",
+      "source_integrity_verified": true,
+      "wall_sec": 5.89,
+      "peak_rss_mb": 255.2,
+      "peak_child_rss_mb": 255.2,
+      "reedit": {
+        "processing_elapsed_sec": 1.917,
+        "editorial_sec": 0.018,
+        "editorial_cache_hits": [
+          "editorial:transcript"
+        ],
+        "wall_sec": 1.99
+      }
+    },
+    {
+      "version": "v1.2.2",
+      "profile": "daily_news",
+      "scenario": "studio_4cam",
+      "corrective_fixes_needed": 2,
+      "fixes_by_type": {
+        "speech_on_wrong_camera": 2
+      },
+      "speech_retained_pct": 99.3,
+      "protected": [],
+      "dead_air": [
+        {
+          "span": [
+            5.5,
+            7.5
+          ],
+          "remaining_sec": 0.2,
+          "ok": true
+        }
+      ],
+      "setup_kept_sec": 0.1,
+      "speech_on_correct_camera_pct": 48.6,
+      "cuts": 1,
+      "mean_shot_sec": 5.12,
+      "edited_duration_sec": 10.24,
+      "sync_error_ms": {
+        "wide": 0.0,
+        "host": 0.0,
+        "guest": 0.0,
+        "reaction": 0.0
+      },
+      "review_items": 8,
+      "setup_review_items": 2,
+      "qc_findings": 6,
+      "qc_errors": 0,
+      "processing_elapsed_sec": 4.621,
+      "quality_loop_processing_sec": 0.006,
+      "quality_loop_attempts": 2,
+      "corrections_applied": 0,
+      "external_cost_usd": 0.0,
+      "agent_sec": {
+        "executive": 0.014,
+        "learning": 0.0,
+        "media_ingest": 2.751,
+        "synchronisation": 0.758,
+        "editorial_intelligence": 0.068,
+        "multicam_director": 0.008,
+        "rough_cut": 0.295,
+        "audio_engineer": 0.624,
+        "colourist": 0.013,
+        "captions": 0.0,
+        "graphics": 0.004,
+        "quality_control": 0.007,
+        "distribution": 0.024
+      },
+      "editorial_cache_hits": [],
+      "status": "draft_ready",
+      "source_integrity_verified": true,
+      "wall_sec": 4.68,
+      "peak_rss_mb": 209.8,
+      "peak_child_rss_mb": 199.8,
+      "reedit": {
+        "processing_elapsed_sec": 1.035,
+        "editorial_sec": 0.018,
+        "editorial_cache_hits": [
+          "editorial:transcript"
+        ],
+        "wall_sec": 1.08
+      }
+    },
+    {
+      "version": "v1.3",
+      "profile": "daily_news",
+      "scenario": "studio_4cam",
+      "corrective_fixes_needed": 0,
+      "fixes_by_type": {},
+      "speech_retained_pct": 99.3,
+      "protected": [],
+      "dead_air": [
+        {
+          "span": [
+            5.5,
+            7.5
+          ],
+          "remaining_sec": 0.26,
+          "ok": true
+        }
+      ],
+      "setup_kept_sec": 0.1,
+      "speech_on_correct_camera_pct": 100.0,
+      "cuts": 2,
+      "mean_shot_sec": 3.43,
+      "edited_duration_sec": 10.28,
+      "sync_error_ms": {
+        "wide": 0.0,
+        "host": 0.0,
+        "guest": 0.0,
+        "reaction": 0.0
+      },
+      "review_items": 6,
+      "setup_review_items": 2,
+      "qc_findings": 5,
+      "qc_errors": 0,
+      "processing_elapsed_sec": 4.427,
+      "quality_loop_processing_sec": 0.007,
+      "quality_loop_attempts": 2,
+      "corrections_applied": 0,
+      "external_cost_usd": 0.0,
+      "agent_sec": {
+        "executive": 0.002,
+        "learning": 0.0,
+        "media_ingest": 2.575,
+        "synchronisation": 0.801,
+        "editorial_intelligence": 0.064,
+        "multicam_director": 0.003,
+        "rough_cut": 0.305,
+        "audio_engineer": 0.567,
+        "colourist": 0.014,
+        "captions": 0.0,
+        "graphics": 0.003,
+        "quality_control": 0.008,
+        "distribution": 0.025
+      },
+      "editorial_cache_hits": [],
+      "status": "draft_ready",
+      "source_integrity_verified": true,
+      "wall_sec": 4.48,
+      "peak_rss_mb": 209.8,
+      "peak_child_rss_mb": 198.7,
+      "reedit": {
+        "processing_elapsed_sec": 0.914,
+        "editorial_sec": 0.006,
+        "editorial_cache_hits": [
+          "editorial:transcript"
+        ],
+        "wall_sec": 0.97
+      }
+    },
+    {
+      "version": "v1.3",
+      "profile": "daily_news",
+      "scenario": "podcast_conversation",
+      "corrective_fixes_needed": 1,
+      "fixes_by_type": {
+        "shot_below_minimum": 1
+      },
+      "speech_retained_pct": 100.0,
+      "protected": [
+        {
+          "label": "reflective_pause",
+          "kept_sec": 0.48,
+          "required_sec": 0.4,
+          "ok": true
+        },
+        {
+          "label": "laughter",
+          "kept_sec": 1.6,
+          "required_sec": 1.2,
+          "ok": true
+        }
+      ],
+      "dead_air": [
+        {
+          "span": [
+            29.0,
+            33.5
+          ],
+          "remaining_sec": 0.26,
+          "ok": true
+        }
+      ],
+      "setup_kept_sec": 0.09,
+      "speech_on_correct_camera_pct": 99.7,
+      "cuts": 8,
+      "mean_shot_sec": 4.07,
+      "edited_duration_sec": 36.64,
+      "sync_error_ms": {
+        "wide": 0.0,
+        "host": 0.0,
+        "guest": 0.0
+      },
+      "review_items": 5,
+      "setup_review_items": 2,
+      "qc_findings": 11,
+      "qc_errors": 0,
+      "processing_elapsed_sec": 5.732,
+      "quality_loop_processing_sec": 0.014,
+      "quality_loop_attempts": 4,
+      "corrections_applied": 1,
+      "external_cost_usd": 0.0,
+      "agent_sec": {
+        "executive": 0.003,
+        "learning": 0.0,
+        "media_ingest": 2.518,
+        "synchronisation": 1.331,
+        "editorial_intelligence": 0.137,
+        "multicam_director": 0.008,
+        "rough_cut": 0.683,
+        "audio_engineer": 0.921,
+        "colourist": 0.024,
+        "captions": 0.0,
+        "graphics": 0.002,
+        "quality_control": 0.005,
+        "distribution": 0.035
+      },
+      "editorial_cache_hits": [],
+      "status": "draft_ready",
+      "source_integrity_verified": true,
+      "wall_sec": 5.8,
+      "peak_rss_mb": 253.7,
+      "peak_child_rss_mb": 253.7,
+      "reedit": {
+        "processing_elapsed_sec": 1.552,
+        "editorial_sec": 0.007,
+        "editorial_cache_hits": [
+          "editorial:transcript"
+        ],
+        "wall_sec": 1.62
+      }
+    },
+    {
+      "version": "v1.2.2",
+      "profile": "daily_news",
+      "scenario": "podcast_conversation",
+      "corrective_fixes_needed": 3,
+      "fixes_by_type": {
+        "reflective_pause_removed": 1,
+        "speech_on_wrong_camera": 2
+      },
+      "speech_retained_pct": 100.0,
+      "protected": [
+        {
+          "label": "reflective_pause",
+          "kept_sec": 0.19,
+          "required_sec": 0.4,
+          "ok": false
+        },
+        {
+          "label": "laughter",
+          "kept_sec": 1.6,
+          "required_sec": 1.2,
+          "ok": true
+        }
+      ],
+      "dead_air": [
+        {
+          "span": [
+            29.0,
+            33.5
+          ],
+          "remaining_sec": 0.2,
+          "ok": true
+        }
+      ],
+      "setup_kept_sec": 0.09,
+      "speech_on_correct_camera_pct": 63.3,
+      "cuts": 6,
+      "mean_shot_sec": 5.17,
+      "edited_duration_sec": 36.2,
+      "sync_error_ms": {
+        "wide": 0.0,
+        "host": 0.0,
+        "guest": 0.0
+      },
+      "review_items": 6,
+      "setup_review_items": 2,
+      "qc_findings": 12,
+      "qc_errors": 0,
+      "processing_elapsed_sec": 6.236,
+      "quality_loop_processing_sec": 0.016,
+      "quality_loop_attempts": 2,
+      "corrections_applied": 0,
+      "external_cost_usd": 0.0,
+      "agent_sec": {
+        "executive": 0.013,
+        "learning": 0.0,
+        "media_ingest": 2.559,
+        "synchronisation": 1.348,
+        "editorial_intelligence": 0.132,
+        "multicam_director": 0.011,
+        "rough_cut": 0.846,
+        "audio_engineer": 1.118,
+        "colourist": 0.033,
+        "captions": 0.0,
+        "graphics": 0.007,
+        "quality_control": 0.031,
+        "distribution": 0.051
+      },
+      "editorial_cache_hits": [],
+      "status": "draft_ready",
+      "source_integrity_verified": true,
+      "wall_sec": 6.31,
+      "peak_rss_mb": 254.9,
+      "peak_child_rss_mb": 254.9,
+      "reedit": {
+        "processing_elapsed_sec": 1.698,
+        "editorial_sec": 0.016,
+        "editorial_cache_hits": [
+          "editorial:transcript"
+        ],
+        "wall_sec": 1.77
+      }
+    }
+  ]
+}

@@ -94,9 +94,9 @@ def interpret_brief(brief: str, *, export: bool = False, n_video: int | None = N
         conflict(
             "SOCIAL_WITHOUT_EXPORT",
             "Social clips / highlights are requested but no master export",
-            "Clips are selected, titled and timed in the draft (social_clips, highlights) but not rendered; rerun Distribution with export enabled to render them",
-            "warning",
-            True,
+            "Vertical clips are built as editable projects with checked review proxies; final-quality renders follow the approved master export",
+            "info",
+            False,
         )
     if flags.get("captions") and neg["captions"]:
         conflict("CAPTIONS_CONTRADICTION", "The brief both asks for and excludes captions", "The explicit exclusion wins: no captions")
