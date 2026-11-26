@@ -20,6 +20,14 @@ on:
         description: "Publish a GitHub Release for this tag after the gated build passes (e.g. v1.2.2); empty = build only"
         required: false
         default: ""
+      prerelease:
+        description: "Publish as a pre-release (internal beta); keeps the previous stable release as Latest"
+        required: false
+        type: choice
+        default: "false"
+        options:
+          - "false"
+          - "true"
       build_mode:
         description: "Dependency resolution mode (craft uses KDE CraftMaster Qt6/KF6 binary cache)"
         required: false
@@ -343,7 +351,8 @@ jobs:
           tag_name: ${{ inputs.publish_tag || github.ref_name }}
           target_commitish: ${{ github.sha }}
           draft: false
-          prerelease: ${{ contains(inputs.publish_tag || github.ref_name, '-') }}
+          prerelease: ${{ contains(inputs.publish_tag || github.ref_name, '-') || inputs.prerelease == 'true' }}
+          make_latest: ${{ inputs.prerelease == 'true' && 'false' || 'true' }}
           generate_release_notes: true
           body: |
             ## Bang On Pro — Apple Silicon (`arm64`) Native macOS Installer
