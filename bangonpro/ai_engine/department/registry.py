@@ -51,7 +51,7 @@ class AgentDefinition:
     consumes: tuple[str, ...] = ()
     produces: tuple[str, ...] = ()
     engine: str = ""
-    version: str = "1.2.0"
+    version: str = "1.2.2"
     implementation_notes: str = ""
     limitations: tuple[str, ...] = field(default_factory=tuple)
 
@@ -98,7 +98,7 @@ AGENT_DEFINITIONS: tuple[AgentDefinition, ...] = (
         compute_tier=TIER_DETERMINISTIC,
         consumes=("input_media",),
         produces=("media_inventory", "sha256_cache", "probe_cache"),
-        engine="ingest_sync.probe_media_file + compute_file_sha256 (shared memo + persistent cache)",
+        engine="media_ingest identification, classification, duplicate fingerprints, decode validation + sampled visual analysis",
     ),
     AgentDefinition(
         agent_id="synchronisation",
@@ -109,7 +109,7 @@ AGENT_DEFINITIONS: tuple[AgentDefinition, ...] = (
         compute_tier=TIER_DETERMINISTIC,
         consumes=("media_inventory",),
         produces=("sync_result", "import_media_ops"),
-        engine="ingest_sync.run_ingest_sync_agent (GCC-PHAT cross-correlation)",
+        engine="ingest_sync GCC-PHAT + media_sync multi-window drift/segment fit (clock drift, dropouts, late starts)",
     ),
     AgentDefinition(
         agent_id="editorial_intelligence",
@@ -134,7 +134,7 @@ AGENT_DEFINITIONS: tuple[AgentDefinition, ...] = (
         compute_tier=TIER_DETERMINISTIC,
         consumes=("transcript", "media_inventory", "effective_profile"),
         produces=("camera_plan",),
-        engine="department camera planner feeding rough_cut_multicam switching engine",
+        engine="editorial_director (speaker-aware cut discipline, reactions, wide on overlap, camera availability) feeding the switching engine",
         implementation_notes="Angle selection is executed by the shared multicam switching engine using the director's camera plan; coverage is audited by QC.",
     ),
     AgentDefinition(
@@ -146,7 +146,7 @@ AGENT_DEFINITIONS: tuple[AgentDefinition, ...] = (
         compute_tier=TIER_DETERMINISTIC,
         consumes=("camera_plan", "silence_intervals", "transcript"),
         produces=("rough_cut_shots", "place_clip_ops"),
-        engine="rough_cut_multicam.run_rough_cut_multicam_agent",
+        engine="rough_cut_multicam + editorial_pacing (pause compression, protected pauses, disfluency removal, word-safe cuts)",
     ),
     AgentDefinition(
         agent_id="audio_engineer",
@@ -169,7 +169,7 @@ AGENT_DEFINITIONS: tuple[AgentDefinition, ...] = (
         consumes=("media_inventory", "rough_cut_shots", "colour_rules"),
         produces=("colour_effect_ops", "colour_report"),
         engine="department frame statistics -> native lift_gamma_gain (+ avfilter.lut3d) effects",
-        limitations=("Global per-camera matching from sampled frames; no shot-by-shot secondary grading.",),
+        limitations=("Neutral white balance, skin-tone and shot-level primary correction from sampled frames; no secondary or power-window grading.",),
     ),
     AgentDefinition(
         agent_id="captions",
@@ -206,6 +206,7 @@ AGENT_DEFINITIONS: tuple[AgentDefinition, ...] = (
         engine="roto_studio.mask_engine.segment_frame_detailed (SAM2/MobileSAM when installed, else labelled fallback)",
         limitations=(
             "Department VFX applies a static per-camera matte from a representative frame; temporal propagation/tracking is done in Roto Studio.",
+            "V1.2.2: temporal mask propagation in the department is not implemented yet (planned); refine moving subjects in Roto Studio.",
         ),
     ),
     AgentDefinition(
@@ -230,6 +231,7 @@ AGENT_DEFINITIONS: tuple[AgentDefinition, ...] = (
         produces=("kdenlive_project", "otio_timeline", "master_render", "social_versions", "delivery_manifest"),
         engine="project_builder.run_project_emit_export_stage + ffmpeg derivative renders",
         implementation_notes="Never publishes or uploads; publishing is an approval-gated action outside autonomous modes.",
+        limitations=("9:16 social versions use a centre crop; subject-aware reframing is not implemented yet.",),
     ),
 )
 

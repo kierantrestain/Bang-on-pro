@@ -537,7 +537,7 @@ def run_synchronisation(ctx: AgentContext) -> AgentOutcome:
 # ---------------------------------------------------------------------------
 # Editorial Intelligence Agent (engine: ASR/VAD/diarisation) + highlights
 # ---------------------------------------------------------------------------
-_EI_CACHE_VERSION = "1.2.0"
+_EI_CACHE_VERSION = "1.2.2"  # V1.2.2 diarisation adds non-speech activity and word assignment
 # Only the editing rules the transcription/VAD stage reads invalidate the (expensive) transcript;
 # pause, pacing and highlight rules are applied on top of the cached analysis every run.
 _EI_TRANSCRIPT_RULE_KEYS = ("min_silence_sec", "interruption_gap_sec", "review_confidence_threshold", "silence_threshold_db", "min_topic_sec")

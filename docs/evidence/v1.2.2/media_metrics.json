@@ -1,0 +1,83 @@
+{
+  "sync": {
+    "evidence_class": "synthetic (120 s generated recordings: +80 ppm drift with 1.5 s dropout, -60 ppm, +35 ppm started 41 s late)",
+    "sync_error_ms": {
+      "v1.2.1": {
+        "cam_a": {
+          "start": 1494.84,
+          "middle": 1499.16,
+          "end": 2.88
+        },
+        "cam_b": {
+          "start": 1.91,
+          "middle": 5.15,
+          "end": 8.03
+        },
+        "cam_c": {
+          "start": 13318.12,
+          "middle": 13316.23,
+          "end": 13314.55
+        }
+      },
+      "v1.2.2": {
+        "cam_a": {
+          "start": 0.1,
+          "middle": 0.02,
+          "end": 0.11
+        },
+        "cam_b": {
+          "start": 0.09,
+          "middle": 0.03,
+          "end": 0.15
+        },
+        "cam_c": {
+          "start": 0.01,
+          "middle": 0.0,
+          "end": 0.01
+        }
+      }
+    },
+    "worst_sync_error_ms": {
+      "v1.2.1": 13318.12,
+      "v1.2.2": 0.15
+    },
+    "drift_ppm": {
+      "truth": {
+        "cam_a": 80.0,
+        "cam_b": -60.0,
+        "cam_c": 35.0
+      },
+      "v1.2.2": {
+        "cam_a": 78.583,
+        "cam_b": -57.666,
+        "cam_c": 35.203
+      }
+    },
+    "segments_detected": {
+      "cam_a": 2,
+      "cam_b": 0,
+      "cam_c": 0
+    },
+    "processing_sec": {
+      "v1.2.1_single_window": 2.12,
+      "v1.2.2_refinement_extra": 0.43
+    }
+  },
+  "assessor_validity_kendall_tau": {
+    "synchronisation": {
+      "injected_error_ms": [
+        0.0,
+        10.0,
+        25.0,
+        80.0
+      ],
+      "scores": [
+        0.9428,
+        0.7762,
+        0.6555,
+        0.6146
+      ],
+      "kendall_tau_vs_error": -1.0
+    }
+  }
+}
