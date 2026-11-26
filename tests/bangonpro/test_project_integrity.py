@@ -318,6 +318,7 @@ def render_with_melt(project_path: Path, output_mp4: Path) -> subprocess.Complet
         "acodec=aac",
         "ab=128k",
         "pix_fmt=yuv420p",
+        "real_time=0",
     ]
     return subprocess.run(
         cmd,
