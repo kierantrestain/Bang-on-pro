@@ -101,102 +101,18 @@ def _compute_kept_master_intervals(
     state: ProjectAnalysisState,
     common_duration: float,
 ) -> list[TimeInterval]:
-    """Compute kept master-timeline segments after setup-delay, silence & interruption trimming."""
-    rules = state.profile["editing_rules"]
-    keep_pad = float(rules.get("keep_padding_sec", 0.2))
-    trim_setup = bool(rules.get("trim_setup_delay", True)) and state.intent.remove_setup_delay
-    remove_silence = bool(state.intent.remove_silence)
-    excise_interruptions = bool(rules.get("excise_interruption_gaps", True)) and (
-        state.intent.remove_silence or state.intent.build_rough_cut
-    )
+    """Compute kept master-timeline segments after setup-delay trim, pause compression & disfluency removal.
 
-    range_start = 0.0
-    range_end = common_duration
-    if state.intent.time_range_sec is not None:
-        r0, r1 = state.intent.time_range_sec
-        range_start = max(0.0, min(common_duration, float(r0)))
-        range_end = max(range_start, min(common_duration, float(r1)))
+    V1.2.2: pauses are classified and compressed to a natural, show-specific length (meaningful
+    pauses after questions, before punchlines and around laughter/applause are protected) instead of
+    every interior silence being excised; cuts never land inside speech evidence. The full decision
+    record is stored in ``state.metadata["rough_cut_decisions"]``.
+    """
+    from bangonpro.ai_engine.department.editorial_pacing import compute_pacing_plan
 
-    start_bound = range_start
-    if trim_setup and state.setup_delay_sec >= 0.40:
-        start_bound = max(range_start, state.setup_delay_sec - keep_pad)
-
-    end_bound = range_end
-    if remove_silence:
-        for iv in state.silence_intervals:
-            if iv.label == "trailing_silence":
-                candidate_end = min(range_end, iv.start_sec + keep_pad)
-                if candidate_end > start_bound + 0.5:
-                    end_bound = candidate_end
-
-    if end_bound <= start_bound + 0.25:
-        return [
-            TimeInterval(
-                start_sec=round(range_start, 4),
-                end_sec=round(max(range_start + 0.5, range_end), 4),
-                label="kept_full",
-            )
-        ]
-
-    # Excise interior silence spans AND detected recording interruptions (when enabled)
-    excise_spans: list[tuple[float, float]] = []
-    if remove_silence:
-        for iv in state.silence_intervals:
-            if iv.label != "silence":
-                continue
-            cut_start = max(start_bound, iv.start_sec + keep_pad)
-            cut_end = min(end_bound, iv.end_sec - keep_pad)
-            if (cut_end - cut_start) >= 0.15:
-                excise_spans.append((cut_start, cut_end))
-
-    if excise_interruptions:
-        for iv in getattr(state, "interruption_intervals", []):
-            cut_start = max(start_bound, iv.start_sec + keep_pad)
-            cut_end = min(end_bound, iv.end_sec - keep_pad)
-            if (cut_end - cut_start) >= 0.25:
-                excise_spans.append((cut_start, cut_end))
-
-    # Merge overlapping excise spans
-    excise_spans.sort()
-    merged_excise: list[tuple[float, float]] = []
-    for cs, ce in excise_spans:
-        if merged_excise and cs <= merged_excise[-1][1] + 0.05:
-            merged_excise[-1] = (merged_excise[-1][0], max(merged_excise[-1][1], ce))
-        else:
-            merged_excise.append((cs, ce))
-    excise_spans = merged_excise
-
-    kept: list[TimeInterval] = []
-    cursor = start_bound
-    for cut_s, cut_e in excise_spans:
-        if cut_s > cursor + 0.10:
-            kept.append(
-                TimeInterval(
-                    start_sec=round(cursor, 4),
-                    end_sec=round(cut_s, 4),
-                    label=f"kept_{len(kept) + 1}",
-                )
-            )
-        cursor = max(cursor, cut_e)
-
-    if end_bound > cursor + 0.10:
-        kept.append(
-            TimeInterval(
-                start_sec=round(cursor, 4),
-                end_sec=round(end_bound, 4),
-                label=f"kept_{len(kept) + 1}",
-            )
-        )
-
-    if not kept:
-        kept.append(
-            TimeInterval(
-                start_sec=round(start_bound, 4),
-                end_sec=round(end_bound, 4),
-                label="kept_1",
-            )
-        )
-    return kept
+    plan = compute_pacing_plan(state, common_duration)
+    state.metadata["rough_cut_decisions"] = plan.to_dict()
+    return plan.kept
 
 
 def _dominant_segment_for_window(
@@ -286,6 +202,15 @@ def _detect_high_energy_applause_times(
     """For gameshow/sports profiles, detect multi-mic energy peaks for reaction switching."""
     if state.profile.get("format_type") not in ("gameshow", "sports_discussion"):
         return []
+    if "nonspeech_activity" in state.metadata:
+        # V1.2.2: measured reaction audio (serialisable, so a quality-loop rerun on a restored
+        # checkpoint makes the same decisions; the PCM cache is not checkpointed)
+        times = sorted(float(e["start_sec"]) for e in state.metadata.get("nonspeech_activity") or [])
+        peaks: list[float] = []
+        for t in times:
+            if not peaks or t - peaks[-1] >= 2.5:
+                peaks.append(round(t, 2))
+        return peaks
     if not state.audio_pcm_cache or state.sync_result is None:
         return []
 
@@ -366,8 +291,18 @@ def _plan_shots_for_kept_interval(
     speaker_to_cam: dict[str, str],
     applause_times: list[float],
     prev_end_camera: str | None,
+    context: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Plan speaker-aware multicamera shots inside a single kept master interval."""
+    """Plan speaker-aware multicamera shots inside a single kept master interval.
+
+    V1.2.2: one-word interjections never trigger a cut, rapid back-and-forth faster than the
+    minimum shot goes to the wide, and long-shot cutaways land on reactions or sentence
+    boundaries and go to the person reacting or listening (``context`` from
+    ``editorial_director.build_switch_context``; computed when omitted).
+    """
+    from bangonpro.ai_engine.department import editorial_director as ed
+
+    ctx = context if context is not None else ed.build_switch_context(state)
     rules = state.profile["editing_rules"]
     effective = get_effective_profile_settings(state.profile)
     cam_prefs = state.profile.get("camera_preferences") or {}
@@ -382,6 +317,9 @@ def _plan_shots_for_kept_interval(
         rules.get("overlap_cut_to_wide", cam_prefs.get("prefer_wide_on_overlap", True))
     )
     avoid_jump_cuts = bool(cam_prefs.get("avoid_jump_cuts", True))
+    interjection_max = float(cam_prefs.get("interjection_max_sec", min(1.2, min_shot)))
+    listener_shots = bool(cam_prefs.get("listener_shots", True))
+    wide_on_exchange = bool(cam_prefs.get("wide_on_rapid_exchange", True))
 
     available_video_cams = [
         cid
@@ -410,11 +348,48 @@ def _plan_shots_for_kept_interval(
         )
     else:
         cursor = iv.start_sec
-        for seg in overlapping:
+        rapid = ed.rapid_exchange_indices(overlapping, min_shot) if (wide_on_exchange and wide_cam in available_video_cams) else set()
+        for k_seg, seg in enumerate(overlapping):
             seg_s = max(iv.start_sec, seg.start_sec)
             seg_e = min(iv.end_sec, seg.end_sec)
+            prev_seg = overlapping[k_seg - 1] if k_seg > 0 else None
+            next_seg = overlapping[k_seg + 1] if k_seg + 1 < len(overlapping) else None
+            if getattr(seg, "is_overlap", False) and overlap_to_wide and wide_cam in available_video_cams:
+                cam_id = wide_cam
+                shot_reason = "overlapping_speech_wide_shot"
+            elif k_seg in rapid:
+                cam_id = wide_cam
+                shot_reason = "rapid_exchange_wide"
+            elif (
+                raw_spans
+                and prev_seg is not None
+                and next_seg is not None
+                and (seg.end_sec - seg.start_sec) < interjection_max
+                and prev_seg.speaker_id == next_seg.speaker_id != seg.speaker_id
+                and seg.start_sec - prev_seg.end_sec < 1.0
+                and next_seg.start_sec - seg.end_sec < 1.0
+            ):
+                # One-word interjection ("yeah", "right") inside another speaker's turn: stay put
+                cam_id = raw_spans[-1]["camera_id"]
+                shot_reason = f"interjection_held_on_{prev_seg.speaker_id.lower().replace(' ', '_')}"
+            else:
+                cam_id = speaker_to_cam.get(seg.speaker_id, seg.camera_id)
+                if cam_id not in available_video_cams:
+                    cam_id = wide_cam
+                shot_reason = f"active_speaker_{seg.speaker_id.lower().replace(' ', '_')}"
             if seg_s > cursor + 0.08:
-                pad_cam = speaker_to_cam.get(seg.speaker_id, wide_cam)
+                pad_cam, pad_reason = cam_id, "dialogue_padding"
+                # V1.2.2: a gap filled by applause/laughter shows the room or the person reacting
+                react = next(
+                    (m for m in ctx.get("reactions", []) if min(seg_s, m["end_sec"]) - max(cursor, m["start_sec"]) >= 0.5 * (seg_s - cursor)),
+                    None,
+                )
+                if react is not None and state.intent.multicam_switch:
+                    if react["type"] == "applause" and wide_cam in available_video_cams:
+                        pad_cam = wide_cam
+                    else:
+                        pad_cam = ed.reactor_camera(react, speaker_to_cam, available_video_cams, "") or (reaction_cam if reaction_cam in available_video_cams else wide_cam)
+                    pad_reason = f"reaction_audio_{react['type']}"
                 raw_spans.append(
                     {
                         "start": cursor,
@@ -422,17 +397,9 @@ def _plan_shots_for_kept_interval(
                         "camera_id": pad_cam,
                         "speaker_id": seg.speaker_id,
                         "confidence": max(0.75, seg.confidence),
-                        "reason": "dialogue_padding",
+                        "reason": pad_reason,
                     }
                 )
-            if getattr(seg, "is_overlap", False) and overlap_to_wide and wide_cam in available_video_cams:
-                cam_id = wide_cam
-                shot_reason = "overlapping_speech_wide_shot"
-            else:
-                cam_id = speaker_to_cam.get(seg.speaker_id, seg.camera_id)
-                if cam_id not in available_video_cams:
-                    cam_id = wide_cam
-                shot_reason = f"active_speaker_{seg.speaker_id.lower().replace(' ', '_')}"
             raw_spans.append(
                 {
                     "start": seg_s,
@@ -482,6 +449,19 @@ def _plan_shots_for_kept_interval(
         coalesced[1]["start"] = coalesced[0]["start"]
         coalesced.pop(0)
 
+    # V1.2.2: absorbing a short span can leave two consecutive spans on the same camera, i.e. a
+    # cut that changes nothing on screen. Re-merge them.
+    remerged: list[dict[str, Any]] = []
+    for sp in coalesced:
+        if remerged and remerged[-1]["camera_id"] == sp["camera_id"]:
+            if (sp["end"] - sp["start"]) > (remerged[-1]["end"] - remerged[-1]["start"]):
+                remerged[-1]["reason"] = sp["reason"]
+            remerged[-1]["confidence"] = round(min(remerged[-1]["confidence"], sp["confidence"]), 4)
+            remerged[-1]["end"] = sp["end"]
+        else:
+            remerged.append(sp)
+    coalesced = remerged
+
     # 4. Jump-cut avoidance across silence splice
     if (
         avoid_jump_cuts
@@ -491,7 +471,8 @@ def _plan_shots_for_kept_interval(
         and wide_cam != prev_end_camera
         and (coalesced[0]["end"] - coalesced[0]["start"]) >= (2.0 * min_shot)
     ):
-        bridge_dur = min(min_shot + 0.4, (coalesced[0]["end"] - coalesced[0]["start"]) * 0.35)
+        # V1.2.2: the bridge itself must respect the minimum shot (V1.2.1 could emit 0.35 x span)
+        bridge_dur = max(min_shot, min(min_shot + 0.4, (coalesced[0]["end"] - coalesced[0]["start"]) * 0.35))
         split_t = round(coalesced[0]["start"] + bridge_dur, 4)
         first = dict(coalesced[0])
         first["end"] = split_t
@@ -514,13 +495,21 @@ def _plan_shots_for_kept_interval(
             time_since_wide = 0.0
 
         while (sp_end - cur_s) > max_shot + 0.05:
-            target_cut = cur_s + min(max_shot, max(min_shot, reaction_interval))
-            for ap_t in applause_times:
-                if (cur_s + min_shot) <= ap_t <= (cur_s + max_shot - min_shot):
-                    target_cut = ap_t
-                    break
+            fixed_target = cur_s + min(max_shot, max(min_shot, reaction_interval))
+            target_cut = fixed_target
+            lo_t, hi_t = cur_s + min_shot, min(cur_s + max_shot - min_shot, sp_end - min_shot)
+            natural_t, reaction_m = ed.natural_cut_time(ctx, lo_t, hi_t, fixed_target) if hi_t > lo_t else (None, None)
+            if natural_t is not None:
+                target_cut = natural_t
+            else:
+                for ap_t in applause_times:
+                    if (cur_s + min_shot) <= ap_t <= (cur_s + max_shot - min_shot):
+                        target_cut = ap_t
+                        break
 
             cutaway_dur = max(min_shot, min(reaction_interval * 0.45, max_shot * 0.4))
+            if reaction_m is not None:
+                cutaway_dur = max(min_shot, min(float(reaction_m["end_sec"]) - target_cut + 0.4, max_shot * 0.5))
             if (sp_end - target_cut) < min_shot:
                 break
 
@@ -555,6 +544,16 @@ def _plan_shots_for_kept_interval(
                 wide_interval_sec=wide_interval,
             )
             cutaway_idx += 1
+            if reaction_m is not None:
+                rc = ed.reactor_camera(reaction_m, speaker_to_cam, available_video_cams, base_cam) or (
+                    reaction_cam if reaction_cam != base_cam and reaction_cam in available_video_cams else None
+                )
+                if rc is not None:
+                    alt_cam, cutaway_reason = rc, f"reaction_shot_{reaction_m['type']}"
+            elif cutaway_reason == "periodic_reaction_cutaway" and listener_shots:
+                lc = ed.listener_camera(ctx, sp["speaker_id"], speaker_to_cam, available_video_cams, base_cam)
+                if lc is not None:
+                    alt_cam, cutaway_reason = lc, "listener_reaction_shot"
 
             paced.append(
                 {
@@ -675,6 +674,47 @@ def _apply_intro_outro_rules(
     return shots
 
 
+def plan_rough_cut_shots(
+    state: ProjectAnalysisState,
+    kept_intervals: list[TimeInterval],
+    *,
+    wide_cam: str,
+    reaction_cam: str,
+    speaker_to_cam: dict[str, str],
+    applause_times: list[float],
+) -> list[dict[str, Any]]:
+    """Plan every shot of the rough cut on the master clock (pure; no media access).
+
+    Shared by the Rough Cut agent and the Director's provisional plan assessment.
+    """
+    from bangonpro.ai_engine.department import editorial_director as ed
+
+    ctx = ed.build_switch_context(state)
+    planned: list[dict[str, Any]] = []
+    prev_cam: str | None = None
+    for iv in kept_intervals:
+        iv_shots = _plan_shots_for_kept_interval(
+            iv,
+            state=state,
+            wide_cam=wide_cam,
+            reaction_cam=reaction_cam,
+            speaker_to_cam=speaker_to_cam,
+            applause_times=applause_times,
+            prev_end_camera=prev_cam,
+            context=ctx,
+        )
+        planned.extend(iv_shots)
+        if iv_shots:
+            prev_cam = iv_shots[-1]["camera_id"]
+    planned = _apply_intro_outro_rules(planned, state=state, wide_cam=wide_cam)
+    if state.intent.multicam_switch:
+        planned = ed.refine_shot_plan(planned, state=state, wide_cam=wide_cam, speaker_to_cam=speaker_to_cam, ctx=ctx)
+    review_thresh = float(state.profile["editing_rules"].get("review_confidence_threshold", 0.72))
+    for sp in planned:
+        sp["needs_review"] = bool(sp.get("needs_review")) or float(sp["confidence"]) < review_thresh
+    return planned
+
+
 def run_rough_cut_multicam_agent(
     state: ProjectAnalysisState,
     token: CancellationToken,
@@ -710,10 +750,16 @@ def run_rough_cut_multicam_agent(
 
     # 1. Visual scene detection on reference video camera
     report_progress(0.15, "Running visual scene detection")
-    if ref_asset.has_video:
+    pre = state.metadata.get("scene_cuts_precomputed") or {}
+    if ref_asset.has_video and pre.get("camera_id") == video_ref_cam and pre.get("sha256") == ref_asset.sha256:
+        # V1.2.2: served from the shared analysis cache (quality-loop reruns never repeat it)
+        scene_cuts, scene_backend = list(pre.get("cuts", [])), str(pre.get("backend", "cache"))
+        state.metadata["scene_cuts_from_cache"] = True
+    elif ref_asset.has_video:
         scene_cuts, scene_backend = detect_visual_scene_cuts(ref_asset.file_path)
     else:
         scene_cuts, scene_backend = ([], "audio_only_skipped")
+    state.metadata["scene_cut_camera"] = video_ref_cam
     state.scene_cuts_sec = scene_cuts
     state.metadata["scene_detect_backend"] = scene_backend
     token.check("after scene detection")
@@ -727,27 +773,14 @@ def run_rough_cut_multicam_agent(
     report_progress(0.55, "Planning multicamera angle switches")
     applause_times = _detect_high_energy_applause_times(state, common_duration)
 
-    planned_raw_shots: list[dict[str, Any]] = []
-    prev_cam: str | None = None
-    for iv in kept_intervals:
-        token.check("plan interval shots")
-        iv_shots = _plan_shots_for_kept_interval(
-            iv,
-            state=state,
-            wide_cam=wide_cam,
-            reaction_cam=reaction_cam,
-            speaker_to_cam=speaker_to_cam,
-            applause_times=applause_times,
-            prev_end_camera=prev_cam,
-        )
-        planned_raw_shots.extend(iv_shots)
-        if iv_shots:
-            prev_cam = iv_shots[-1]["camera_id"]
-
-    planned_raw_shots = _apply_intro_outro_rules(
-        planned_raw_shots,
-        state=state,
+    token.check("plan interval shots")
+    planned_raw_shots = plan_rough_cut_shots(
+        state,
+        kept_intervals,
         wide_cam=wide_cam,
+        reaction_cam=reaction_cam,
+        speaker_to_cam=speaker_to_cam,
+        applause_times=applause_times,
     )
 
     # Prefer synced independent audio recorder for A1 dialogue master when present
@@ -987,6 +1020,29 @@ def run_rough_cut_multicam_agent(
                 confidence=sec.confidence,
                 rationale=marker.rationale,
             )
+
+    # V1.2.2: every word-level removal is marked so the editor can verify it in one pass
+    for d in (state.metadata.get("rough_cut_decisions") or {}).get("disfluencies", []) or []:
+        edited_t = map_master_to_edited_sec(float(d["end_sec"]), kept_intervals)
+        if edited_t is None:
+            continue
+        marker = state.add_review_marker(
+            timeline_sec=edited_t,
+            label=f"Removed {d['kind'].replace('_', ' ')}: '{d['text'][:40]}'",
+            category="review",
+            confidence=0.8,
+            rationale=f"Word-boundary edit removed {d['kind'].replace('_', ' ')} '{d['text']}' ({d['speaker_id']})",
+        )
+        builder.add_operation(
+            "add_marker",
+            track_id="V1",
+            in_frame=marker.timeline_frame,
+            out_frame=marker.timeline_frame,
+            timeline_start=marker.timeline_frame,
+            params={"marker_id": marker.marker_id, "category": marker.category, "label": marker.label, "edit_kind": d["kind"]},
+            confidence=0.8,
+            rationale=marker.rationale,
+        )
 
     report_progress(
         0.98, f"Assembled {len(shots)} shots ({timeline_cursor_frame / fps:.2f}s edited)"

@@ -85,6 +85,11 @@ def _wrap_caption_text(
     if uppercase:
         cleaned = cleaned.upper()
     if max_chars_per_line > 0 and len(cleaned) > max_chars_per_line:
+        if len(cleaned) <= 2 * max_chars_per_line:
+            # V1.2.2: balanced two-line break (even lengths, never ending a line on an article)
+            from bangonpro.ai_engine.department.editorial_captions import balanced_wrap
+
+            return "\n".join(balanced_wrap(cleaned, max_chars_per_line, 2))
         return "\n".join(textwrap.wrap(cleaned, width=max_chars_per_line))
     return cleaned
 
@@ -331,12 +336,21 @@ def generate_kdenlive_lower_third_xml(
     duration_frames: int = 100,
     position: str = "bottom_left",
     font_family: str = "DejaVu Sans",
+    box_w_frac: float = 0.34,
+    box_h_frac: float = 0.115,
+    title_px_frac: float = 0.038,
+    sub_px_frac: float = 0.024,
 ) -> str:
-    """Generate native Kdenlive ``kdenlivetitle`` XML for a broadcast lower-third graphic."""
+    """Generate native Kdenlive ``kdenlivetitle`` XML for a broadcast lower-third graphic.
+
+    V1.2.2: geometry comes from the template registry (``editorial_graphics.TEMPLATES``) and
+    ``center`` / ``top_center`` positions are supported (V1.2.1 drew a "center" title card in the
+    bottom-left corner).
+    """
     r, g, b = _hex_to_rgb(accent_hex)
     bar_w = max(10, round(width * 0.008))
-    box_w = round(width * 0.34)
-    box_h = round(height * 0.115)
+    box_w = round(width * box_w_frac)
+    box_h = round(height * box_h_frac)
 
     if position == "bottom_center":
         x0 = round((width - box_w) * 0.5)
@@ -350,12 +364,18 @@ def generate_kdenlive_lower_third_xml(
     elif position == "top_right":
         x0 = round(width * 0.95) - box_w
         y0 = round(height * 0.08)
+    elif position == "center":
+        x0 = round((width - box_w) * 0.5)
+        y0 = round((height - box_h) * 0.5)
+    elif position == "top_center":
+        x0 = round((width - box_w) * 0.5)
+        y0 = round(height * 0.08)
     else:
         x0 = round(width * 0.05)
         y0 = round(height * 0.78)
 
-    title_px = max(22, round(height * 0.038))
-    sub_px = max(16, round(height * 0.024))
+    title_px = max(22, round(height * title_px_frac))
+    sub_px = max(16, round(height * sub_px_frac))
 
     esc_title = saxutils.escape(title)
     esc_sub = saxutils.escape(subtitle)
@@ -435,7 +455,17 @@ def _split_segment_text_by_intervals(seg: Any, intervals: list[Any]) -> dict[int
 
 
 def _build_edited_captions(state: ProjectAnalysisState) -> list[CaptionCue]:
-    """Map diarised transcript segments onto the edited rough-cut or source master timeline."""
+    """Map diarised transcript segments onto the edited rough-cut or source master timeline.
+
+    V1.2.2: with a spoken (neural) transcript, cues are built word by word on the edited
+    timeline with terminology, punctuation/casing repair, speaker-change markers and the
+    profile readability limits (``editorial_captions``). Speech-like audio the ASR found no
+    words in is never captioned as speech. VAD-only transcripts keep the V1.2 placeholder path.
+    """
+    if any(s.is_neural_inference and (s.text or "").strip() for s in state.transcript_segments):
+        from bangonpro.ai_engine.department.editorial_captions import build_captions_v122
+
+        return build_captions_v122(state)
     target_speakers = state.intent.target_speakers
     time_range = state.intent.time_range_sec
     cues: list[CaptionCue] = []
@@ -521,6 +551,42 @@ def _build_lower_thirds(state: ProjectAnalysisState) -> list[LowerThirdSpec]:
     target_dur = float(graphics_rules.get("lower_third_duration_sec", 4.5))
     show_title = str(state.profile.get("display_name", "Bang On Pro"))
     target_speakers = state.intent.target_speakers
+
+    if state.transcript_segments:
+        # V1.2.2: context-aware placement (first substantive appearance on the speaker's own angle,
+        # never during crosstalk or under another graphic, re-shown after a long absence)
+        from bangonpro.ai_engine.department.editorial_graphics import get_template, plan_lower_thirds
+
+        t_name, t_spec, _known = get_template(template_name, "lower_third")
+        rows = plan_lower_thirds(state, list(state.metadata.get("graphics_reserved") or []))
+        planned: list[LowerThirdSpec] = []
+        for row in rows:
+            start_f = state.sec_to_frame(row["start_sec"])
+            dur_frames = max(1, round(row["duration_sec"] * fps))
+            subtitle = row["subtitle"] or show_title
+            xml = generate_kdenlive_lower_third_xml(
+                title=row["title"], subtitle=subtitle, width=width, height=height, accent_hex=accent_hex,
+                duration_frames=dur_frames, position=position, font_family=font_family,
+                box_w_frac=float(t_spec["box_w"]), box_h_frac=float(t_spec["box_h"]),
+                title_px_frac=float(t_spec["title_px"]), sub_px_frac=float(t_spec["sub_px"]),
+            )
+            planned.append(
+                LowerThirdSpec(
+                    graphic_id=f"lt_{len(planned) + 1:02d}_{row['speaker_id'].lower().replace(' ', '_')}",
+                    title=row["title"],
+                    subtitle=subtitle,
+                    start_sec=round(start_f / fps, 4),
+                    duration_sec=round(dur_frames / fps, 4),
+                    start_frame=start_f,
+                    out_frame=start_f + dur_frames - 1,
+                    accent_hex=accent_hex,
+                    kdenlive_title_xml=xml,
+                    template=template_name,
+                    position=position,
+                )
+            )
+        state.metadata["lower_third_plan"] = rows
+        return planned
 
     lower_thirds: list[LowerThirdSpec] = []
     seen_speakers: set[str] = set()
@@ -1025,6 +1091,10 @@ def prepare_captions(state: ProjectAnalysisState) -> list[CaptionCue]:
         ass_path.write_text(ass_text, encoding="utf-8")
         state.artifacts["captions_srt"] = str(srt_path)
         state.artifacts["captions_ass"] = str(ass_path)
+    if captions:
+        from bangonpro.ai_engine.department.editorial_captions import caption_readability
+
+        state.metadata["caption_report"] = caption_readability(captions, state.profile)
     return captions
 
 

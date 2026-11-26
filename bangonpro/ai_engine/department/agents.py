@@ -186,6 +186,14 @@ def shape_intent_for_mode(intent: ProductionIntent, mode: str, flags: dict[str, 
         shaped.needs_clarification = False
         shaped.clarification_question = ""
         shaped.scope = mode
+        # V1.2.2: mode widening never overrides an explicit instruction ("keep the pauses",
+        # "no captions"); the Executive plan records the resolution.
+        from bangonpro.ai_engine.intent import explicit_negations
+
+        neg = explicit_negations(intent.raw_instruction)
+        for key, attr in (("silence", "remove_silence"), ("setup", "remove_setup_delay"), ("captions", "add_captions"), ("graphics", "add_lower_thirds"), ("audio", "restore_audio"), ("multicam", "multicam_switch")):
+            if neg.get(key):
+                setattr(shaped, attr, False)
     shaped.export_video = bool(export or shaped.export_video)
     return shaped
 
@@ -251,20 +259,48 @@ def compute_activation(
             active = bool(overrides[agent_id])
             reason = ("Enabled" if active else "Disabled") + " by user for this job"
         result[agent_id] = {"active": bool(active), "reason": reason}
+    # V1.2.2: explicit dependency reasoning in the plan
+    from bangonpro.ai_engine.department.editorial_brief import DEPENDENCY_REASONS
+    from bangonpro.ai_engine.department.registry import AGENTS_BY_ID
+
+    for agent_id, row in result.items():
+        spec = AGENTS_BY_ID.get(agent_id)
+        row["depends_on"] = list(spec.depends_on) if spec else []
+        row["dependency_reason"] = DEPENDENCY_REASONS.get(agent_id, "")
     return result
 
 
 def run_executive_plan(ctx: AgentContext) -> AgentOutcome:
+    from bangonpro.ai_engine.department.editorial_brief import build_executive_plan
+
     st = ctx.state
     flags = ctx.plan.get("brief_flags", {})
     active = [a for a, v in ctx.plan["activation"].items() if v["active"]]
-    ctx.progress(1.0, f"Plan: {len(active)} agents active in {ctx.options.mode} mode")
+    eplan = build_executive_plan(
+        brief=st.instruction or ctx.plan.get("brief", ""),
+        mode=ctx.options.mode,
+        activation=ctx.plan["activation"],
+        profile=st.profile,
+        inputs=dict(st.input_camera_files),
+        neural_asr_model=st.metadata.get("asr_model_id"),
+        export=bool(st.intent.export_video),
+        intent_confidence=float(st.intent.intent_confidence if st.intent.intent_confidence is not None else 1.0),
+    )
+    st.metadata["executive_plan"] = eplan
+    path = write_json_atomic(Path(st.output_dir) / "executive_plan.json", eplan)
+    st.artifacts["executive_plan_json"] = str(path)
+    conflicts = eplan["interpretation"]["conflicts"]
+    ctx.progress(1.0, f"Plan: {len(active)} agents active in {ctx.options.mode} mode; {len(conflicts)} brief conflict(s) resolved")
+    review = [f"Needs human review: {e}" for e in eplan["escalations"]]
     return AgentOutcome(
-        confidence=float(st.intent.intent_confidence or 1.0),
-        summary=f"Planned {len(active)} active agents ({', '.join(active)})",
-        rationale=f"Brief flags: {', '.join(k for k, v in flags.items() if v) or 'none'}; mode={ctx.options.mode}",
-        outputs={"production_plan": ctx.plan.get("plan_path", "")},
+        confidence=float(eplan["overall_confidence"]),
+        summary=f"Planned {len(active)} active agents ({', '.join(active)})" + (f"; resolved {len(conflicts)} brief conflict(s)" if conflicts else ""),
+        rationale=f"Brief flags: {', '.join(k for k, v in flags.items() if v) or 'none'}; mode={ctx.options.mode}; pacing={eplan['interpretation']['directives']['pacing']}"
+        + "".join(f"; {c['code']}: {c['resolution']}" for c in conflicts),
+        outputs={"production_plan": ctx.plan.get("plan_path", ""), "executive_plan_json": str(path)},
+        review_items=review,
         est_external_cost_usd=float(ctx.plan.get("executive_llm_cost_usd", 0.0)),
+        metrics={"brief_conflicts": [c["code"] for c in conflicts], "overall_plan_confidence": eplan["overall_confidence"], "needs_human_review": eplan["needs_human_review"]},
     )
 
 
@@ -502,18 +538,24 @@ def run_synchronisation(ctx: AgentContext) -> AgentOutcome:
 # Editorial Intelligence Agent (engine: ASR/VAD/diarisation) + highlights
 # ---------------------------------------------------------------------------
 _EI_CACHE_VERSION = "1.2.0"
+# Only the editing rules the transcription/VAD stage reads invalidate the (expensive) transcript;
+# pause, pacing and highlight rules are applied on top of the cached analysis every run.
+_EI_TRANSCRIPT_RULE_KEYS = ("min_silence_sec", "interruption_gap_sec", "review_confidence_threshold", "silence_threshold_db", "min_topic_sec")
 
 
 def _editorial_cache_key(st: ProjectAnalysisState) -> dict[str, Any]:
     eff = get_effective_profile_settings(st.profile)
     sr = st.sync_result
+    rules = st.profile.get("editing_rules", {}) or {}
     return {
+        "analysis": "1.2.2",
         "media": sorted((cid, a.sha256) for cid, a in st.media_assets.items()),
         "offsets": {k: round(v, 3) for k, v in (sr.offsets_sec.items() if sr else [])},
         "asr_model": st.metadata.get("asr_model_id"),
         "model_dir": st.metadata.get("model_dir"),
         "silence_db": eff.get("silence_threshold_db"),
-        "editing_rules": st.profile.get("editing_rules", {}),
+        "editing_rules": {k: rules.get(k) for k in _EI_TRANSCRIPT_RULE_KEYS if k in rules},
+        "format_type": st.profile.get("format_type"),
         "speaker_map": st.profile.get("speaker_camera_map", {}),
         "fps": [st.fps_num, st.fps_den],
         "flags": [st.intent.transcribe, st.intent.remove_silence, st.intent.remove_setup_delay],
@@ -545,7 +587,18 @@ def _restore_editorial(st: ProjectAnalysisState, cached: dict[str, Any]) -> list
 
 
 def score_highlights(st: ProjectAnalysisState, *, max_items: int = 8, min_len: float = 4.0, max_len: float = 30.0) -> list[dict[str, Any]]:
-    """Rank candidate highlight moments from shared transcript/energy analysis (deterministic)."""
+    """Rank highlight windows (V1.2.2: complete thoughts with setup and payoff on sentence/turn boundaries).
+
+    Delegates to ``editorial_analysis.score_highlights``; the V1.2.1 energy z-score ranking is
+    kept below as ``_score_highlights_v121`` for comparison only.
+    """
+    from bangonpro.ai_engine.department.editorial_analysis import score_highlights as _context_highlights
+
+    return _context_highlights(st, max_items=max_items, min_len=min_len, max_len=max_len)
+
+
+def _score_highlights_v121(st: ProjectAnalysisState, *, max_items: int = 8, min_len: float = 4.0, max_len: float = 30.0) -> list[dict[str, Any]]:
+    """V1.2.1 ranking (energy z-score, turn density, overlap, keyword list); comparison only."""
     segs = [s for s in st.transcript_segments if not s.deleted and not s.is_filler_or_silence and (s.end_sec - s.start_sec) >= 1.0]
     if not segs:
         return []
@@ -602,19 +655,41 @@ def run_editorial_intelligence(ctx: AgentContext) -> AgentOutcome:
                 "transcript_backend": st.transcript_backend,
                 "asr_backend_report": dataclasses.asdict(st.asr_backend_report),
                 "transcript_document": st.transcript_document,
-                "metadata": {k: st.metadata[k] for k in ("asr_backends_available", "asr_backend_report", "vad_threshold_db", "overlap_segment_count") if k in st.metadata},
+                "metadata": {
+                    k: st.metadata[k]
+                    for k in ("asr_backends_available", "asr_backend_report", "vad_threshold_db", "overlap_segment_count", "nonspeech_activity", "noise_floor_db", "topic_segmentation")
+                    if k in st.metadata
+                },
                 "batches": batches,
             }
         )
         ctx.cache.put("editorial", _EI_CACHE_VERSION, key, payload)
+    # V1.2.2: cheap editorial analysis recomputed on top of the (cached) transcript every run
+    from bangonpro.ai_engine.department import editorial_analysis as ea
+
+    ctx.progress(0.85, "Typing moments, identifying speakers, scoring highlights")
+    econtext = ea.build_editorial_context(st)
+    st.metadata["editorial_context"] = econtext
+    for seg in st.transcript_segments:
+        info = econtext["speakers"].get(seg.speaker_id)
+        if info and info.get("name"):
+            seg.speaker_name = info["name"]
     rules = st.profile.get("distribution_rules", {}) or {}
-    highlights = score_highlights(st, max_items=int(rules.get("highlight_count", 6)))
+    highlights = ea.score_highlights(st, max_items=int(rules.get("highlight_count", 6)), moments=econtext["moments"])
+    social = ea.select_social_clips(st, moments=econtext["moments"], speakers=econtext["speakers"])
     st.metadata["highlights"] = highlights
+    st.metadata["social_clips"] = social
     out_dir = Path(st.output_dir)
-    hl_path = write_json_atomic(out_dir / "highlights.json", {"highlights": highlights, "method": "deterministic energy/turn-taking/overlap scoring"})
+    method = "context-aware: complete thoughts, setup + payoff, sentence/turn boundaries" + ("" if st.asr_backend_report.is_neural_inference else " (speech activity only: no text)")
+    hl_path = write_json_atomic(out_dir / "highlights.json", {"highlights": highlights, "social_clips": social, "method": method})
+    ctx_path = write_json_atomic(out_dir / "editorial_context.json", econtext)
     st.artifacts["highlights_json"] = str(hl_path)
+    st.artifacts["editorial_context_json"] = str(ctx_path)
     rep = st.asr_backend_report
     review = []
+    unnamed = [s for s, v in econtext["speakers"].items() if v.get("name_source") == "role label only"]
+    if unnamed:
+        review.append(f"No names for {', '.join(unnamed)}: add graphics_rules.speaker_names in the profile for lower thirds")
     if not rep.is_neural_inference:
         review.append("Speech regions only, no words. Install a Whisper model in Model Manager for word-level editing and captions")
     low = sum(1 for s in st.transcript_segments if s.is_low_confidence)
@@ -623,14 +698,24 @@ def run_editorial_intelligence(ctx: AgentContext) -> AgentOutcome:
     return AgentOutcome(
         batches=batches,
         confidence=round(float(np.mean([s.confidence for s in st.transcript_segments])), 4) if st.transcript_segments else 0.5,
-        summary=f"{len(st.transcript_segments)} segments, {len(st.story_sections)} sections, {len(highlights)} highlight candidates ({st.transcript_backend})",
-        rationale="Speech, speaker turns, energy and overlaps analysed once and shared with downstream agents",
-        outputs={"highlights_json": str(hl_path), **({"transcript_json": st.artifacts["transcript_json"]} if "transcript_json" in st.artifacts else {})},
+        summary=f"{len(st.transcript_segments)} segments, {len(st.story_sections)} topics, {len(econtext['moments'])} moments, {len(highlights)} highlights, {len(social)} social clips ({st.transcript_backend})",
+        rationale="Speech, speaker turns, energy and overlaps analysed once (cached); topics, typed moments, speaker names, protected pauses and highlights recomputed on top",
+        outputs={"highlights_json": str(hl_path), "editorial_context_json": str(ctx_path), **({"transcript_json": st.artifacts["transcript_json"]} if "transcript_json" in st.artifacts else {})},
         neural_inference=bool(rep.is_neural_inference),
         fallback_reason=rep.fallback_reason,
         review_items=review,
         cache_hits=hits,
-        metrics={"segments": len(st.transcript_segments), "highlights": len(highlights), "setup_delay_sec": round(st.setup_delay_sec, 3)},
+        metrics={
+            "segments": len(st.transcript_segments),
+            "topics": len(st.story_sections),
+            "moments": econtext["moment_counts"],
+            "protected_pauses": len(econtext["protected_pauses"]),
+            "speakers_named": sum(1 for v in econtext["speakers"].values() if v.get("name_source") != "role label only"),
+            "highlights": len(highlights),
+            "social_clips": len(social),
+            "setup_delay_sec": round(st.setup_delay_sec, 3),
+        },
+        est_external_cost_usd=0.0,
     )
 
 
@@ -679,37 +764,97 @@ def run_multicam_director(ctx: AgentContext) -> AgentOutcome:
         "repaired_mappings": repaired,
         "speaker_talk_time_sec": {k: round(sum(v.values()), 2) for k, v in talk.items()},
     }
+    # V1.2.2: listener shots, camera availability and a provisional shot plan with objective metrics
+    from bangonpro.ai_engine.department import editorial_director as edir
+
+    sw = edir.build_switch_context(st)
+    plan["listener_camera_map"] = {spk: edir.listener_camera(sw, spk, spk_map, list(video), spk_map.get(spk, "")) for spk in talk}
+    plan["camera_unavailable_intervals"] = {c: [list(iv) for iv in ivs] for c, ivs in sw["availability"].items()}
+    plan["switching_policy"] = {
+        "interjection_max_sec": float((st.profile.get("camera_preferences") or {}).get("interjection_max_sec", min(1.2, float(eff.get("min_shot_duration_sec", 2.0))))),
+        "listener_shots": bool((st.profile.get("camera_preferences") or {}).get("listener_shots", True)),
+        "wide_on_rapid_exchange": bool((st.profile.get("camera_preferences") or {}).get("wide_on_rapid_exchange", True)),
+        "wide_on_topic_change": bool((st.profile.get("camera_preferences") or {}).get("wide_on_topic_change", True)),
+        "cutaways": "timed to reactions and sentence boundaries, to the listener or the person reacting",
+    }
+    st.metadata["camera_plan"] = plan
+    provisional = edir.provisional_shot_plan(st)
+    if provisional is not None:
+        plan["provisional_metrics"] = provisional["metrics"]
     path = write_json_atomic(Path(st.output_dir) / "camera_plan.json", plan)
     st.metadata["camera_plan"] = plan
     unmapped = [s for s in votes if s not in spk_map]
     ctx.progress(1.0, f"Camera plan for {len(video)} angles, {len(spk_map)} speakers")
+    review = [f"Auto-mapped speakers {', '.join(repaired)}: confirm camera assignments"] if repaired else []
+    if sw["availability"]:
+        review.append("Unavailable video on " + ", ".join(f"{c} ({sum(b - a for a, b in ivs):.1f}s)" for c, ivs in sw["availability"].items()) + ": covered by other angles")
     return AgentOutcome(
         confidence=0.9 if not unmapped else 0.7,
         summary=f"{len(video)} angles; speaker map {spk_map}; repaired {len(repaired)} mapping(s)",
-        rationale="Speakers mapped to the angle whose microphone dominates their speech; profile reaction/wide rules applied",
+        rationale="Speakers mapped to the angle whose microphone dominates their speech; listener/reaction shots timed to reactions and sentence boundaries; wide on crosstalk, rapid exchanges and topic changes",
         outputs={"camera_plan_json": str(path)},
-        review_items=[f"Auto-mapped speakers {', '.join(repaired)}: confirm camera assignments"] if repaired else [],
+        review_items=review,
         metrics=plan,
+        est_external_cost_usd=0.0,
     )
+
 
 
 # ---------------------------------------------------------------------------
 # Rough Cut Agent (engine)
 # ---------------------------------------------------------------------------
 def run_rough_cut(ctx: AgentContext) -> AgentOutcome:
+    from bangonpro.ai_engine.department.editorial_pacing import pacing_metrics
+
     st = ctx.state
+    # Scene detection is the only expensive step here: serve it from the shared analysis cache so
+    # a quality-loop correction (or a rerun) never repeats it.
+    hits: list[str] = []
+    ref = st.sync_result.reference_camera_id if st.sync_result else None
+    ref_asset = st.media_assets.get(ref) if ref else None
+    scene_key = {"camera": ref, "sha256": ref_asset.sha256 if ref_asset else None, "threshold": 27.0}
+    if ref_asset is not None and ref_asset.has_video:
+        cached = ctx.cache.get("scene_cuts", "1", scene_key)
+        if cached:
+            st.metadata["scene_cuts_precomputed"] = {"camera_id": ref, "sha256": ref_asset.sha256, "cuts": cached["cuts"], "backend": cached["backend"]}
+            hits.append("scene_cuts")
     batches = _norm_batches(run_rough_cut_multicam_agent(st, ctx.token, ctx.progress))
+    if ref_asset is not None and ref_asset.has_video and not hits and st.metadata.get("scene_cut_camera") == ref:
+        ctx.cache.put("scene_cuts", "1", scene_key, {"cuts": list(st.scene_cuts_sec), "backend": st.metadata.get("scene_detect_backend")})
+    st.metadata.pop("scene_cuts_precomputed", None)
     shots = st.rough_cut_shots
     edited = shots[-1].timeline_out_sec if shots else 0.0
     sources = max((a.duration_sec for a in st.media_assets.values()), default=0.0)
     review = sum(1 for s in shots if s.needs_review)
+    decisions = st.metadata.get("rough_cut_decisions") or {}
+    pm = pacing_metrics(st, st.kept_master_intervals, declared_disfluencies=decisions.get("disfluencies")) if st.kept_master_intervals else {}
+    st.metadata["pacing_metrics"] = {k: v for k, v in pm.items() if k != "protected_detail"}
+    items = [f"{review} shot{'s' if review != 1 else ''} to check for pacing or angle"] if review else []
+    n_dis = len(decisions.get("disfluencies", []) or [])
+    if n_dis:
+        items.append(f"{n_dis} false start(s)/stutter(s)/repeat(s) removed on word boundaries: check the 'Removed ...' markers")
+    stats = decisions.get("stats", {})
     return AgentOutcome(
         batches=batches,
         confidence=round(float(np.mean([s.confidence for s in shots])), 4) if shots else 0.5,
-        summary=f"{len(shots)} shots, edited {edited:.1f}s from {sources:.1f}s source ({(1 - edited / sources) * 100 if sources else 0:.0f}% removed)",
-        rationale="Setup delays, dead air and long silences removed; speaker-aware angle switching per camera plan",
-        review_items=[f"{review} shot{'s' if review != 1 else ''} to check for pacing or angle"] if review else [],
-        metrics={"shots": len(shots), "edited_duration_sec": round(edited, 3), "source_duration_sec": round(sources, 3)},
+        summary=f"{len(shots)} shots, edited {edited:.1f}s from {sources:.1f}s source ({(1 - edited / sources) * 100 if sources else 0:.0f}% removed); "
+        f"{stats.get('protected_pauses', 0)} meaningful pause(s) protected, {n_dis} disfluenc{'y' if n_dis == 1 else 'ies'} removed",
+        rationale="Setup delay trimmed; pauses compressed to a natural show-specific length (pauses after questions, before punchlines and around reactions protected); no cut inside speech; speaker-aware switching per camera plan",
+        review_items=items,
+        cache_hits=hits,
+        metrics={
+            "shots": len(shots),
+            "edited_duration_sec": round(edited, 3),
+            "source_duration_sec": round(sources, 3),
+            "pause_policy": (decisions.get("rules") or {}).get("pause_policy"),
+            "protected_pauses": pm.get("protected_pauses"),
+            "protected_retention": pm.get("protected_retention"),
+            "dead_air_removed_ratio": pm.get("dead_air_removed_ratio"),
+            "cuts_inside_words": len(pm.get("cuts_inside_words", []) or []),
+            "words_lost": len(pm.get("words_lost", []) or []),
+            "disfluencies_removed": n_dis,
+        },
+        est_external_cost_usd=0.0,
     )
 
 
@@ -788,27 +933,70 @@ def run_captions(ctx: AgentContext) -> AgentOutcome:
 
 
 def run_graphics(ctx: AgentContext) -> AgentOutcome:
+    from bangonpro.ai_engine.department import editorial_graphics as eg
+
     st = ctx.state
-    agq.prepare_lower_thirds(st)
-    b = agq.new_agent_builder(st, agent_id="graphics", agent_role="graphics", transaction_label="Graphics Agent: lower thirds & title card")
-    n = agq.emit_lower_third_ops(st, b)
     rules = st.profile.get("graphics_rules", {}) or {}
     templates = st.profile.get("graphics_templates", {}) or {}
     title = ctx.options.episode_title or rules.get("title_card_text") or ""
+    want_title = bool(title and rules.get("enable_title_card", True))
+    title_sec = float(min(6.0, max(2.0, float(rules.get("title_card_duration_sec", 3.0)))))
+    spec = st.profile["video_spec"]
+    width, height = int(spec["width"]), int(spec["height"])
+    accent = str(rules.get("brand_accent_hex", templates.get("accent_hex", "#FF5A1F")))
+    font = str(templates.get("font_family", "DejaVu Sans"))
+    # V1.2.2: V2 occupancy is planned up front: title card, then topic cards, then lower thirds
+    reserved: list[tuple[float, float]] = [(0.0, title_sec)] if want_title else []
+    topic_cards = eg.plan_topic_cards(st, reserved) if st.rough_cut_shots or st.transcript_segments else []
+    st.metadata["graphics_reserved"] = reserved
+    agq.prepare_lower_thirds(st)
+    b = agq.new_agent_builder(st, agent_id="graphics", agent_role="graphics", transaction_label="Graphics Agent: lower thirds & title card")
+    n = agq.emit_lower_third_ops(st, b)
+    report: list[dict[str, Any]] = []
+    lt_name, lt_spec, lt_known = eg.get_template(str(templates.get("lower_third_template", "studio_clean_bar")), "lower_third")
+    lt_min, lt_max = float(rules.get("lower_third_min_sec", 3.0)), float(rules.get("lower_third_max_sec", 8.0))
+    for lt in st.lower_thirds:
+        report.append({"graphic_id": lt.graphic_id, "kind": "lower_third", "template": lt.template, "start_sec": lt.start_sec, **eg.validate_graphic(spec=lt_spec, position=lt.position, width=width, height=height, title=lt.title, subtitle=lt.subtitle, duration_sec=lt.duration_sec, min_sec=lt_min, max_sec=lt_max)})
+    tc_name, tc_spec, _ = eg.get_template("topic_card", "topic_card")
+    for k, card in enumerate(topic_cards, start=1):
+        dur_f = max(1, st.sec_to_frame(card["duration_sec"]))
+        xml = agq.generate_kdenlive_lower_third_xml(
+            title=card["title"], subtitle=card["subtitle"], width=width, height=height, accent_hex=accent, duration_frames=dur_f,
+            position=str(tc_spec["position"]), font_family=font, box_w_frac=float(tc_spec["box_w"]), box_h_frac=float(tc_spec["box_h"]),
+            title_px_frac=float(tc_spec["title_px"]), sub_px_frac=float(tc_spec["sub_px"]),
+        )
+        start_f = st.sec_to_frame(card["start_sec"])
+        b.add_operation(
+            "place_clip",
+            clip_id=f"topic_card_{k:02d}",
+            track_id="V2",
+            in_frame=0,
+            out_frame=max(0, dur_f - 1),
+            timeline_start=start_f,
+            params={"clip_kind": "kdenlivetitle", "title": card["title"], "subtitle": card["subtitle"], "template": tc_name, "position": str(tc_spec["position"]), "kdenlive_title_xml": xml},
+            confidence=0.85,
+            rationale=f"Topic card for {card['section_id']} at the start of the story",
+        )
+        report.append({"graphic_id": f"topic_card_{k:02d}", "kind": "topic_card", "template": tc_name, "start_sec": card["start_sec"], **eg.validate_graphic(spec=tc_spec, position=str(tc_spec["position"]), width=width, height=height, title=card["title"], subtitle=card["subtitle"], duration_sec=card["duration_sec"], min_sec=2.5, max_sec=6.0)})
     title_added = False
-    if title and rules.get("enable_title_card", True):
-        spec = st.profile["video_spec"]
-        dur_f = st.sec_to_frame(float(rules.get("title_card_duration_sec", 3.0)))
+    if want_title:
+        t_name, t_spec, _ = eg.get_template(str(templates.get("title_card_template", "episode_opener")), "title_card")
+        dur_f = st.sec_to_frame(title_sec)
         xml = agq.generate_kdenlive_lower_third_xml(
             title=title,
             subtitle=str(st.profile.get("display_name", "")),
-            width=int(spec["width"]),
-            height=int(spec["height"]),
-            accent_hex=str(rules.get("brand_accent_hex", templates.get("accent_hex", "#FF5A1F"))),
+            width=width,
+            height=height,
+            accent_hex=accent,
             duration_frames=dur_f,
             position="center",
-            font_family=str(templates.get("font_family", "DejaVu Sans")),
+            font_family=font,
+            box_w_frac=float(t_spec["box_w"]),
+            box_h_frac=float(t_spec["box_h"]),
+            title_px_frac=float(t_spec["title_px"]),
+            sub_px_frac=float(t_spec["sub_px"]),
         )
+        report.append({"graphic_id": "title_card_001", "kind": "title_card", "template": t_name, "start_sec": 0.0, **eg.validate_graphic(spec=t_spec, position="center", width=width, height=height, title=title, subtitle=str(st.profile.get("display_name", "")), duration_sec=title_sec, min_sec=2.0, max_sec=6.0)})
         b.add_operation(
             "place_clip",
             clip_id="title_card_001",
@@ -822,12 +1010,27 @@ def run_graphics(ctx: AgentContext) -> AgentOutcome:
         )
         title_added = True
     intro = (st.profile.get("intro_outro_rules", {}) or {})
+    st.metadata["graphics_report"] = {"graphics": report, "lower_third_plan": st.metadata.get("lower_third_plan", []), "template_known": lt_known, "lower_third_template": lt_name}
+    write_json_atomic(Path(st.output_dir) / "graphics_report.json", st.metadata["graphics_report"])
+    review = [] if st.lower_thirds or title_added else ["No speakers identified for lower thirds; add names in the profile speaker map"]
+    for r in report:
+        if not r["inside_title_safe"]:
+            review.append(f"{r['graphic_id']} extends outside the title-safe area")
+        if not r["text_fits"]:
+            review.append(f"{r['graphic_id']}: text may not fit the {r['template']} template")
+    for row in st.metadata.get("lower_third_plan", []):
+        if row.get("tier") == 3:
+            review.append(f"Lower third for {row['title']} placed without the speaker on screen: check timing")
+    if not lt_known:
+        review.append(f"Unknown lower-third template '{templates.get('lower_third_template')}': used {lt_name}")
     return AgentOutcome(
         batches=[b.build()] if b.operation_count else [],
-        confidence=0.95,
-        summary=f"{n} lower thirds" + (", title card" if title_added else "") + (f"; intro={intro.get('intro_asset')}" if intro.get("intro_asset") else ""),
-        rationale="Branded templates from the production profile",
-        review_items=[] if st.lower_thirds or title_added else ["No speakers identified for lower thirds; add names in the profile speaker map"],
+        confidence=0.95 if all(r.get("tier", 1) < 3 for r in st.metadata.get("lower_third_plan", [])) else 0.8,
+        summary=f"{n} lower thirds" + (f", {len(topic_cards)} topic cards" if topic_cards else "") + (", title card" if title_added else "") + (f"; intro={intro.get('intro_asset')}" if intro.get("intro_asset") else ""),
+        rationale="Lower thirds at each speaker's first substantive appearance on their own angle (never during crosstalk or under another graphic); branded templates; title/action-safe validated",
+        review_items=review,
+        metrics={"lower_thirds": n, "topic_cards": len(topic_cards), "safe_area_failures": sum(1 for r in report if not r["inside_title_safe"])},
+        est_external_cost_usd=0.0,
     )
 
 
