@@ -206,6 +206,54 @@ private Q_SLOTS:
         QVERIFY(resume && resume->isEnabled());
     }
 
+    void stoppedProductionsSayWhyAndOfferResume()
+    {
+        // Regression: a production whose process died stayed "running" forever at "Resuming job from checkpoint".
+        QTemporaryDir tmp;
+        const QString path = QDir(tmp.path()).filePath(QStringLiteral("job.json"));
+        auto write = [&path](const QJsonObject &doc) {
+            QFile f(path);
+            QVERIFY(f.open(QIODevice::WriteOnly | QIODevice::Truncate));
+            f.write(QJsonDocument(doc).toJson());
+        };
+        AgentControlCentre acc;
+        auto *status = acc.findChild<QLabel *>(QStringLiteral("acc_status"));
+        auto *resume = acc.findChild<QPushButton *>(QStringLiteral("acc_resume"));
+        QVERIFY(status && resume);
+
+        // Running between agents (or building the draft): the line says what is happening, not a stale message.
+        write(sampleJob(QStringLiteral("running")));
+        acc.setActiveJobDir(tmp.path());
+        acc.setBusy(true, QStringLiteral("Resuming job from checkpoint"));
+        QVERIFY(acc.refreshFromDisk());
+        QCOMPARE(status->text(), QStringLiteral("Preparing the edited sequence and final checks"));
+
+        // Failed: the plain-language fix is shown and Resume is offered.
+        QJsonObject failed = sampleJob(QStringLiteral("failed"));
+        failed.insert(QStringLiteral("error"), QStringLiteral("RuntimeError: render crashed"));
+        failed.insert(QStringLiteral("error_help"), QJsonObject{{QStringLiteral("title"), QStringLiteral("Something went wrong")},
+                                                                {QStringLiteral("fix"), QStringLiteral("Press Resume")}});
+        write(failed);
+        acc.setBusy(false);
+        QVERIFY(acc.refreshFromDisk());
+        QVERIFY(status->text().startsWith(QStringLiteral("Production stopped: Something went wrong. Press Resume")));
+        QVERIFY(resume->isEnabled());
+
+        // Interrupted (recorded by Python on quit): truthful text and Resume.
+        write(sampleJob(QStringLiteral("interrupted")));
+        QVERIFY(acc.refreshFromDisk());
+        QVERIFY(status->text().startsWith(QStringLiteral("Production interrupted")));
+        QVERIFY(resume->isEnabled());
+
+        // The process ended but job.json still says running: recovery shows it as interrupted, never frozen.
+        write(sampleJob(QStringLiteral("running")));
+        acc.recoverJob(tmp.path(), false);
+        acc.showProblem(QStringLiteral("The production stopped: Something went wrong."));
+        QCOMPARE(acc.jobStatus(), QStringLiteral("interrupted"));
+        QVERIFY(resume->isEnabled());
+        QCOMPARE(status->text(), QStringLiteral("The production stopped: Something went wrong."));
+    }
+
     void revisionControlsEmitInstructionAndSelection()
     {
         QTemporaryDir tmp;

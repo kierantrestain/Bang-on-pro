@@ -13,7 +13,7 @@ from bangonpro.ai_engine.department.agents import (
 )
 from bangonpro.ai_engine.department.cache import AnalysisCache
 from bangonpro.ai_engine.department.errors import explain
-from bangonpro.ai_engine.department.jobs import ApprovalRequiredError, ProductionJob
+from bangonpro.ai_engine.department.jobs import ApprovalRequiredError, JobBusyError, JobInterruptedError, ProductionJob, effective_status
 from bangonpro.ai_engine.department.learning import ProfilePreferenceStore
 from bangonpro.ai_engine.department.queue import JobQueue, job_history
 from bangonpro.ai_engine.department.registry import (
@@ -31,12 +31,15 @@ __all__ = [
     "AUTOMATION_MODES",
     "AnalysisCache",
     "ApprovalRequiredError",
+    "JobBusyError",
+    "JobInterruptedError",
     "JobOptions",
     "JobQueue",
     "ProductionJob",
     "ProfilePreferenceStore",
     "capability_matrix",
     "compute_activation",
+    "effective_status",
     "explain",
     "job_history",
     "parse_brief_flags",

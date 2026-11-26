@@ -82,6 +82,8 @@ public:
     /** @brief Job recovery: reopen a job after restart; a "running" job with no live process is shown as interrupted. */
     void recoverJob(const QString &jobDir, bool processAlive);
     void setBusy(bool busy, const QString &text = QString());
+    /** @brief Show why the current production stopped (plain words) in the status line, until the next update. */
+    void showProblem(const QString &text);
 
     QString jobStatus() const;
     int reviewItemCount() const;

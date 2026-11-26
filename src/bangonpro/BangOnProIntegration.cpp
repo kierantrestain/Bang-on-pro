@@ -64,6 +64,12 @@
 #include <QUuid>
 #include <QXmlStreamWriter>
 
+#ifdef Q_OS_UNIX
+#include <cerrno>
+#include <csignal>
+#include <sys/types.h>
+#endif
+
 #ifndef BANGONPRO_SOURCE_DIR
 #define BANGONPRO_SOURCE_DIR ""
 #endif
@@ -100,6 +106,53 @@ QString customProfilesDir()
     // Must match bangonpro/show_profiles/loader.py default_custom_profiles_dir().
     const QString env = qEnvironmentVariable("BANGONPRO_PROFILES_DIR");
     return env.isEmpty() ? QDir::homePath() + QStringLiteral("/.local/share/bangonpro/profiles") : env;
+}
+
+/**
+ * True when a live Bang On Pro process owns (is running) the production in jobDir.
+ * Every run holds <job>/run.lock and removes it only after recording a final status, so "running"
+ * without a lock, or with a lock whose process is gone (or whose pid now belongs to something else), is not running.
+ */
+bool jobOwnerAlive(const QString &jobDir)
+{
+#ifdef Q_OS_UNIX
+    const QJsonObject lock = readJsonFile(QDir(jobDir).filePath(QStringLiteral("run.lock")), nullptr);
+    const qint64 pid = lock.value(QStringLiteral("pid")).toVariant().toLongLong();
+    if (pid <= 0) {
+        return false;
+    }
+    if (::kill(static_cast<pid_t>(pid), 0) != 0 && errno != EPERM) {
+        return false;
+    }
+    QProcess ps;
+    ps.start(QStringLiteral("ps"), {QStringLiteral("-p"), QString::number(pid), QStringLiteral("-o"), QStringLiteral("command=")});
+    if (!ps.waitForFinished(3000)) {
+        ps.kill();
+        return true; // cannot tell: trust the live pid
+    }
+    return ps.exitCode() == 0 && QString::fromLocal8Bit(ps.readAllStandardOutput()).contains(QLatin1String("bangonpro"));
+#else
+    Q_UNUSED(jobDir)
+    return false;
+#endif
+}
+
+QString recordedJobStatus(const QString &jobDir)
+{
+    return readJsonFile(QDir(jobDir).filePath(QStringLiteral("job.json")), nullptr).value(QStringLiteral("status")).toString();
+}
+
+/** Ask a production process to stop cleanly (it saves the job as interrupted), then make sure it is gone. */
+void stopProductionProcess(QProcess *proc)
+{
+    if (!proc || proc->state() == QProcess::NotRunning) {
+        return;
+    }
+    proc->terminate();
+    if (!proc->waitForFinished(5000)) {
+        proc->kill();
+        proc->waitForFinished(2000);
+    }
 }
 
 bool queueHasPendingWork(const QJsonObject &queueDoc, QString *runningJobDir = nullptr, QString *runningLabel = nullptr)
@@ -214,11 +267,15 @@ BangOnProIntegration::~BangOnProIntegration()
         m_aiProcess->kill();
         m_aiProcess->waitForFinished(2000);
     }
-    // A queued production stopped by quitting is resumed from its checkpoint on the next launch.
+    // A production stopped by quitting is saved as interrupted and resumes from its checkpoint next time.
+    // SIGTERM first so Python records that truthfully; a hard kill would leave a "running" job behind.
+    if (m_deptProcess) {
+        m_deptProcess->disconnect(this);
+        stopProductionProcess(m_deptProcess);
+    }
     if (m_queueWorker) {
         m_queueWorker->disconnect(this);
-        m_queueWorker->kill();
-        m_queueWorker->waitForFinished(2000);
+        stopProductionProcess(m_queueWorker);
     }
 }
 
@@ -399,6 +456,14 @@ void BangOnProIntegration::setupAgentControlCentre()
     }
     connect(m_agentCentre, &AgentControlCentre::startJobRequested, this, &BangOnProIntegration::startDepartmentJob);
     connect(m_agentCentre, &AgentControlCentre::cancelJobRequested, this, [this](const QString &jobDir) {
+        if (!m_deptProcess && !(m_queueWorker && jobDir == m_queueRunningJobDir) && !jobOwnerAlive(jobDir)) {
+            // Nothing is running this production, so nothing would read a CANCEL file: end it directly.
+            runQuickDepartmentCommand({QStringLiteral("cancel"), jobDir}, [this, jobDir](const QJsonObject &) {
+                m_agentCentre->recoverJob(jobDir, false);
+                refreshHistory();
+            });
+            return;
+        }
         // Cooperative cancellation: agents poll the CANCEL file; checkpoints make the job resumable.
         QFile cancelFile(QDir(jobDir).filePath(QStringLiteral("CANCEL")));
         if (cancelFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
@@ -407,6 +472,12 @@ void BangOnProIntegration::setupAgentControlCentre()
         m_aiWidget->appendActivityLog(QStringLiteral("department"), QStringLiteral("Cancellation requested for %1").arg(jobDir), QStringLiteral("WARN"));
     });
     connect(m_agentCentre, &AgentControlCentre::resumeJobRequested, this, [this](const QString &jobDir) {
+        if ((m_queueWorker && jobDir == m_queueRunningJobDir) || jobOwnerAlive(jobDir)) {
+            // Never start a second copy of a production that is still running: follow the live one instead.
+            m_aiWidget->appendActivityLog(QStringLiteral("department"), QStringLiteral("This production is already running; showing its progress"));
+            m_agentCentre->recoverJob(jobDir, true);
+            return;
+        }
         runDepartmentCommand({QStringLiteral("resume"), jobDir}, jobDir, QStringLiteral("Resuming job from checkpoint"));
     });
     connect(m_agentCentre, &AgentControlCentre::rerunAgentRequested, this, [this](const QString &jobDir, const QString &agentId) {
@@ -443,7 +514,8 @@ void BangOnProIntegration::setupAgentControlCentre()
         const QFileInfoList jobs = QDir(departmentJobsRoot()).entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Time);
         for (const QFileInfo &fi : jobs) {
             if (QFileInfo::exists(QDir(fi.absoluteFilePath()).filePath(QStringLiteral("job.json")))) {
-                m_agentCentre->recoverJob(fi.absoluteFilePath(), false);
+                // A production still running in a process that outlived a crash is followed live, not shown as interrupted.
+                m_agentCentre->recoverJob(fi.absoluteFilePath(), jobOwnerAlive(fi.absoluteFilePath()));
                 break;
             }
         }
@@ -464,7 +536,7 @@ void BangOnProIntegration::setupAgentControlCentre()
             m_aiWidget->appendActivityLog(QStringLiteral("department"), QStringLiteral("Wait for the running department task to finish"), QStringLiteral("WARN"));
             return;
         }
-        m_agentCentre->recoverJob(jobDir, m_queueWorker && jobDir == m_queueRunningJobDir);
+        m_agentCentre->recoverJob(jobDir, (m_queueWorker && jobDir == m_queueRunningJobDir) || jobOwnerAlive(jobDir));
     });
     connect(m_agentCentre, &AgentControlCentre::queueEntryActionRequested, this, [this](const QString &queueId, const QString &action) {
         runQuickDepartmentCommand({QStringLiteral("queue"), action, queueId, QStringLiteral("--queue-root"), queueRoot()}, [this](const QJsonObject &) { refreshHistory(); });
@@ -858,16 +930,31 @@ void BangOnProIntegration::runDepartmentCommand(const QStringList &subcommandArg
         m_deptProcess.clear();
         proc->deleteLater();
         m_agentCentre->setBusy(false);
-        m_agentCentre->refreshFromDisk();
+        QString detail;
         if (status != QProcess::NormalExit || code != 0) {
             // V1.2.2: the department explains failures as {"error", "help": {"title", "fix"}}.
             const QJsonObject help = QJsonDocument::fromJson(proc->readAllStandardOutput()).object().value(QStringLiteral("help")).toObject();
-            const QString detail = help.isEmpty() ? QString::fromUtf8(proc->readAllStandardError().right(800))
-                                                  : QStringLiteral("%1. %2").arg(help.value(QStringLiteral("title")).toString(), help.value(QStringLiteral("fix")).toString());
+            detail = help.isEmpty() ? QString::fromUtf8(proc->readAllStandardError().right(800)).trimmed()
+                                    : QStringLiteral("%1. %2").arg(help.value(QStringLiteral("title")).toString(), help.value(QStringLiteral("fix")).toString());
             m_aiWidget->appendActivityLog(QStringLiteral("department"), QStringLiteral("Department task failed (exit=%1): %2").arg(code).arg(detail), QStringLiteral("ERROR"));
         }
+        // The process has ended, so the job cannot still be running here. If job.json says it is (the process was
+        // killed or crashed before it could record anything), show it as interrupted with Resume, never as a frozen run.
+        const bool stillRecordedRunning = recordedJobStatus(jobDir) == QLatin1String("running");
+        if (stillRecordedRunning) {
+            const bool ownerAlive = jobOwnerAlive(jobDir); // e.g. a resume refused because another process runs it
+            m_agentCentre->recoverJob(jobDir, ownerAlive);
+            if (!ownerAlive) {
+                m_agentCentre->showProblem(detail.isEmpty() ? tr("The production stopped unexpectedly. Resume continues from the last finished step.")
+                                                            : tr("The production stopped: %1").arg(detail));
+            }
+        } else {
+            m_agentCentre->refreshFromDisk();
+            if (!detail.isEmpty() && recordedJobStatus(jobDir).isEmpty()) {
+                m_agentCentre->showProblem(detail); // the job could not even be created
+            }
+        }
         refreshHistory();
-        Q_UNUSED(jobDir)
     });
 }
 
