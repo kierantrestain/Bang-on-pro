@@ -19,17 +19,32 @@ from pathlib import Path
 from typing import Any
 
 
-def default_socket_path() -> Path:
-    """Mirror ``TimelineCommandServer::defaultSocketPath`` (Qt RuntimeLocation, else temp)."""
+def socket_candidates() -> list[Path]:
+    """Where ``TimelineCommandServer::defaultSocketPath`` puts the socket (Qt RuntimeLocation, else temp).
+
+    Qt's RuntimeLocation is ``$XDG_RUNTIME_DIR`` on Linux (``/tmp/runtime-$USER`` when unset) and
+    ``~/Library/Application Support`` on macOS (no application sub-folder).
+    """
     env = os.environ.get("BANGONPRO_TIMELINE_SOCKET")
     if env:
-        return Path(env)
+        return [Path(env)]
+    name = "bangonpro-timeline-v1.sock"
+    out: list[Path] = []
     runtime = os.environ.get("XDG_RUNTIME_DIR")
-    if runtime:
-        return Path(runtime) / "bangonpro-timeline-v1.sock"
     if os.uname().sysname == "Darwin":
-        return Path.home() / "Library" / "Application Support" / "bangonpro" / "bangonpro-timeline-v1.sock"
-    return Path(os.environ.get("TMPDIR", "/tmp")) / "bangonpro-timeline-v1.sock"
+        out.append(Path.home() / "Library" / "Application Support" / name)
+    elif runtime:
+        out.append(Path(runtime) / name)
+    else:
+        out.append(Path(os.environ.get("TMPDIR", "/tmp")) / f"runtime-{os.environ.get('USER') or os.environ.get('LOGNAME') or ''}" / name)
+    out.append(Path(os.environ.get("TMPDIR", "/tmp")) / name)
+    return out
+
+
+def default_socket_path() -> Path:
+    """The running app's socket: the first candidate that exists, else Qt's primary location."""
+    cands = socket_candidates()
+    return next((c for c in cands if c.exists()), cands[0])
 
 
 class LiveError(RuntimeError):
@@ -97,4 +112,4 @@ class LiveClient:
         return self.call("redo", actor_id=actor)
 
 
-__all__ = ["LiveClient", "LiveError", "default_socket_path"]
+__all__ = ["LiveClient", "LiveError", "default_socket_path", "socket_candidates"]

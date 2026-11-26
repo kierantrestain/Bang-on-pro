@@ -57,8 +57,9 @@ void ExternalProviderConsentDialog::buildUi()
 
     m_externalRadio = new QRadioButton(tr("External AI Provider (Optional Opt-In)"), modeGroup);
     m_externalRadio->setObjectName(QStringLiteral("externalProviderModeRadio"));
-    auto *extNote = new QLabel(tr("Connect an optional cloud or remote LAN model endpoint for advanced script reasoning. Requires explicit "
-                                  "privacy consent below."),
+    auto *extNote = new QLabel(tr("When the local rules cannot interpret an instruction, the AI Assistant may ask the reasoning providers you "
+                                  "authorised for Bang On Pro (Claude Code, Codex, Grok Build or Antigravity, through the shared provider router). "
+                                  "Requires explicit privacy consent below."),
                                modeGroup);
     extNote->setWordWrap(true);
     extNote->setObjectName(QStringLiteral("bangOnProMutedLabel"));

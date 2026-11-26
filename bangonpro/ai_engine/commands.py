@@ -71,11 +71,6 @@ def get_supported_command_types() -> frozenset[str]:
     return frozenset(str(v) for v in enum_vals)
 
 
-def is_valid_mlt_audio_filter(filter_id: str) -> bool:
-    """Return True if ``filter_id`` is a valid Kdenlive/MLT audio filter identifier."""
-    cleaned = (filter_id or "").strip()
-    return cleaned in KNOWN_MLT_AUDIO_FILTER_IDS or cleaned.startswith("avfilter.")
-
 
 def validate_timeline_command_batch(batch: dict[str, Any]) -> dict[str, Any]:
     """Validate a Timeline Command API v1 batch against JSON Schema + semantic invariants."""

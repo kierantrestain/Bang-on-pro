@@ -481,13 +481,10 @@ def _cmd_job(a: argparse.Namespace) -> int:
     elif a.cmd == "revise":
         rec = job.revise(a.instruction, range_sec=tuple(a.range) if a.range else None, range_timeline=tuple(a.range_timeline) if a.range_timeline else None)
         if rec.get("status") == "not_understood":
-            # V1.4: an instruction the rules do not cover goes to the editor's authorised reasoning client
-            from bangonpro.ai_engine.mcp.reasoning import reasoning_status
+            # Rules first; then a validated learned skill (no reasoning call); then the shared provider router.
+            from bangonpro.ai_engine.mcp.__main__ import reasoning_fallback
 
-            if reasoning_status().get("app_driven") == "authorised":
-                from bangonpro.ai_engine.mcp.__main__ import reasoning_fallback
-
-                return _emit(reasoning_fallback(str(job.dir), a.instruction, rec))
+            return _emit(reasoning_fallback(str(job.dir), a.instruction, rec))
         return _emit(rec)
     elif a.cmd == "lock":
         return _emit({"locked_ranges": job.lock_range(a.start, a.end, timeline=a.timeline)})

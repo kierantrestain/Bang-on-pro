@@ -25,6 +25,7 @@ SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
 from __future__ import annotations
 
 import importlib
+import logging
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from typing import Any
@@ -33,6 +34,7 @@ MAX_ATTEMPTS_PER_AGENT = 2
 MAX_ATTEMPTS_PER_JOB = 6
 MIN_IMPROVEMENT = 0.02
 LOW_CONFIDENCE_REVIEW = 0.6
+_log = logging.getLogger(__name__)
 CRITICAL_SEVERITIES = frozenset({"error", "critical"})
 DEFECT_MATCH_TOLERANCE_SEC = 0.5
 
@@ -159,9 +161,11 @@ def guard_issues(st: Any) -> list[Any]:
     issues: list[Any] = []
     try:
         issues.extend(department_qc_checks(st))
-    except Exception:  # noqa: BLE001 - a guard must never crash the job
-        pass
-    hooked, _errors = run_qc_checks(st)
+    except Exception as exc:  # noqa: BLE001 - a guard must never crash the job, but it must not fail silently
+        _log.warning("QC guard: built-in department checks failed: %s: %s", type(exc).__name__, exc)
+    hooked, errors = run_qc_checks(st)
+    for name, err in errors.items():
+        _log.warning("QC guard: check %s failed: %s", name, err)
     return issues + hooked
 
 

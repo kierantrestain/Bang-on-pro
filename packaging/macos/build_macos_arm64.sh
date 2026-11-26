@@ -25,7 +25,7 @@ CRAFT_ROOT="${CRAFT_ROOT:-${HOME}/CraftRoot}"
 CRAFT_PREFIX=""
 APP_NAME="Bang On Pro"
 DMG_BASENAME="BangOnPro"
-APP_VERSION="${BANGONPRO_VERSION:-1.5.0}"
+APP_VERSION="${BANGONPRO_VERSION:-1.5.1}"
 MIN_MACOS="${MACOSX_DEPLOYMENT_TARGET:-13.0}"
 SIGN_IDENTITY="${APPLE_SIGNING_IDENTITY:-${MACOS_SIGNING_IDENTITY:-}}"
 NOTARY_PROFILE="${MACOS_NOTARY_PROFILE:-}"
@@ -73,7 +73,7 @@ Options:
   --output-dir <path>           Output directory for .app/.dmg/logs (default: ./dist/macos-arm64)
   --craft-root <path>           KDE Craft root or CraftMaster target prefix
                                 (auto-detects <root>/macos-arm-clang if present)
-  --version <ver>               Release version string (default: 1.5.0)
+  --version <ver>               Release version string (default: 1.5.1)
   --min-macos <ver>             MACOSX_DEPLOYMENT_TARGET (default: 13.0)
   --sign-identity <id>          Developer ID Application signing identity
                                 (omit to fall back cleanly to ad-hoc signing)
@@ -1311,7 +1311,7 @@ verify_bundle_launch() {
             PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
             PYTHONNOUSERSITE=1 \
             PYTHONPATH="${abs_bundle}/Contents/Resources" \
-            "${bundled_py}" -s -c "import bangonpro.ai_engine, bangonpro.macos, bangonpro.premiere_compat, bangonpro.roto_studio; print('PASS: All Bang On Pro Python packages importable offline')" 2>&1)" || rc=$?
+            "${bundled_py}" -s -c "import sqlite3, bangonpro.ai_engine, bangonpro.ai_engine.department.cli, bangonpro.ai_engine.department.intelligence, bangonpro.ai_engine.mcp.__main__, bangonpro.ai_engine.mcp.reasoning, bangonpro.show_profiles.loader, bangonpro.macos, bangonpro.premiere_compat, bangonpro.roto_studio; sqlite3.connect(':memory:').execute('PRAGMA journal_mode=WAL'); print('PASS: All Bang On Pro Python packages (department, MCP agents, shared reasoning router, learning store) importable offline')" 2>&1)" || rc=$?
         append_verify_log "${log_file}" "${out}"
         [[ "${rc}" -eq 0 ]] || die "[${context_label}] Bundled Python module import smoke check failed (rc=${rc})"
     else

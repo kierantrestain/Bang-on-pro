@@ -763,10 +763,6 @@ def _apply_fit(st: Any, cam: str, fit: DriftFit, fps: float) -> None:
         sr_obj.warnings.append(f"'{cam}': single-window offset {old:+.3f}s replaced by multi-window intercept {fit.offset_sec:+.3f}s")
 
 
-def lipsync_error_at(sync_result: Any, report: dict[str, Any], cam: str, master_sec: float, placed_source_sec: float) -> float:
-    """Error (seconds) between where a clip was placed and where the sync model puts it."""
-    return abs(placed_source_sec - sync_result.source_time(cam, master_sec))
-
 
 __all__ = [
     "SYNC_ANALYSIS_VERSION",

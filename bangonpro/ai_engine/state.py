@@ -304,22 +304,6 @@ class ProductionIntent:
     intent_confidence: float = 1.0
     scope: str = "none"
 
-    @property
-    def has_mutating_actions(self) -> bool:
-        """Return True if any timeline-mutating or rendering flag is enabled."""
-        return any(
-            (
-                self.sync_cameras,
-                self.remove_setup_delay,
-                self.remove_silence,
-                self.build_rough_cut,
-                self.multicam_switch,
-                self.restore_audio,
-                self.add_captions,
-                self.add_lower_thirds,
-                self.export_video,
-            )
-        )
 
     @classmethod
     def full_production(
@@ -437,8 +421,6 @@ class ProjectAnalysisState:
     def sec_to_frame(self, sec: float) -> int:
         return max(0, round(sec * self.fps))
 
-    def frame_to_sec(self, frame: int) -> float:
-        return float(frame) / self.fps
 
     def bump_version(self, stage: str, summary: str) -> int:
         self.state_version += 1

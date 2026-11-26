@@ -680,8 +680,17 @@ class ProductionJob:
         integrity = verify_source_integrity(st) if st.media_assets else {}
         self.doc["source_integrity"] = {"verified": all(integrity.values()) if integrity else None, "per_source": integrity}
         self.rebuild_draft(st)
+        # The same independent draft QC the agents' tasks use checks the timeline that was actually emitted.
+        for d in (self.doc.get("draft_qc") or {}).get("defects", []):
+            if d["severity"] in ql.CRITICAL_SEVERITIES and d["agent"] in self.doc["agents"]:
+                item = f"Draft QC {d['code']} at {d['start']:.1f}-{d['end']:.1f}s: {d['message']}"
+                items = self.doc["agents"][d["agent"]].setdefault("review_items", [])
+                if item not in items:
+                    items.append(item)
         _consolidate_review_items(self.doc)
         self.doc["final_verification"] = ql.run_final_verifiers(st, self.doc)
+        if "draft_qc" in self.doc:
+            self.doc["final_verification"]["draft_qc"] = {k: v for k, v in self.doc["draft_qc"].items() if k != "defects"}
         self.doc["processing_elapsed_sec"] = round(elapsed + float(self.doc.get("processing_elapsed_sec", 0.0)), 3)
         self.doc["status"] = "completed_with_errors" if failed else ("awaiting_review" if self.doc["mode"] == MODE_ASSISTED else "draft_ready")
         self.doc["progress"] = 1.0
@@ -763,6 +772,7 @@ class ProductionJob:
                 protect_manual_edits(project, layer)
             else:
                 compiled = compile_command_batches(batches)
+            self.doc["draft_qc"] = _draft_qc_summary(st, compiled)
             arts["kdenlive_project"] = str(emit_kdenlive_xml(compiled, project))
             arts["otio_timeline"] = str(emit_otio_timeline(compiled, self.draft_dir / f"{st.sequence_id}_draft.otio"))
             arts["unresolved_effects"] = str(len(compiled.unresolved_effects))
@@ -1131,6 +1141,19 @@ _REVIEW_ROOT_CAUSES: tuple[tuple[str, str, re.Pattern[str]], ...] = (
     ("vertical_framing_uncertain", "distribution", re.compile(r"vertical clip \d+: no subject evidence", re.I)),
     ("uncertain_speaker", "rough_cut", re.compile(r"low-confidence transcript segment|shots? to check for pacing or angle", re.I)),
 )
+
+
+def _draft_qc_summary(st: ProjectAnalysisState, compiled: Any) -> dict[str, Any]:
+    """Independent QC of the compiled draft (``draft_qc.check_draft``); a QC failure is reported, never fatal."""
+    from bangonpro.ai_engine.department.draft_qc import DraftView, check_draft
+
+    try:
+        defects = check_draft(DraftView(st, compiled))
+    except Exception as exc:  # noqa: BLE001 - QC must not stop the draft being written
+        return {"checked": False, "error": f"{type(exc).__name__}: {exc}"[:300], "defects": []}
+    keep = ("code", "severity", "agent", "confidence", "start", "end", "message")
+    return {"checked": True, "defect_count": len(defects), "error_count": sum(d["severity"] in ql.CRITICAL_SEVERITIES for d in defects),
+            "codes": sorted({d["code"] for d in defects}), "defects": [{k: d[k] for k in keep} for d in defects[:50]]}
 
 
 def _consolidate_review_items(doc: dict[str, Any]) -> None:

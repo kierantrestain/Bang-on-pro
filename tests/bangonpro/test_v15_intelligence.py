@@ -21,7 +21,6 @@ import os
 import shutil
 import subprocess
 import sys
-import textwrap
 import threading
 import time
 from pathlib import Path
@@ -541,6 +540,16 @@ def test_skill_acquired_from_a_verified_task_runs_in_other_episodes_without_reas
         vv = bt.ws.view()
         assert vv.camera_at(vv.f(mid)) == host_cam
         assert out["usage"] == {"reasoning_calls": 0}
+    # The Agent Control Centre's own revise command, with no reasoning provider authorised at all:
+    # the rules do not cover it, so the validated skill does it and the job records the outcome.
+    _, bt4 = studio.production("sk4")
+    res = subprocess.run([sys.executable, "-m", "bangonpro.ai_engine.department", "revise", str(bt4.ws.job_dir), instruction],
+                         capture_output=True, text=True, timeout=300, check=False, cwd=str(Path(__file__).resolve().parents[2]))
+    assert res.returncode == 0, res.stderr[-2000:]
+    rev = json.loads(res.stdout)
+    assert rev["path"] == "skill" and rev["status"] == "verified" and rev["usage"] == {"reasoning_calls": 0}, rev
+    last = json.loads((bt4.ws.job_dir / "job.json").read_text(encoding="utf-8"))["last_revision"]
+    assert last["path"] == "skill" and last["status"] == "verified" and "learned skill" in last["message"]
     # A skill that no longer fits (camera role missing) is not applicable; nothing is edited.
     from bangonpro.ai_engine.department import skills as sk
 

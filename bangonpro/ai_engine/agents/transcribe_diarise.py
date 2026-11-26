@@ -57,18 +57,6 @@ def detect_available_asr_backends() -> dict[str, bool]:
     }
 
 
-def inspect_asr_backend_status(model_dir: str | Path | None = None) -> dict[str, Any]:
-    """Return honest ASR package vs disk-weights status via ``ModelManager``."""
-    mgr = ModelManager(model_dir=model_dir)
-    asr_models = mgr.list_models(family="asr_whisper")
-    return {
-        "packages_installed": detect_available_asr_backends(),
-        "any_neural_package_installed": any(m.backend_package_installed for m in asr_models),
-        "any_model_available_on_disk": any(m.model_available_on_disk for m in asr_models),
-        "ready_models": [m.model_id for m in asr_models if m.status in ("ready", "loaded")],
-        "models": [m.to_dict() for m in asr_models],
-    }
-
 
 def _align_pcm_to_master(
     pcm: np.ndarray,

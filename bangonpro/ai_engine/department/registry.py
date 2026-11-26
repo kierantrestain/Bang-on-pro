@@ -51,7 +51,7 @@ class AgentDefinition:
     consumes: tuple[str, ...] = ()
     produces: tuple[str, ...] = ()
     engine: str = ""
-    version: str = "1.5.0"
+    version: str = "1.5.1"
     implementation_notes: str = ""
     limitations: tuple[str, ...] = field(default_factory=tuple)
 
@@ -239,12 +239,6 @@ AGENT_DEFINITIONS: tuple[AgentDefinition, ...] = (
 AGENTS_BY_ID: dict[str, AgentDefinition] = {a.agent_id: a for a in AGENT_DEFINITIONS}
 AGENT_ORDER: tuple[str, ...] = tuple(a.agent_id for a in AGENT_DEFINITIONS)
 
-
-def get_agent(agent_id: str) -> AgentDefinition:
-    try:
-        return AGENTS_BY_ID[agent_id]
-    except KeyError as exc:
-        raise KeyError(f"Unknown production agent '{agent_id}'. Known: {', '.join(AGENT_ORDER)}") from exc
 
 
 def transitive_dependents(agent_id: str) -> list[str]:

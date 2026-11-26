@@ -724,6 +724,35 @@ def _normalize_neural_mask(raw_mask: np.ndarray, width: int, height: int) -> np.
     return arr
 
 
+# Loaded segmentation models are reused across frames: rasterising an AI mask over a shot used to
+# rebuild the ONNX Runtime session (or the SAM 2 network) for every frame. Bounded so at most a couple
+# of models stay resident; keyed by file identity so replaced weights are reloaded.
+_MODEL_CACHE: OrderedDict[tuple[Any, ...], Any] = OrderedDict()
+_MODEL_CACHE_MAX = 3
+
+
+def _cached_model(kind: str, path: Path, extra: tuple[Any, ...], factory: Any) -> Any:
+    try:
+        st = path.stat()
+        ident: tuple[Any, ...] = (kind, str(path.resolve()), st.st_mtime_ns, st.st_size, *extra)
+    except OSError:
+        return factory()
+    hit = _MODEL_CACHE.get(ident)
+    if hit is not None:
+        _MODEL_CACHE.move_to_end(ident)
+        return hit
+    obj = factory()
+    _MODEL_CACHE[ident] = obj
+    while len(_MODEL_CACHE) > _MODEL_CACHE_MAX:
+        _MODEL_CACHE.popitem(last=False)
+    return obj
+
+
+def clear_model_cache() -> None:
+    """Release every resident segmentation model (Model Manager removal, memory pressure, tests)."""
+    _MODEL_CACHE.clear()
+
+
 def _try_sam2_segmentation(
     arr: np.ndarray,
     pos_pts: list[tuple[float, float]],
@@ -753,8 +782,8 @@ def _try_sam2_segmentation(
         else:
             device = "cpu"
 
-        model = build_sam2(config_ref, str(ckpt_path), device=device)
-        predictor = SAM2ImagePredictor(model)
+        predictor = _cached_model("sam2", Path(ckpt_path), (str(config_ref), device),
+                                  lambda: SAM2ImagePredictor(build_sam2(config_ref, str(ckpt_path), device=device)))
         predictor.set_image(arr)
 
         point_coords: np.ndarray | None = None
@@ -880,8 +909,8 @@ def _try_mobile_sam_onnx_segmentation(
             return chw, float(target_w) / float(max(1, w)), float(target_h) / float(max(1, h))
 
         if decoder_path is not None:
-            enc_sess = ort.InferenceSession(str(primary_path), providers=providers)
-            dec_sess = ort.InferenceSession(str(decoder_path), providers=providers)
+            enc_sess = _cached_model("ort", Path(primary_path), tuple(providers), lambda: ort.InferenceSession(str(primary_path), providers=providers))
+            dec_sess = _cached_model("ort", Path(decoder_path), tuple(providers), lambda: ort.InferenceSession(str(decoder_path), providers=providers))
             enc_in = enc_sess.get_inputs()[0]
             enc_shape = getattr(enc_in, "shape", None) or [1, 3, 1024, 1024]
             if len(enc_shape) == 3 and (enc_shape[2] == 3 or str(enc_shape[2]) == "3"):
@@ -923,7 +952,7 @@ def _try_mobile_sam_onnx_segmentation(
             outputs = dec_sess.run(None, dec_feed)
             active_providers = list(dec_sess.get_providers()) if hasattr(dec_sess, "get_providers") else providers
         else:
-            sess = ort.InferenceSession(str(primary_path), providers=providers)
+            sess = _cached_model("ort", Path(primary_path), tuple(providers), lambda: ort.InferenceSession(str(primary_path), providers=providers))
             inputs = sess.get_inputs()
             img_h, img_w = 1024, 1024
             for inp in inputs:

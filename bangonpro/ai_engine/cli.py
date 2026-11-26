@@ -141,6 +141,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Validate and save a custom Show Profile JSON file to the output path (--output) and exit",
     )
     parser.add_argument(
+        "--local-only",
+        action="store_true",
+        help="Never send the instruction to a reasoning provider (the AI Assistant's Local Only privacy setting)",
+    )
+    parser.add_argument(
+        "--no-provider-context",
+        action="store_true",
+        help="If a reasoning provider is asked, send the instruction only, without the project summary",
+    )
+    parser.add_argument(
         "--list-providers",
         action="store_true",
         help="List local and optional external AI providers (and consent requirements) and exit",
@@ -353,6 +363,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"[{int(pct * 100):3d}%] ({stage}) {msg}", file=sys.stderr)
 
     export_override = True if args.export else None
+    llm_interpreter = None
+    if provider_config is None and args.instruction and not args.local_only:
+        from bangonpro.ai_engine.planner import shared_reasoning_interpreter
+
+        shared = shared_reasoning_interpreter()
+        if shared is not None and args.no_provider_context:
+            def llm_interpreter(instruction: str, _ctx: dict[str, Any], _f: Any = shared) -> dict[str, Any]:
+                return _f(instruction, {})
+
+            llm_interpreter.provider_id = "shared_reasoning_router"  # type: ignore[attr-defined]
+        else:
+            llm_interpreter = shared
     state, _ = run_production_pipeline(
         inputs=args.inputs or None,
         output_dir=args.output_dir,
@@ -364,6 +386,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         sequence_id=args.sequence_id,
         rnnoise_model_path=args.rnnoise_model,
         provider_config=provider_config,
+        llm_interpreter=llm_interpreter,
         progress_callback=_on_progress,
         kdenlive_project=args.kdenlive_project,
         project_state=args.project_state,

@@ -135,6 +135,10 @@ private:
     void applyTranscriptEdits(const QJsonObject &editedTranscriptJson);
 
     void commitRotoMaskToTimeline(const QJsonObject &rotoSessionJson);
+    /** @brief Show the project monitor's current frame on the Roto canvas (masks are drawn on real footage). */
+    bool refreshRotoFrame();
+    /** @brief Segment the current frame from the AI mask's points (``roto_studio.cli segment``) and keep its matte for commit. */
+    void runRotoSegmentation();
     void renderAndImport2DComposite(const QJsonObject &canvasJson, bool placeOnTimeline);
     void exportStoryboardToTimeline(const QJsonObject &storyboardJson);
 
@@ -168,6 +172,9 @@ private:
     QDockWidget *m_presetDock{nullptr};
     RotoStudioDock *m_rotoWidget{nullptr};
     QDockWidget *m_rotoDock{nullptr};
+    QPointer<QProcess> m_rotoProcess;
+    QString m_rotoMattePath;   // matte from the last AI segmentation; committed as a native shape (luma) mask
+    QString m_rotoMatteMaskId; // the AI mask it belongs to
     WorkspaceSwitcherBar *m_workspaceBar{nullptr};
     QPointer<QAction> m_openGeneratedProjectAction;
     QPointer<QProcess> m_aiProcess;

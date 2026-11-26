@@ -589,52 +589,12 @@ def _restore_editorial(st: ProjectAnalysisState, cached: dict[str, Any]) -> list
 def score_highlights(st: ProjectAnalysisState, *, max_items: int = 8, min_len: float = 4.0, max_len: float = 30.0) -> list[dict[str, Any]]:
     """Rank highlight windows (V1.2.2: complete thoughts with setup and payoff on sentence/turn boundaries).
 
-    Delegates to ``editorial_analysis.score_highlights``; the V1.2.1 energy z-score ranking is
-    kept below as ``_score_highlights_v121`` for comparison only.
+    Delegates to ``editorial_analysis.score_highlights``.
     """
     from bangonpro.ai_engine.department.editorial_analysis import score_highlights as _context_highlights
 
     return _context_highlights(st, max_items=max_items, min_len=min_len, max_len=max_len)
 
-
-def _score_highlights_v121(st: ProjectAnalysisState, *, max_items: int = 8, min_len: float = 4.0, max_len: float = 30.0) -> list[dict[str, Any]]:
-    """V1.2.1 ranking (energy z-score, turn density, overlap, keyword list); comparison only."""
-    segs = [s for s in st.transcript_segments if not s.deleted and not s.is_filler_or_silence and (s.end_sec - s.start_sec) >= 1.0]
-    if not segs:
-        return []
-    energies = np.array([s.energy_db for s in segs], dtype=float)
-    mu, sd = float(energies.mean()), float(energies.std() or 1.0)
-    neural = any(s.is_neural_inference for s in segs)
-    hl: list[dict[str, Any]] = []
-    for i, s in enumerate(segs):
-        z = (s.energy_db - mu) / sd
-        turn_density = sum(1 for o in segs[max(0, i - 3): i + 4] if o.speaker_id != s.speaker_id) / 6.0
-        text = s.text if neural else ""
-        emph = (text.count("!") + text.count("?")) * 0.15 + (0.3 if re.search(r"\b(amazing|incredible|unbelievable|goal|winner|breaking|wow)\b", text.lower()) else 0.0)
-        score = 0.5 * z + 0.4 * turn_density + (0.4 if s.is_overlap else 0.0) + emph
-        start = max(0.0, s.start_sec - 1.0)
-        end = s.end_sec + 1.0
-        if end - start < min_len:
-            end = start + min_len
-        end = min(end, start + max_len)
-        reasons = []
-        if z > 0.8:
-            reasons.append("high vocal energy")
-        if turn_density >= 0.5:
-            reasons.append("rapid speaker exchange")
-        if s.is_overlap:
-            reasons.append("overlapping reactions")
-        if emph:
-            reasons.append("emphatic language")
-        hl.append({"start_sec": round(start, 3), "end_sec": round(end, 3), "score": round(score, 4), "speaker_id": s.speaker_id, "segment_id": s.segment_id, "reasons": reasons or ["above-average engagement"], "text_available": neural})
-    hl.sort(key=lambda h: h["score"], reverse=True)
-    chosen: list[dict[str, Any]] = []
-    for h in hl:
-        if all(h["end_sec"] <= c["start_sec"] or h["start_sec"] >= c["end_sec"] for c in chosen):
-            chosen.append(h)
-        if len(chosen) >= max_items:
-            break
-    return sorted(chosen, key=lambda h: h["start_sec"])
 
 
 def run_editorial_intelligence(ctx: AgentContext) -> AgentOutcome:

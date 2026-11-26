@@ -24,7 +24,6 @@ from bangonpro.ai_engine.state import (
     EditShot,
     ProjectAnalysisState,
     TimeInterval,
-    TranscriptSegment,
 )
 from bangonpro.show_profiles.loader import get_effective_profile_settings
 
@@ -114,20 +113,6 @@ def _compute_kept_master_intervals(
     state.metadata["rough_cut_decisions"] = plan.to_dict()
     return plan.kept
 
-
-def _dominant_segment_for_window(
-    start_sec: float,
-    end_sec: float,
-    segments: list[TranscriptSegment],
-) -> TranscriptSegment | None:
-    best_seg: TranscriptSegment | None = None
-    best_overlap = 0.0
-    for seg in segments:
-        ov = min(end_sec, seg.end_sec) - max(start_sec, seg.start_sec)
-        if ov > best_overlap:
-            best_overlap = ov
-            best_seg = seg
-    return best_seg
 
 
 def _resolve_camera_roles(state: ProjectAnalysisState) -> tuple[str, str, dict[str, str]]:

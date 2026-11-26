@@ -13,7 +13,9 @@
 #include <QDateTime>
 #include <QDockWidget>
 #include <QHBoxLayout>
+#include <QInputDialog>
 #include <QLabel>
+#include <QLineEdit>
 #include <QList>
 #include <QMainWindow>
 #include <QMenu>
@@ -1050,6 +1052,15 @@ void WorkspaceSwitcherBar::handleAiPanelToggled(bool checked)
 
 void WorkspaceSwitcherBar::handleSaveLayoutClicked()
 {
+    // "Save Current Layout…" saves the window's current dock arrangement under a name the editor chooses
+    // (it then appears under Restore / Reset Saved Layout).
+    if (m_attachedWindow) {
+        bool ok = false;
+        const QString name = QInputDialog::getText(this, tr("Save Current Layout"), tr("Layout name:"), QLineEdit::Normal, QString(), &ok).trimmed();
+        if (ok && !name.isEmpty() && saveWorkspaceState(m_attachedWindow.data(), name)) {
+            refreshSavedLayoutsMenu();
+        }
+    }
     Q_EMIT saveLayoutRequested();
 }
 

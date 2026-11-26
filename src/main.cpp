@@ -375,7 +375,7 @@ int main(int argc, char *argv[])
         break;
     }
 
-    KAboutData aboutData(QByteArray("kdenlive"), i18n("Bang On Pro"), QStringLiteral("1.5.0 (Kdenlive %1)").arg(QStringLiteral(KDENLIVE_VERSION)),
+    KAboutData aboutData(QByteArray("kdenlive"), i18n("Bang On Pro"), QStringLiteral("1.5.1 (Kdenlive %1)").arg(QStringLiteral(KDENLIVE_VERSION)),
                          i18n("AI-Native Professional Video Editor built on Kdenlive & MLT."), KAboutLicense::GPL_V3,
                          i18n("Copyright © 2026 Bang On Pro Contributors; Built on Kdenlive (Copyright © 2007–2024 Kdenlive authors)"), otherText,
                          QStringLiteral("https://github.com/kierantrestain/Bang-on-pro"));

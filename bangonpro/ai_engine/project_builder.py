@@ -532,6 +532,9 @@ def _find_compiled_clip(compiled: CompiledTimeline, clip_id: str) -> CompiledCli
     return None
 
 
+MATTE_THRESHOLD = 50  # MLT shape threshold (percent luma) for binary subject mattes
+
+
 def _effect_op_to_filters(op_type: str, params: dict[str, Any]) -> list[dict[str, Any]]:
     """Translate ``add_effect`` / ``apply_mask`` params into native MLT filter specs.
 
@@ -555,6 +558,23 @@ def _effect_op_to_filters(op_type: str, params: dict[str, Any]) -> list[dict[str
     matte = params.get("matte_path")
     if not matte:
         return []
+    masked = params.get("masked_effect") or {}
+    softness = round(min(1.0, max(0.0, float(params.get("feather", 0.0)) / 100.0)), 3)
+    # Mattes are white on the subject. MLT's luma shape makes luma above the threshold transparent, so the
+    # threshold is the midpoint (100 keeps everything) and the selection is the white region unless the
+    # operation is inverted ("outside the subject", e.g. blur the background). Rendered and pixel-checked.
+    mlt_invert = 0 if params.get("invert") else 1
+    if not masked.get("mlt_service"):
+        # No effect to limit: the matte isolates the subject (alpha), the same native "shape" filter the
+        # C++ Timeline Command bridge applies for this operation.
+        return [
+            {
+                "mlt_service": "shape",
+                "kdenlive_id": "shape",
+                "properties": {"resource": str(matte), "mix": MATTE_THRESHOLD, "softness": softness, "invert": mlt_invert, "use_luminance": 1},
+                "agent_id": params.get("agent_id"),
+            }
+        ]
     filters: list[dict[str, Any]] = [
         {
             "mlt_service": "mask_start",
@@ -562,15 +582,14 @@ def _effect_op_to_filters(op_type: str, params: dict[str, Any]) -> list[dict[str
             "properties": {
                 "filter": "shape",
                 "filter.resource": str(matte),
-                "filter.mix": 100,
-                "filter.softness": round(min(1.0, max(0.0, float(params.get("feather", 0.0)) / 100.0)), 3),
-                "filter.invert": 1 if params.get("invert") else 0,
+                "filter.mix": MATTE_THRESHOLD,
+                "filter.softness": softness,
+                "filter.invert": mlt_invert,
                 "filter.use_luminance": 1,
             },
             "agent_id": params.get("agent_id"),
         }
     ]
-    masked = params.get("masked_effect") or {}
     if masked.get("mlt_service"):
         filters.append(
             {

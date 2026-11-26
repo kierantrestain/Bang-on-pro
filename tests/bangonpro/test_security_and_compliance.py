@@ -1010,7 +1010,7 @@ def test_macos_craft_config_blueprint_and_ci_self_contained_packaging() -> None:
     assert "packaging/macos/CraftConfig.ini" in wf_text
     assert "--branch qt6" not in wf_text, "Broken CraftBootstrap --branch qt6 must not be used"
     assert "draft: false" in wf_text, "Versioned tag releases must publish non-draft releases"
-    assert 'default: "1.5.0"' in wf_text
+    assert 'default: "1.5.1"' in wf_text
     assert "verify_packaged_dmg" in build_sh_text
     assert "benchmark_results.json" in wf_text
 

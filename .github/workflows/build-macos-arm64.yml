@@ -13,11 +13,11 @@ on:
   workflow_dispatch:
     inputs:
       release_version:
-        description: "Release version label (defaults to 1.5.0 or git tag)"
+        description: "Release version label (defaults to 1.5.1 or git tag)"
         required: false
-        default: "1.5.0"
+        default: "1.5.1"
       publish_tag:
-        description: "Publish a GitHub Release for this tag after the gated build passes (e.g. v1.5.0); empty = build only"
+        description: "Publish a GitHub Release for this tag after the gated build passes (e.g. v1.5.1); empty = build only"
         required: false
         default: ""
       prerelease:
@@ -80,7 +80,7 @@ jobs:
           elif [[ -n "${INPUT_RELEASE_VERSION:-}" ]]; then
             VER="${INPUT_RELEASE_VERSION}"
           else
-            VER="1.5.0"
+            VER="1.5.1"
           fi
           echo "app_version=${VER}" >> "$GITHUB_OUTPUT"
           echo "Resolved Bang On Pro version: ${VER}"

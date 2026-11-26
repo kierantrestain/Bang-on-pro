@@ -104,6 +104,19 @@ def reasoning_fallback(job: str, instruction: str, rec: dict[str, Any], *, allow
 
     from bangonpro.ai_engine.mcp.execution import run_skill
 
+    def record(out: dict[str, Any], path: str) -> None:
+        # The Agent Control Centre reads the outcome from the job, whichever path did the work.
+        job_obj = ProductionJob(job)
+        res = out.get("result") or {}
+        msg = {"verified": f"Done by the agents ({res.get('edits', 0)} edits, verified by Quality Control)",
+               "needs_attention": f"The agents made {res.get('edits', 0)} edits; {len(res.get('unresolved') or [])} issue(s) need your review",
+               "blocked": "No reasoning provider is available right now; the task is saved and resumes where it stopped",
+               "interrupted": "Stopped; the task resumes where it stopped"}.get(out["status"], f"The agents could not complete this: {out['status']}")
+        if path == "skill" and out["status"] == "verified":
+            msg = f"Done with a learned skill, no reasoning call ({res.get('edits', 0)} edits, verified by Quality Control)"
+        job_obj.doc["last_revision"] = {"revision": rec["revision"], "instruction": instruction, "status": out["status"], "message": msg, "path": path}
+        job_obj._save(force=True)
+
     _, bt = make_server(job, allow)
     try:
         rsn = reasoner or CliReasoner()
@@ -111,19 +124,14 @@ def reasoning_fallback(job: str, instruction: str, rec: dict[str, Any], *, allow
         # No provider: a learned, validated skill can still do it deterministically.
         sk = run_skill(bt, instruction)
         if sk is not None and sk["status"] == "verified":
+            record(sk, "skill")
             return {"path": "skill", **sk}
         return {"path": "rules", "revision": rec, "reasoning": f"unavailable: {exc}"}
     out = run_cycle(bt, instruction, rsn)
-    if out.get("reasoner") == "skill":
+    path = "skill" if out.get("reasoner") == "skill" else str(out.get("reasoner") or "reasoning")
+    record(out, path)
+    if path == "skill":
         return {"path": "skill", **out}
-    job_obj = ProductionJob(job)
-    res = out.get("result") or {}
-    msg = {"verified": f"Done by the agents ({res.get('edits', 0)} edits, verified by Quality Control)",
-           "needs_attention": f"The agents made {res.get('edits', 0)} edits; {len(res.get('unresolved') or [])} issue(s) need your review",
-           "blocked": "No reasoning provider is available right now; the task is saved and resumes where it stopped",
-           "interrupted": "Stopped; the task resumes where it stopped"}.get(out["status"], f"The agents could not complete this: {out['status']}")
-    job_obj.doc["last_revision"] = {"revision": rec["revision"], "instruction": instruction, "status": out["status"], "message": msg, "path": out.get("reasoner")}
-    job_obj._save(force=True)
     return {"path": "reasoning", "reasoner": out.get("reasoner"), **out}
 
 

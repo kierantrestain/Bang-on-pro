@@ -26,7 +26,9 @@
 #include "doc/kdenlivedoc.h"
 #include "effects/effectlist/view/effectlistwidget.hpp"
 #include "mainwindow.h"
+#include "monitor/monitor.h"
 #include "monitor/monitormanager.h"
+#include "monitor/monitorproxy.h"
 #include "project/projectmanager.h"
 #include "timeline2/view/timelinecontroller.h"
 #include "timeline2/view/timelinewidget.h"
@@ -51,6 +53,7 @@
 #include <QMessageBox>
 #include <QProcess>
 #include <QProcessEnvironment>
+#include <QPushButton>
 #include <QRegularExpression>
 #include <QScrollArea>
 #include <QSettings>
@@ -982,6 +985,21 @@ void BangOnProIntegration::setupRotoStudioDock()
         m_aiDock->raise();
     }
     connect(m_rotoWidget, &RotoStudioDock::commitMaskToTimelineRequested, this, &BangOnProIntegration::commitRotoMaskToTimeline);
+    // Masks are drawn on the project monitor's current frame, and AI Segment segments that frame.
+    connect(m_rotoDock, &QDockWidget::visibilityChanged, this, [this](bool visible) {
+        if (visible) {
+            refreshRotoFrame();
+        }
+    });
+    connect(m_rotoWidget, &RotoStudioDock::aiSegmentRequested, this, [this](const QJsonObject &) { runRotoSegmentation(); });
+    // Mask tracking (optical-flow propagation) is not connected to the panel in this release: say so instead of a silent button.
+    for (const QString &name : {QStringLiteral("rotoTrackBackBtn"), QStringLiteral("rotoTrackFwdBtn")}) {
+        if (auto *btn = m_rotoWidget->findChild<QPushButton *>(name)) {
+            btn->setEnabled(false);
+            btn->setToolTip(
+                QStringLiteral("Mask tracking from the panel is not available in this release. Draw or AI-segment the mask on the frame you need."));
+        }
+    }
     connect(m_rotoWidget, &RotoStudioDock::send2DCompositeToMediaBinRequested, this, &BangOnProIntegration::renderAndImport2DComposite);
     connect(m_rotoWidget, &RotoStudioDock::sendStoryboardToTimelineRequested, this, &BangOnProIntegration::exportStoryboardToTimeline);
 }
@@ -1325,6 +1343,9 @@ QProcess *BangOnProIntegration::startPython(const QStringList &args)
         QStringLiteral("BANGONPRO_PREFS_DIR"),
         QStringLiteral("BANGONPRO_PROFILES_DIR"),
         QStringLiteral("BANGONPRO_QUEUE_DIR"),
+        // Shared reasoning router configuration and department intelligence (paths only, never secrets)
+        QStringLiteral("BANGONPRO_CONFIG_DIR"),
+        QStringLiteral("BANGONPRO_INTEL_DIR"),
     };
     for (const QString &key : allowedVars) {
         if (host.contains(key)) {
@@ -1334,6 +1355,10 @@ QProcess *BangOnProIntegration::startPython(const QStringList &args)
     // The folder chosen in System check also holds the analysis cache (e.g. an external SSD).
     if (!clean.contains(QStringLiteral("BANGONPRO_CACHE_DIR")) && storageRootChosen()) {
         clean.insert(QStringLiteral("BANGONPRO_CACHE_DIR"), storageRoot() + QStringLiteral("/cache"));
+    }
+    // Agents started by the app talk to this instance's native Timeline Command server, wherever Qt put its socket.
+    if (m_server && !m_server->socketPath().isEmpty()) {
+        clean.insert(QStringLiteral("BANGONPRO_TIMELINE_SOCKET"), m_server->socketPath());
     }
     const QString existing = host.value(QStringLiteral("PYTHONPATH"));
     clean.insert(QStringLiteral("PYTHONPATH"), existing.isEmpty() ? root : root + QDir::listSeparator() + existing);
@@ -1415,6 +1440,14 @@ void BangOnProIntegration::startProposal(const QString &instruction, const QStri
          << QStringLiteral("--output-dir") << m_aiOutputDir << QStringLiteral("--json");
     if (!m_lastProfile.isEmpty()) {
         args << QStringLiteral("--profile") << m_lastProfile;
+    }
+    // The AI Assistant's privacy setting governs whether an instruction the local rules cannot interpret may
+    // go to the shared reasoning router (the providers authorised for Bang On Pro), and with what context.
+    const ExternalProviderSettings privacy = ExternalProviderConsentDialog::loadSettings();
+    if (!privacy.isExternalTransmissionAllowed()) {
+        args << QStringLiteral("--local-only");
+    } else if (!privacy.sendProjectMetadata) {
+        args << QStringLiteral("--no-provider-context");
     }
     QProcess *proc = startPython(args);
     if (!proc) {
@@ -1623,6 +1656,17 @@ void BangOnProIntegration::commitRotoMaskToTimeline(const QJsonObject &rotoSessi
     op.params.insert(QStringLiteral("invert"), primary.value(QStringLiteral("inverted")).toBool(false));
     op.params.insert(QStringLiteral("operation"), primary.value(QStringLiteral("combine_mode")).toString(QStringLiteral("add")));
     op.params.insert(QStringLiteral("splines_json"), QString::fromUtf8(QJsonDocument(primary.value(QStringLiteral("vertices")).toArray()).toJson(QJsonDocument::Compact)));
+    // An AI (SAM) mask has points, not vertices: its segmented matte is applied as a native shape (luma) mask.
+    if (primary.value(QStringLiteral("tool")).toString() == QStringLiteral("ai_sam")) {
+        if (m_rotoMatteMaskId != primary.value(QStringLiteral("id")).toString() || !QFileInfo::exists(m_rotoMattePath)) {
+            if (m_aiWidget) {
+                m_aiWidget->appendActivityLog(QStringLiteral("roto-studio"), QStringLiteral("Run AI Segment on this mask before committing it"),
+                                              QStringLiteral("WARN"));
+            }
+            return;
+        }
+        op.params.insert(QStringLiteral("matte_path"), m_rotoMattePath);
+    }
     op.confidence = 0.96;
     op.rationale = QStringLiteral("Commit native rotoscope mask from Bang On Pro Roto Studio");
     batch.operations.append(op);
@@ -1636,6 +1680,101 @@ void BangOnProIntegration::commitRotoMaskToTimeline(const QJsonObject &rotoSessi
                                           .arg(resp.currentRevision)
                                           .arg(resp.errorMessage));
     }
+}
+
+bool BangOnProIntegration::refreshRotoFrame()
+{
+    if (!m_rotoWidget || !m_rotoWidget->canvasWidget() || !pCore) {
+        return false;
+    }
+    Monitor *monitor = pCore->getMonitor(Kdenlive::ProjectMonitor);
+    MonitorProxy *proxy = monitor ? monitor->getControllerProxy() : nullptr;
+    const QImage frame = proxy ? proxy->extractFrame() : QImage();
+    if (frame.isNull()) {
+        return false;
+    }
+    m_rotoWidget->canvasWidget()->setFrameImage(frame);
+    return true;
+}
+
+void BangOnProIntegration::runRotoSegmentation()
+{
+    if (!m_rotoWidget) {
+        return;
+    }
+    if (m_rotoProcess) {
+        m_aiWidget->appendActivityLog(QStringLiteral("roto-studio"), QStringLiteral("AI segmentation is already running"), QStringLiteral("WARN"));
+        return;
+    }
+    if (!refreshRotoFrame()) {
+        m_aiWidget->appendActivityLog(QStringLiteral("roto-studio"), QStringLiteral("AI Segment needs a clip in the project monitor"), QStringLiteral("WARN"));
+        return;
+    }
+    const QJsonObject session = m_rotoWidget->exportRotoSessionJson(); // after the refresh: sized to the real frame
+    QJsonObject aiMask;
+    for (const QJsonValue &v : session.value(QStringLiteral("masks")).toArray()) {
+        const QJsonObject m = v.toObject();
+        if (m.value(QStringLiteral("tool")).toString() == QStringLiteral("ai_sam") &&
+            (!m.value(QStringLiteral("positive_points")).toArray().isEmpty() || m.contains(QStringLiteral("bbox")))) {
+            aiMask = m;
+            break;
+        }
+    }
+    if (aiMask.isEmpty()) {
+        m_aiWidget->appendActivityLog(QStringLiteral("roto-studio"), QStringLiteral("Choose the AI (SAM) tool and click the subject before AI Segment"),
+                                      QStringLiteral("WARN"));
+        return;
+    }
+    const QString dir = dataDir() + QStringLiteral("/roto/") + QDateTime::currentDateTimeUtc().toString(QStringLiteral("yyyyMMdd-HHmmss-zzz"));
+    QDir().mkpath(dir);
+    const QString framePath = dir + QStringLiteral("/frame.png");
+    const QString sessionPath = dir + QStringLiteral("/session.json");
+    QFile sf(sessionPath);
+    if (!m_rotoWidget->canvasWidget()->frameImage().save(framePath) || !sf.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        m_aiWidget->appendActivityLog(QStringLiteral("roto-studio"), QStringLiteral("Cannot write the segmentation inputs to %1").arg(dir),
+                                      QStringLiteral("ERROR"));
+        return;
+    }
+    sf.write(QJsonDocument(session).toJson(QJsonDocument::Compact));
+    sf.close();
+    QProcess *proc = startPython({QStringLiteral("-m"), QStringLiteral("bangonpro.roto_studio.cli"), QStringLiteral("segment"), QStringLiteral("--image"),
+                                  framePath, QStringLiteral("--session"), sessionPath, QStringLiteral("--output-dir"), dir});
+    if (!proc) {
+        m_aiWidget->appendActivityLog(QStringLiteral("roto-studio"), QStringLiteral("Cannot start segmentation: bangonpro package not found"),
+                                      QStringLiteral("ERROR"));
+        return;
+    }
+    m_rotoProcess = proc;
+    const QString maskId = aiMask.value(QStringLiteral("id")).toString();
+    m_aiWidget->appendActivityLog(QStringLiteral("roto-studio"), QStringLiteral("AI segmentation started (%1)").arg(maskId));
+    connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this, [this, proc, maskId](int code, QProcess::ExitStatus status) {
+        m_rotoProcess.clear();
+        proc->deleteLater();
+        const QJsonObject out = QJsonDocument::fromJson(proc->readAllStandardOutput()).object();
+        const QJsonArray frames = out.value(QStringLiteral("matte_frames")).toArray();
+        if (status != QProcess::NormalExit || code != 0 || frames.isEmpty()) {
+            m_aiWidget->appendActivityLog(
+                QStringLiteral("roto-studio"),
+                QStringLiteral("AI segmentation failed (exit=%1): %2").arg(code).arg(QString::fromUtf8(proc->readAllStandardError().right(600))),
+                QStringLiteral("ERROR"));
+            return;
+        }
+        m_rotoMattePath = frames.first().toString();
+        m_rotoMatteMaskId = maskId;
+        const QImage matte(m_rotoMattePath);
+        if (!matte.isNull() && m_rotoWidget && m_rotoWidget->canvasWidget()) {
+            m_rotoWidget->canvasWidget()->setAlphaMaskImage(matte);
+        }
+        const QJsonObject rep = out.value(QStringLiteral("segmentation_reports")).toArray().first().toObject();
+        if (m_rotoWidget && !rep.isEmpty()) {
+            const QString reason = rep.value(QStringLiteral("fallback_reason")).toString();
+            m_rotoWidget->setSegmentationBackendStatus(rep.value(QStringLiteral("backend_id")).toString(),
+                                                       rep.value(QStringLiteral("is_neural_inference")).toBool(),
+                                                       reason.isEmpty() ? QStringLiteral("segmented the current frame") : reason);
+        }
+        m_aiWidget->appendActivityLog(QStringLiteral("roto-studio"),
+                                      QStringLiteral("AI segmentation ready: %1 (commit applies it as a native matte mask)").arg(m_rotoMattePath));
+    });
 }
 
 void BangOnProIntegration::renderAndImport2DComposite(const QJsonObject &canvasJson, bool placeOnTimeline)

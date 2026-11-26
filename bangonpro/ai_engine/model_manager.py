@@ -1,6 +1,6 @@
 """Managed AI Model Runtime & Hardware-Aware Model Catalog for Bang On Pro.
 
-Manages local Whisper-family ASR models (``faster-whisper``, ``whisper.cpp``,
+Manages local Whisper-family ASR models (``faster-whisper``,
 ``openai-whisper``) and SAM-family segmentation models (MobileSAM ONNX,
 SAM 2.1 Hiera Tiny/Small) under a configurable ``BANGONPRO_MODEL_DIR``.
 
@@ -80,7 +80,7 @@ class ModelCatalogEntry:
     model_id: str
     display_name: str
     family: str  # "asr_whisper" | "segmentation_sam"
-    runtime_backend: str  # "faster_whisper" | "whisper_cpp" | "openai_whisper" | "onnxruntime" | "sam2"
+    runtime_backend: str  # "faster_whisper" | "openai_whisper" | "onnxruntime" | "sam2"
     upstream_model_ref: str
     license_spdx: str
     min_ram_gb: int
@@ -209,24 +209,6 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         companion_files=FASTER_WHISPER_COMPANIONS,
         recommended_for_apple_silicon=False,
         notes="Maximum accuracy Whisper ASR; requires 24-32 GB+ RAM or CUDA GPU.",
-    ),
-    ModelCatalogEntry(
-        model_id="whisper-cpp-base-en",
-        display_name="whisper.cpp GGML Base.en (Metal/CoreML)",
-        family="asr_whisper",
-        runtime_backend="whisper_cpp",
-        upstream_model_ref="ggerganov/whisper.cpp:ggml-base.en.bin",
-        license_spdx="MIT",
-        min_ram_gb=4,
-        ram_tier="low_8gb",
-        disk_size_mb=148,
-        mps_compatible=True,
-        coreml_compatible=True,
-        cpu_compatible=True,
-        download_url="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin",
-        artifact_filename="ggml-base.en.bin",
-        recommended_for_apple_silicon=True,
-        notes="Native whisper.cpp GGML model with Apple Silicon CoreML/Metal and CPU acceleration.",
     ),
     ModelCatalogEntry(
         model_id="openai-whisper-tiny",
@@ -390,7 +372,6 @@ def detect_hardware_capabilities() -> HardwareCapabilities:
         "faster_whisper": importlib.util.find_spec("faster_whisper") is not None,
         "openai_whisper": importlib.util.find_spec("whisper") is not None,
         "whisperx": importlib.util.find_spec("whisperx") is not None,
-        "whisper_cpp": bool(shutil.which("whisper-cli") or shutil.which("whisper-cpp")),
         "onnxruntime": importlib.util.find_spec("onnxruntime") is not None,
         "sam2": importlib.util.find_spec("sam2") is not None,
         "torch": importlib.util.find_spec("torch") is not None,
@@ -418,8 +399,6 @@ def detect_hardware_capabilities() -> HardwareCapabilities:
             coreml_available = "CoreMLExecutionProvider" in providers
         except Exception:  # noqa: BLE001
             coreml_available = False
-    elif is_apple_silicon and installed_backends["whisper_cpp"]:
-        coreml_available = True
 
     return HardwareCapabilities(
         os_name=os_name,
@@ -434,16 +413,6 @@ def detect_hardware_capabilities() -> HardwareCapabilities:
         installed_backends=installed_backends,
     )
 
-
-def _compute_sha256_file(path: Path) -> str:
-    hasher = hashlib.sha256()
-    with path.open("rb") as fh:
-        while True:
-            chunk = fh.read(1024 * 1024)
-            if not chunk:
-                break
-            hasher.update(chunk)
-    return hasher.hexdigest()
 
 
 def _dir_size_bytes(path: Path) -> int:
@@ -620,8 +589,6 @@ class ModelManager:
         self.get_catalog_entry(model_id)
         self._loaded_models.add(model_id)
 
-    def unload_model(self, model_id: str) -> None:
-        self._loaded_models.discard(model_id)
 
     def mark_inference_executed(self, model_id: str) -> None:
         self.get_catalog_entry(model_id)

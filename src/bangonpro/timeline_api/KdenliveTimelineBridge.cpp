@@ -1522,6 +1522,41 @@ TimelineOperationResult KdenliveTimelineBridge::handleApplyMask(const std::share
     }
 
     const QString mattePath = op.params.value(QStringLiteral("matte_path")).toString().trimmed();
+    const QJsonObject maskedEffect = op.params.value(QStringLiteral("masked_effect")).toObject();
+    const QString maskedId = maskedEffect.value(QStringLiteral("kdenlive_id")).toString(maskedEffect.value(QStringLiteral("mlt_service")).toString()).trimmed();
+    // Mattes are white on the subject; MLT's luma shape makes luma above the threshold transparent. The
+    // threshold is the midpoint (100 keeps everything) and the selection is the white region unless the
+    // operation is inverted ("outside the subject"). Identical to project_builder.py (pixel-checked renders).
+    const QString kMatteThreshold = QStringLiteral("50");
+    const QString mltMatteInvert = op.params.value(QStringLiteral("invert")).toBool(false) ? QStringLiteral("0") : QStringLiteral("1");
+    if (!mattePath.isEmpty() && !maskedId.isEmpty()) {
+        // An effect limited to the matte uses Kdenlive's native mask workflow, exactly as the department's
+        // draft builder writes it: mask_start (shape matte) -> the masked effect -> mask_apply.
+        for (const QString &id : {QStringLiteral("mask_start-shape"), maskedId, QStringLiteral("mask_apply")}) {
+            if (!stack->appendEffectWithUndo(id, m_txUndo, m_txRedo)) {
+                res.message = QStringLiteral("EffectStackModel::appendEffectWithUndo failed for mask workflow effect '%1'").arg(id);
+                return res;
+            }
+        }
+        if (auto start = stack->getAssetModelById(QStringLiteral("mask_start-shape"))) {
+            start->setParameter(QStringLiteral("filter.resource"), mattePath, true);
+            start->setParameter(QStringLiteral("filter.mix"), kMatteThreshold, true);
+            start->setParameter(QStringLiteral("filter.softness"),
+                                QString::number(qBound(0.0, op.params.value(QStringLiteral("feather")).toDouble(0.0) / 100.0, 1.0), 'f', 3), true);
+            start->setParameter(QStringLiteral("filter.invert"), mltMatteInvert, true);
+            start->setParameter(QStringLiteral("filter.use_luminance"), QStringLiteral("1"), true);
+        }
+        const QJsonObject props = maskedEffect.value(QStringLiteral("properties")).toObject();
+        if (auto eff = props.isEmpty() ? nullptr : stack->getAssetModelById(maskedId)) {
+            for (auto it = props.constBegin(); it != props.constEnd(); ++it) {
+                eff->setParameter(it.key(), jsonValueToParamString(it.value()), true);
+            }
+        }
+        res.applied = true;
+        res.createdId = op.params.value(QStringLiteral("mask_id")).toString(QStringLiteral("mask_start-shape"));
+        res.message = QStringLiteral("Applied '%1' through the matte '%2' (native mask workflow)").arg(maskedId, res.createdId);
+        return res;
+    }
     const QString serviceId = !mattePath.isEmpty() ? QStringLiteral("shape") : QStringLiteral("rotoscoping");
     if (!stack->appendEffectWithUndo(serviceId, m_txUndo, m_txRedo)) {
         res.message = QStringLiteral("EffectStackModel::appendEffectWithUndo failed for mask filter '%1'").arg(serviceId);
@@ -1532,8 +1567,9 @@ TimelineOperationResult KdenliveTimelineBridge::handleApplyMask(const std::share
         if (serviceId == QStringLiteral("shape")) {
             assetModel->setParameter(QStringLiteral("resource"), mattePath, true);
             assetModel->setParameter(QStringLiteral("use_luminance"), QStringLiteral("1"), true);
+            assetModel->setParameter(QStringLiteral("mix"), kMatteThreshold, true);
             assetModel->setParameter(QStringLiteral("softness"), QString::number(qBound(0.0, op.params.value(QStringLiteral("feather")).toDouble(0.0) / 100.0, 1.0), 'f', 3), true);
-            assetModel->setParameter(QStringLiteral("invert"), op.params.value(QStringLiteral("invert")).toBool(false) ? QStringLiteral("1") : QStringLiteral("0"), true);
+            assetModel->setParameter(QStringLiteral("invert"), mltMatteInvert, true);
         } else {
             const QString splinesJson = op.params.value(QStringLiteral("splines_json")).toString();
             if (!splinesJson.isEmpty()) {

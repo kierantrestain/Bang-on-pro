@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -33,12 +33,17 @@ from bangonpro.ai_engine.commands import (
     TimelineCommandValidationError,
     validate_timeline_command_batch,
 )
-from bangonpro.ai_engine.intent import parse_production_instruction
+from bangonpro.ai_engine.intent import _classify_scope, parse_production_instruction
 from bangonpro.ai_engine.providers import AiProviderRegistry, ConsentRecord
 from bangonpro.ai_engine.state import ProductionIntent
-from bangonpro.show_profiles.loader import get_effective_profile_settings, load_show_profile
+from bangonpro.show_profiles.loader import get_effective_profile_settings
 
 LlmInterpreterFn = Callable[[str, dict[str, Any]], dict[str, Any]]
+
+_ACTION_FLAGS: tuple[str, ...] = (
+    "sync_cameras", "transcribe", "remove_setup_delay", "remove_silence", "build_rough_cut", "multicam_switch",
+    "restore_audio", "add_captions", "add_lower_thirds", "run_qc", "export_video",
+)
 
 _ALLOWED_LLM_INTENT_KEYS: frozenset[str] = frozenset(
     {
@@ -320,6 +325,37 @@ class PlanExecutionReport:
 # ---------------------------------------------------------------------------
 
 
+def shared_reasoning_interpreter() -> LlmInterpreterFn | None:
+    """Instruction interpreter backed by the department's shared provider router, or ``None``.
+
+    The AI Assistant uses the same authorised CLIs, priority order, failover, cooldowns and daily
+    budget as the 14 production agents; there is no second provider system. ``None`` when no
+    provider is authorised and installed, so the local rules stay the only interpreter.
+    """
+    from bangonpro.ai_engine.mcp.reasoning import CliReasoner, ReasonerError
+
+    try:
+        router = CliReasoner()
+    except ReasonerError:
+        return None
+
+    def interpret(instruction: str, ctx_summary: dict[str, Any]) -> dict[str, Any]:
+        prompt = (
+            "You interpret one video-editing instruction for Bang On Pro's AI Assistant. Reply with ONE JSON object and nothing else. "
+            "Allowed keys (omit any you do not need): booleans sync_cameras, transcribe, remove_setup_delay, remove_silence, build_rough_cut, "
+            "multicam_switch, restore_audio, add_captions, add_lower_thirds, run_qc, export_video, needs_clarification; strings "
+            "clarification_question, profile_hint; lists of strings target_clips, target_tracks, target_speakers; time_range_sec [start, end] "
+            "in seconds; numbers loudness_target_lufs, silence_threshold_db, min_pause_sec. If the instruction cannot be expressed with these, "
+            'set needs_clarification true and ask one short question.\n'
+            f"Project: {json.dumps(ctx_summary, default=str)[:1500]}\nInstruction: {instruction[:600]}"
+        )
+        out = router.plan(prompt, purpose="interpret", agent="executive")
+        return {k: v for k, v in out.items() if k in _ALLOWED_LLM_INTENT_KEYS}
+
+    interpret.provider_id = "shared_reasoning_router"  # type: ignore[attr-defined]
+    return interpret
+
+
 def validate_llm_plan_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """Validate an optional LLM interpreter JSON response against the strict intent schema."""
     if not isinstance(payload, dict):
@@ -371,6 +407,9 @@ def interpret_instruction(
     )
 
     consent_record: ConsentRecord | None = None
+    call_llm = shared_router = False
+    router_note: str | None = None
+    provider_id = "local_deterministic"
     if provider_config:
         registry = AiProviderRegistry()
         provider_id = str(provider_config.get("provider_id", "local_deterministic"))
@@ -389,9 +428,25 @@ def interpret_instruction(
             data_categories=("instruction_text", "project_context_summary"),
         )
 
-        if llm_interpreter is not None:
-            ctx_summary = context.summary() if context is not None else {}
+        call_llm = llm_interpreter is not None
+    elif llm_interpreter is not None and base_intent.needs_clarification:
+        # The shared reasoning router (the editor's authorised CLIs, one budget, automatic failover) is
+        # asked only when the local rules could not interpret the instruction. Authorising a provider
+        # (``python -m bangonpro.ai_engine.mcp authorise``) is the editor's consent for this call.
+        provider_id = str(getattr(llm_interpreter, "provider_id", "shared_reasoning_router"))
+        call_llm = True
+        shared_router = True
+
+    if call_llm and llm_interpreter is not None:
+        ctx_summary = context.summary() if context is not None else {}
+        try:
             raw_llm = validate_llm_plan_payload(llm_interpreter(instruction, ctx_summary))
+        except Exception as exc:  # noqa: BLE001 - an unavailable or unusable router answer keeps the local interpretation
+            if not shared_router:
+                raise
+            raw_llm = None
+            router_note = f"{type(exc).__name__}: {exc}"[:300]
+        if raw_llm is not None:
             merged = ProductionIntent(
                 raw_instruction=instruction.strip(),
                 sync_cameras=bool(raw_llm.get("sync_cameras", base_intent.sync_cameras)),
@@ -441,17 +496,24 @@ def interpret_instruction(
                 intent_confidence=0.9 if not raw_llm.get("needs_clarification") else 0.0,
                 scope="clarification" if raw_llm.get("needs_clarification") else base_intent.scope,
             )
+            if shared_router and "needs_clarification" not in raw_llm and any(bool(getattr(merged, k)) for k in _ACTION_FLAGS):
+                # The router answered with actions: it understood what the rules could not.
+                merged = replace(merged, needs_clarification=False, clarification_question="")
+            if not merged.needs_clarification:
+                # The interpreted flags define the actions and the editorial scope, not the rules' empty parse.
+                flags = {k: bool(getattr(merged, k)) for k in _ACTION_FLAGS}
+                merged = replace(merged, parsed_actions=[k for k in _ACTION_FLAGS if flags[k]], scope=_classify_scope(**flags))
             return InstructionInterpretation(
                 intent=merged,
                 interpreter_backend=f"llm_provider:{provider_id}",
                 used_llm=True,
-                consent_record=consent_record.to_dict(),
+                consent_record=consent_record.to_dict() if consent_record else None,
                 raw_llm_payload=raw_llm,
             )
 
     return InstructionInterpretation(
         intent=base_intent,
-        interpreter_backend="local_deterministic_intent_parser",
+        interpreter_backend="local_deterministic_intent_parser" + (f" (shared reasoning unavailable: {router_note})" if router_note else ""),
         used_llm=False,
         consent_record=consent_record.to_dict() if consent_record else None,
     )
@@ -1587,57 +1649,3 @@ def validate_edit_proposal(
     )
 
 
-def plan_project_edit(
-    instruction: str,
-    *,
-    kdenlive_project: str | Path | None = None,
-    project_state: str | Path | None = None,
-    inputs: dict[str, str | Path] | list[str | Path] | None = None,
-    profile_ref: str | Path | None = None,
-    export_override: bool | None = None,
-    allow_default_empty: bool = False,
-    dry_run: bool = True,
-    rnnoise_model_path: str | None = None,
-    provider_config: dict[str, Any] | None = None,
-    llm_interpreter: LlmInterpreterFn | None = None,
-    project_id: str = "active_project",
-    sequence_id: str = "seq_main",
-) -> tuple[PlanExecutionReport, ProjectContext, InstructionInterpretation]:
-    """High-level 4-stage AI command planner entrypoint."""
-    # Stage 2: Context ingestion first so interpreter & planner have project awareness
-    context = ingest_project_context(
-        kdenlive_project=kdenlive_project,
-        project_state=project_state,
-        inputs=inputs,
-        project_id=project_id,
-        sequence_id=sequence_id,
-    )
-    # Stage 1: Instruction interpretation (local or consent-gated LLM)
-    interpretation = interpret_instruction(
-        instruction,
-        context=context,
-        export_override=export_override,
-        allow_default_empty=allow_default_empty,
-        provider_config=provider_config,
-        llm_interpreter=llm_interpreter,
-    )
-    chosen_profile = (
-        profile_ref
-        or interpretation.intent.profile_hint
-        or context.profile_id
-        or "podcast_multicam"
-    )
-    profile = load_show_profile(chosen_profile)
-
-    # Stage 3: Deterministic proposal planning
-    proposal = build_edit_proposal(
-        interpretation,
-        context,
-        profile,
-        expected_revision=context.revision,
-        dry_run=dry_run,
-        rnnoise_model_path=rnnoise_model_path,
-    )
-    # Stage 4: Plan validation & execution status report
-    report = validate_edit_proposal(proposal, interpretation, context)
-    return report, context, interpretation

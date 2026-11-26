@@ -141,6 +141,30 @@ def test_full_production_draft_end_to_end(full_job: ProductionJob) -> None:
     assert manifest["publish_status"].startswith("not_published")
     assert (full_job.dir / "summary.md").read_text(encoding="utf-8").startswith("# Production summary")
     assert len(list((full_job.dir / "checkpoints").glob("*.json"))) == 15
+    # The emitted draft is checked by the same independent draft QC the agents' tasks use,
+    # and every critical finding is in front of the editor as a review item of its owner.
+    dq = d["draft_qc"]
+    assert dq["checked"] is True and d["final_verification"]["draft_qc"]["defect_count"] == dq["defect_count"]
+    for x in dq["defects"]:
+        if x["severity"] in ("error", "critical"):
+            assert any(x["code"] in str(i) for i in d["agents"][x["agent"]]["review_items"]), x
+
+
+@needs_media
+@pytest.mark.parametrize("profile_id", [p for p in list_show_profiles() if p != "podcast_multicam"])
+def test_every_youtube_format_produces_a_verified_native_draft(env: dict[str, Path], profile_id: str) -> None:
+    """Full production for each remaining show format: every agent finishes, the emitted native draft
+    passes the independent draft QC, the master meets its loudness target and exports exist."""
+    job = ProductionJob.create(job_root=env["base"] / "jobs", brief=f"Make this {profile_id.replace('_', ' ')} episode", inputs=_inputs(env), profile_ref=profile_id,
+                               mode="full_production_draft", options=JobOptions(export_video=True, episode_title="Episode 12"), job_id=f"fmt_{profile_id}")
+    job.run()
+    d = job.doc
+    assert d["status"] == "draft_ready", d["status"]
+    assert all(r["status"] in ("completed", "skipped") for r in d["agents"].values()), {a: r["status"] for a, r in d["agents"].items()}
+    assert d["draft_qc"]["checked"] is True and d["draft_qc"]["error_count"] == 0, d["draft_qc"]
+    assert Path(d["artifacts"]["kdenlive_project"]).is_file() and d["artifacts"]["unresolved_effects"] == "0"
+    kinds = {x["kind"]: x for x in json.loads(Path(d["artifacts"]["delivery_manifest_json"]).read_text(encoding="utf-8"))["deliverables"]}
+    assert kinds["master"]["loudness_ok"] is True and Path(kinds["master"]["path"]).stat().st_size > 10_000
 
 
 @needs_media
