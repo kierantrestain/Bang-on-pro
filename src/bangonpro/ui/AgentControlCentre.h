@@ -60,6 +60,11 @@ public:
     QStringList disabledAgents() const;
     void setAgentEnabled(const QString &agentId, bool enabled);
     QString selectedAgentId() const;
+    // V1.3: conversational revisions of the draft (whole project or the timeline selection)
+    QString revisionInstruction() const;
+    void setRevisionInstruction(const QString &text);
+    bool revisionSelectionOnly() const;
+    void setRevisionSelectionOnly(bool on);
     void selectAgent(const QString &agentId);
 
     /** @brief Render a job.json document (agents, progress, decisions, artifacts). */
@@ -111,6 +116,8 @@ Q_SIGNALS:
     void cancelJobRequested(const QString &jobDir);
     void resumeJobRequested(const QString &jobDir);
     void rerunAgentRequested(const QString &jobDir, const QString &agentId);
+    void reviseDraftRequested(const QString &jobDir, const QString &instruction, bool selectionOnly);
+    void undoRevisionRequested(const QString &jobDir);
     void agentDecisionRequested(const QString &jobDir, const QString &agentId, bool accept);
     void reviewDraftInTimelineRequested(const QString &jobDir);
     void openDraftProjectRequested(const QString &kdenliveProjectPath);
@@ -133,6 +140,11 @@ private:
     QPushButton *m_cancelBtn{nullptr};
     QPushButton *m_resumeBtn{nullptr};
     QPushButton *m_rerunBtn{nullptr};
+    QLineEdit *m_reviseEdit{nullptr};
+    QCheckBox *m_reviseSelection{nullptr};
+    QPushButton *m_reviseBtn{nullptr};
+    QPushButton *m_undoRevisionBtn{nullptr};
+    int m_revisionCount{0};
     QPushButton *m_acceptBtn{nullptr};
     QPushButton *m_rejectBtn{nullptr};
     QPushButton *m_reviewBtn{nullptr};

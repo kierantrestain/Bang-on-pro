@@ -164,6 +164,38 @@ private Q_SLOTS:
         QVERIFY(resume && resume->isEnabled());
     }
 
+    void revisionControlsEmitInstructionAndSelection()
+    {
+        QTemporaryDir tmp;
+        AgentControlCentre acc;
+        acc.setActiveJobDir(tmp.path());
+        auto *edit = acc.findChild<QLineEdit *>(QStringLiteral("acc_revise_text"));
+        auto *revise = acc.findChild<QPushButton *>(QStringLiteral("acc_revise"));
+        auto *undo = acc.findChild<QPushButton *>(QStringLiteral("acc_revise_undo"));
+        auto *selection = acc.findChild<QCheckBox *>(QStringLiteral("acc_revise_selection"));
+        QVERIFY(edit && revise && undo && selection);
+        acc.loadJobStatus(sampleJob(QStringLiteral("running")));
+        QVERIFY(!revise->isEnabled()); // nothing to revise while a job runs
+        acc.loadJobStatus(sampleJob(QStringLiteral("draft_ready")));
+        QVERIFY(revise->isEnabled());
+        QVERIFY(!undo->isEnabled()); // no revision yet
+        QSignalSpy spy(&acc, &AgentControlCentre::reviseDraftRequested);
+        acc.setRevisionInstruction(QStringLiteral("Tighten the opening but keep the natural conversation"));
+        acc.setRevisionSelectionOnly(true);
+        QTest::mouseClick(revise, Qt::LeftButton);
+        QCOMPARE(spy.count(), 1);
+        QCOMPARE(spy.first().at(1).toString(), QStringLiteral("Tighten the opening but keep the natural conversation"));
+        QCOMPARE(spy.first().at(2).toBool(), true);
+        QJsonObject job = sampleJob(QStringLiteral("draft_ready"));
+        job.insert(QStringLiteral("revisions"), QJsonArray{QJsonObject{{QStringLiteral("revision"), 1}}});
+        job.insert(QStringLiteral("last_revision"), QJsonObject{{QStringLiteral("message"), QStringLiteral("Select the section on the timeline")}});
+        acc.loadJobStatus(job);
+        QVERIFY(undo->isEnabled());
+        QSignalSpy undoSpy(&acc, &AgentControlCentre::undoRevisionRequested);
+        QTest::mouseClick(undo, Qt::LeftButton);
+        QCOMPARE(undoSpy.count(), 1);
+    }
+
     void agentActionsEmitSignals()
     {
         QTemporaryDir tmp;

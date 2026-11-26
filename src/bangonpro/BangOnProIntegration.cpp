@@ -409,6 +409,21 @@ void BangOnProIntegration::setupAgentControlCentre()
     connect(m_agentCentre, &AgentControlCentre::rerunAgentRequested, this, [this](const QString &jobDir, const QString &agentId) {
         runDepartmentCommand({QStringLiteral("rerun"), jobDir, agentId}, jobDir, QStringLiteral("Rerunning %1").arg(agentId));
     });
+    connect(m_agentCentre, &AgentControlCentre::reviseDraftRequested, this, [this](const QString &jobDir, const QString &instruction, bool selectionOnly) {
+        QStringList args{QStringLiteral("revise"), jobDir, instruction};
+        auto *mw = pCore ? pCore->window() : nullptr;
+        if (selectionOnly && mw && mw->getCurrentTimeline() && mw->getCurrentTimeline()->controller()) {
+            const auto *tc = mw->getCurrentTimeline()->controller();
+            const double fps = pCore->getCurrentFps() > 0 ? pCore->getCurrentFps() : 25.0;
+            if (tc->zoneOut() > tc->zoneIn()) {
+                args << QStringLiteral("--range-timeline") << QString::number(tc->zoneIn() / fps, 'f', 3) << QString::number(tc->zoneOut() / fps, 'f', 3);
+            }
+        }
+        runDepartmentCommand(args, jobDir, QStringLiteral("Revising: %1").arg(instruction));
+    });
+    connect(m_agentCentre, &AgentControlCentre::undoRevisionRequested, this, [this](const QString &jobDir) {
+        runDepartmentCommand({QStringLiteral("undo-revision"), jobDir}, jobDir, QStringLiteral("Undoing the last revision"));
+    });
     connect(m_agentCentre, &AgentControlCentre::agentDecisionRequested, this, [this](const QString &jobDir, const QString &agentId, bool accept) {
         runDepartmentCommand({QStringLiteral("decide"), jobDir, agentId, accept ? QStringLiteral("accept") : QStringLiteral("reject")}, jobDir,
                              QStringLiteral("%1 %2").arg(accept ? QStringLiteral("Accepting") : QStringLiteral("Rejecting"), agentId));

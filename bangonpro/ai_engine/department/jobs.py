@@ -836,6 +836,8 @@ class ProductionJob:
             rec["message"] = ("Select the section on the timeline, then send the revision again" if plan["needs_selection"]
                               else "No editing change recognised. Try e.g. 'tighten the opening', 'more reaction shots', 'preserve the suspense before reveals', 'five vertical clips'")
             self._event("executive", "revision_" + rec["status"], {"instruction": instruction})
+            self.doc["last_revision"] = rec
+            self._save(force=True)
             return rec
         snap = self.dir / "revisions" / f"rev_{rec['revision']:02d}"
         snap.mkdir(parents=True, exist_ok=True)
@@ -866,6 +868,7 @@ class ProductionJob:
         rec.update({"status": doc["status"], "processing_sec": round(time.perf_counter() - t0, 3), "snapshot": str(snap),
                     "rerun_from": plan["start_agent"], "kept_from_previous": st.metadata.get("revision_scope_applied")})
         self.doc["revisions"].append(rec)
+        self.doc["last_revision"] = {k: rec[k] for k in ("revision", "instruction", "status")}
         self._event("executive", "revision_completed", {"revision": rec["revision"], "status": doc["status"]})
         self._save(force=True)
         return rec

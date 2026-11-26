@@ -362,6 +362,27 @@ void AgentControlCentre::buildUi()
     agentRow->addWidget(m_rerunBtn);
     agentRow->addStretch(1);
     lowerLay->addLayout(agentRow);
+    // V1.3: ask the department for a change in plain words; only the affected work reruns.
+    auto *reviseRow = new QHBoxLayout;
+    reviseRow->setSpacing(M::kSpace2);
+    m_reviseEdit = new QLineEdit(lower);
+    m_reviseEdit->setObjectName(QStringLiteral("acc_revise_text"));
+    m_reviseEdit->setPlaceholderText(tr("Ask for a change, e.g. tighten the opening"));
+    m_reviseEdit->setAccessibleName(tr("Revision instruction"));
+    m_reviseSelection = new QCheckBox(tr("Selection only"), lower);
+    m_reviseSelection->setObjectName(QStringLiteral("acc_revise_selection"));
+    m_reviseSelection->setToolTip(tr("Change only the timeline selection; everything else stays as it is"));
+    m_reviseBtn = new QPushButton(tr("Revise"), lower);
+    m_reviseBtn->setObjectName(QStringLiteral("acc_revise"));
+    m_reviseBtn->setToolTip(tr("Apply the change to the draft; unaffected work is reused"));
+    m_undoRevisionBtn = new QPushButton(tr("Undo"), lower);
+    m_undoRevisionBtn->setObjectName(QStringLiteral("acc_revise_undo"));
+    m_undoRevisionBtn->setToolTip(tr("Restore the draft from before the last revision"));
+    reviseRow->addWidget(m_reviseEdit, 1);
+    reviseRow->addWidget(m_reviseSelection);
+    reviseRow->addWidget(m_reviseBtn);
+    reviseRow->addWidget(m_undoRevisionBtn);
+    lowerLay->addLayout(reviseRow);
     m_reviewTitle = new QLabel(tr("Review"), lower);
     m_reviewTitle->setObjectName(QStringLiteral("acc_review_title"));
     setTextRole(m_reviewTitle, "section");
@@ -459,6 +480,20 @@ void AgentControlCentre::buildUi()
     });
     connect(m_acceptBtn, &QPushButton::clicked, this, [this]() { noteActivity(QStringLiteral("review")); });
     connect(m_rejectBtn, &QPushButton::clicked, this, [this]() { noteActivity(QStringLiteral("correction")); });
+    connect(m_reviseBtn, &QPushButton::clicked, this, [this]() {
+        const QString text = m_reviseEdit->text().trimmed();
+        if (!m_jobDir.isEmpty() && !text.isEmpty()) {
+            noteActivity(QStringLiteral("correction"));
+            Q_EMIT reviseDraftRequested(m_jobDir, text, m_reviseSelection->isChecked());
+        }
+    });
+    connect(m_reviseEdit, &QLineEdit::returnPressed, m_reviseBtn, &QPushButton::click);
+    connect(m_undoRevisionBtn, &QPushButton::clicked, this, [this]() {
+        if (!m_jobDir.isEmpty()) {
+            noteActivity(QStringLiteral("correction"));
+            Q_EMIT undoRevisionRequested(m_jobDir);
+        }
+    });
     connect(m_rerunBtn, &QPushButton::clicked, this, [this]() { noteActivity(QStringLiteral("correction")); });
     connect(m_reviewBtn, &QPushButton::clicked, this, [this]() { noteActivity(QStringLiteral("review")); });
     connect(m_openDraftBtn, &QPushButton::clicked, this, [this]() { noteActivity(QStringLiteral("review")); });
@@ -896,6 +931,11 @@ void AgentControlCentre::loadJobStatus(const QJsonObject &doc)
     m_progress->setValue(qRound(doc.value(QStringLiteral("progress")).toDouble() * 100.0));
     m_draftProject = doc.value(QStringLiteral("artifacts")).toObject().value(QStringLiteral("kdenlive_project")).toString();
     const double cost = doc.value(QStringLiteral("budget")).toObject().value(QStringLiteral("spent_usd")).toDouble();
+    m_revisionCount = 0;
+    for (const QJsonValue &r : doc.value(QStringLiteral("revisions")).toArray()) {
+        m_revisionCount += r.toObject().value(QStringLiteral("undone")).toBool() ? 0 : 1;
+    }
+    const QJsonObject lastRev = doc.value(QStringLiteral("last_revision")).toObject();
     m_jobMetaLabel->setText(doc.value(QStringLiteral("job_id")).toString());
     if (m_jobStatus != QLatin1String("running")) {
         // Machine time is shown on its own; it is never counted as editor time.
@@ -906,6 +946,11 @@ void AgentControlCentre::loadJobStatus(const QJsonObject &doc)
                                    .arg(active)
                                    .arg(machine.isDouble() ? minutesSeconds(machine.toDouble()) : tr("–"))
                                    .arg(cost, 0, 'f', 2));
+        // A revision the department could not act on is explained, never silently dropped.
+        const QString revMsg = lastRev.value(QStringLiteral("message")).toString();
+        if (!revMsg.isEmpty()) {
+            m_statusLabel->setText(revMsg);
+        }
     }
     updateActionStates();
 }
@@ -998,6 +1043,11 @@ void AgentControlCentre::updateActionStates()
     m_cancelBtn->setVisible(running || !hasJob);
     m_resumeBtn->setVisible(m_resumeBtn->isEnabled());
     m_rerunBtn->setEnabled(hasJob && !running && hasAgent);
+    const bool hasDraft = hasJob && !running && (m_jobStatus == QLatin1String("draft_ready") || m_jobStatus == QLatin1String("awaiting_review"));
+    m_reviseEdit->setEnabled(hasDraft);
+    m_reviseSelection->setEnabled(hasDraft);
+    m_reviseBtn->setEnabled(hasDraft);
+    m_undoRevisionBtn->setEnabled(hasDraft && m_revisionCount > 0);
     m_acceptBtn->setEnabled(hasJob && !running && hasAgent);
     m_rejectBtn->setEnabled(hasJob && !running && hasAgent);
     // Queueing is allowed while a production runs; starting another one is not.
@@ -1041,6 +1091,26 @@ QString AgentControlCentre::agentStatus(const QString &agentId) const
 QString AgentControlCentre::summaryText() const
 {
     return m_summaryView->toPlainText();
+}
+
+QString AgentControlCentre::revisionInstruction() const
+{
+    return m_reviseEdit->text();
+}
+
+void AgentControlCentre::setRevisionInstruction(const QString &text)
+{
+    m_reviseEdit->setText(text);
+}
+
+bool AgentControlCentre::revisionSelectionOnly() const
+{
+    return m_reviseSelection->isChecked();
+}
+
+void AgentControlCentre::setRevisionSelectionOnly(bool on)
+{
+    m_reviseSelection->setChecked(on);
 }
 
 } // namespace BangOnPro
