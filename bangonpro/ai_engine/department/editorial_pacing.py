@@ -45,6 +45,8 @@ FORMAT_PACING_DEFAULTS: dict[str, dict[str, Any]] = {
     "interview": {"beat_pause_sec": 0.9, "natural_pause_sec": 0.7, "turn_pause_sec": 0.8, "protected_pause_max_sec": 1.8, "reaction_pause_max_sec": 4.0, "min_pause_saving_sec": 0.4, "remove_fillers": False},
     "gameshow": {"beat_pause_sec": 0.75, "natural_pause_sec": 0.45, "turn_pause_sec": 0.5, "protected_pause_max_sec": 3.0, "reaction_pause_max_sec": 8.0, "min_pause_saving_sec": 0.3, "remove_fillers": False},
     "sports_discussion": {"beat_pause_sec": 0.75, "natural_pause_sec": 0.45, "turn_pause_sec": 0.5, "protected_pause_max_sec": 1.2, "reaction_pause_max_sec": 4.0, "min_pause_saving_sec": 0.3, "remove_fillers": False},
+    # V1.6 single-presenter YouTube: jump cuts between thoughts, breath kept only where it lands a point.
+    "youtube": {"beat_pause_sec": 0.45, "natural_pause_sec": 0.3, "turn_pause_sec": 0.35, "protected_pause_max_sec": 0.8, "reaction_pause_max_sec": 2.0, "min_pause_saving_sec": 0.2, "remove_fillers": True},
     "social": {"beat_pause_sec": 0.35, "natural_pause_sec": 0.25, "turn_pause_sec": 0.3, "protected_pause_max_sec": 0.6, "reaction_pause_max_sec": 1.5, "min_pause_saving_sec": 0.2, "remove_fillers": True},
 }
 _GENERIC_DEFAULTS: dict[str, Any] = {
@@ -558,9 +560,9 @@ def _kept_from_cuts(start: float, end: float, cuts: list[dict[str, Any]]) -> tup
 # ---------------------------------------------------------------------------
 # Reference values are fixed per format (NOT read from the editable rules) so a correction
 # cannot move the goalposts it is measured against.
-REF_PROTECTED_FLOOR: dict[str, float] = {"daily_news": 0.5, "podcast": 0.8, "interview": 0.9, "gameshow": 1.2, "sports_discussion": 0.6, "social": 0.4}
-REF_NATURAL_CAP: dict[str, float] = {"daily_news": 0.6, "podcast": 1.0, "interview": 1.1, "gameshow": 0.8, "sports_discussion": 0.8, "social": 0.45}
-REF_MAX_EDITS_PER_MIN: dict[str, float] = {"daily_news": 16.0, "podcast": 8.0, "interview": 6.0, "gameshow": 14.0, "sports_discussion": 12.0, "social": 20.0}
+REF_PROTECTED_FLOOR: dict[str, float] = {"daily_news": 0.5, "podcast": 0.8, "interview": 0.9, "gameshow": 1.2, "sports_discussion": 0.6, "social": 0.4, "youtube": 0.45}
+REF_NATURAL_CAP: dict[str, float] = {"daily_news": 0.6, "podcast": 1.0, "interview": 1.1, "gameshow": 0.8, "sports_discussion": 0.8, "social": 0.45, "youtube": 0.55}
+REF_MAX_EDITS_PER_MIN: dict[str, float] = {"daily_news": 16.0, "podcast": 8.0, "interview": 6.0, "gameshow": 14.0, "sports_discussion": 12.0, "social": 20.0, "youtube": 18.0}
 _REF_RULES: dict[str, Any] = {"protect_question_pauses": True, "protect_punchline_pauses": True, "protect_reaction_pauses": True}
 
 

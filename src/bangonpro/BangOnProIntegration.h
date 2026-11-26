@@ -7,6 +7,7 @@
 
 #include "BangOnProContracts.h"
 
+#include <QHash>
 #include <QJsonArray>
 #include <QObject>
 #include <QPointer>
@@ -57,6 +58,9 @@ class BangOnProIntegration : public QObject
     Q_OBJECT
 
 public:
+    /** @brief The department process this window started (null when none runs); used by the acceptance runner. */
+    QProcess *departmentProcess() const { return m_deptProcess.data(); }
+
     BangOnProIntegration(QMainWindow *mainWindow, EffectListWidget *effectList, QObject *parent = nullptr);
     ~BangOnProIntegration() override;
 
@@ -104,6 +108,16 @@ private:
     void runDepartmentCommand(const QStringList &subcommandArgs, const QString &jobDir, const QString &description);
     void stageDepartmentDraft(const QString &jobDir);
     void promoteDepartmentDraft(const QString &jobDir);
+    // V1.6: one project, many sequences; truthful job state; graceful process control
+    void openEditedSequence(const QString &jobDir);
+    void setQcMarkersVisible(const QString &jobDir, bool visible);
+    void refreshProjectContext();
+    void openReferenceStyles();
+    void createSequenceFromFootage();
+    QStringList collectSequenceMediaPaths() const;
+    void reconcileJob(const QString &jobDir);
+    void escalateCancel(const QString &jobDir);
+    static void stopProcessGracefully(QProcess *proc, int terminateWaitMs);
     static QString departmentJobsRoot();
     // V1.2.2 production readiness: storage folder, system check, diagnostics, queue, timed sessions
     static QString storageRoot();
@@ -159,7 +173,12 @@ private:
     AgentControlCentre *m_agentCentre{nullptr};
     QDockWidget *m_agentDock{nullptr};
     QPointer<QProcess> m_deptProcess;
+    QString m_deptJobDir;
     QPointer<QProcess> m_queueWorker;
+    QTimer *m_contextTimer{nullptr};
+    QString m_contextSignature;
+    // job dir + draft signature -> UUID of the sequence created from that draft in this project
+    QHash<QString, QString> m_editedSequences;
     QTimer *m_queuePollTimer{nullptr};
     QString m_queueRunningJobDir;
     QString m_timingSession;

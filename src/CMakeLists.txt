@@ -86,6 +86,7 @@ list(APPEND kdenlive_SRCS
     glaxnimatelauncher.cpp
     filefilter.cpp
     bangonpro/BangOnProIntegration.cpp
+    bangonpro/BangOnProAutotest.cpp
     bangonpro/timeline_api/TimelineCommandEngine.cpp
     bangonpro/timeline_api/TimelineCommandServer.cpp
     bangonpro/timeline_api/KdenliveTimelineBridge.cpp
@@ -142,6 +143,7 @@ add_library(kdenliveLib STATIC ${kdenlive_SRCS} ${kdenlive_UIS} ${kdenlive_MOC} 
 set_source_files_properties(
     mainwindow.cpp
     bangonpro/BangOnProIntegration.cpp
+    bangonpro/BangOnProAutotest.cpp
     bangonpro/timeline_api/TimelineCommandEngine.cpp
     bangonpro/timeline_api/TimelineCommandServer.cpp
     bangonpro/timeline_api/KdenliveTimelineBridge.cpp

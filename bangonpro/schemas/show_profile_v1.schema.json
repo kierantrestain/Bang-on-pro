@@ -83,7 +83,7 @@
     "description": { "type": "string" },
     "format_type": {
       "type": "string",
-      "enum": ["podcast", "gameshow", "sports_discussion", "daily_news", "interview", "social", "custom"]
+      "enum": ["podcast", "gameshow", "sports_discussion", "daily_news", "interview", "social", "youtube", "custom"]
     },
     "video_spec": {
       "type": "object",

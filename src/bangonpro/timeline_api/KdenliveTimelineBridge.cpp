@@ -751,7 +751,8 @@ TimelineOperationResult KdenliveTimelineBridge::handleCreateSequence(const Timel
     const int audioTracks = qMax(1, op.params.value(QStringLiteral("audio_tracks")).toInt(2));
     const QString parentFolder = binModel->getRootFolder()->clipId();
 
-    const QString binSeqId = ClipCreator::createPlaylistClipWithUndo(seqName, {videoTracks, audioTracks}, parentFolder, binModel, m_txUndo, m_txRedo);
+    // ClipCreator takes {audio, video} (V1.5 passed them swapped, harmless only while both counts were equal).
+    const QString binSeqId = ClipCreator::createPlaylistClipWithUndo(seqName, {audioTracks, videoTracks}, parentFolder, binModel, m_txUndo, m_txRedo);
     if (binSeqId.isEmpty() || binSeqId == QStringLiteral("-1")) {
         res.message = QStringLiteral("Failed to create Kdenlive sequence '%1'").arg(seqName);
         return res;

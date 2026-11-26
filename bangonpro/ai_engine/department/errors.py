@@ -48,6 +48,22 @@ def explain(err: BaseException | str, *, context: str = "") -> dict[str, Any]:
     filename = str(getattr(err, "filename", "") or "") if isinstance(err, BaseException) else ""
     tool = next((t for t in TOOLS if re.search(rf"(^|[/\\'\" ]){t}(['\" :]|$)", filename or low)), None)
 
+    if type(err).__name__ == "JobBusyError" or "already being processed" in low:
+        return _entry(
+            "busy",
+            "This production is already running",
+            "Another Bang On Pro process is working on this production right now, so it was not started twice.",
+            "Wait for it to finish, or press Cancel and then Resume.",
+            None,
+        )
+    if type(err).__name__ == "WorkerTerminated" or "stopped by signal" in low:
+        return _entry(
+            "interrupted",
+            "Production stopped before it finished",
+            "Bang On Pro was closed, or the production was stopped. Every finished stage is kept.",
+            "Press Resume to continue from the last finished stage.",
+            "resume_job",
+        )
     if type(err).__name__ == "PipelineCancelledError" or "pipelinecancellederror" in low:
         return _entry("cancelled", "Production paused", "The job was cancelled. Finished agents are kept.", "Press Resume to continue from the last checkpoint.", "resume_job")
     if type(err).__name__ == "InsufficientStorageError" or "insufficient storage" in low or errnum == errno.ENOSPC or "no space left" in low:

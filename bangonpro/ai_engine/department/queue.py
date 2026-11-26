@@ -38,6 +38,8 @@ from bangonpro.ai_engine.department.checkpoint import write_json_atomic
 from bangonpro.ai_engine.department.errors import explain
 
 STALE_AFTER_SEC = 120.0
+# A production that keeps dying (crash, out of memory) is not resumed for ever on every launch.
+MAX_AUTO_RESUMES = 2
 HEARTBEAT_SEC = 5.0
 QUEUE_STATES = ("queued", "interrupted", "running", "completed", "needs_attention", "failed", "cancelled")
 ACTIVE_STATES = frozenset({"queued", "interrupted", "running"})
@@ -314,7 +316,22 @@ class JobQueue:
             doc = self._load()
             for e in doc["entries"]:
                 if e["status"] == "running":
-                    e.update({"status": "interrupted", "recovered": True, "interrupted_at_utc": _utc()})
+                    resumes = int(e.get("auto_resumes", 0))
+                    job_status = _job_status(e.get("job_dir"))
+                    if job_status == "cancelled":
+                        # The editor cancelled it and the worker was stopped: never resume it behind their back.
+                        e.update({"status": "cancelled", "job_status": job_status, "finished_at_utc": _utc()})
+                    elif resumes >= MAX_AUTO_RESUMES:
+                        e.update({
+                            "status": "needs_attention", "job_status": "interrupted", "finished_at_utc": _utc(),
+                            "error": f"Stopped unexpectedly {resumes + 1} times; not resumed automatically again",
+                            "help": {"code": "interrupted", "title": "Production keeps stopping",
+                                     "message": "This production stopped before finishing several times in a row.",
+                                     "fix": "Open it from the history list and press Resume to try once more, or export diagnostics and send them to the team.",
+                                     "fix_action": "resume_job"},
+                        })
+                    else:
+                        e.update({"status": "interrupted", "recovered": True, "interrupted_at_utc": _utc(), "auto_resumes": resumes + 1})
                     out.append(e["queue_id"])
             if out:
                 self._save(doc)
@@ -395,7 +412,8 @@ class JobQueue:
                     help_ = doc.get("error_help") or (explain(doc["error"]) if doc.get("error") else None)
                     self._update(entry["queue_id"], status=status, job_status=js, finished_at_utc=_utc(), error=doc.get("error"), help=help_, processing_elapsed_sec=doc.get("processing_elapsed_sec"))
                 except Exception as exc:  # noqa: BLE001 - one broken job must not stop the queue
-                    self._update(entry["queue_id"], status="failed", finished_at_utc=_utc(), error=f"{type(exc).__name__}: {exc}", help=explain(exc))
+                    busy = type(exc).__name__ == "JobBusyError"
+                    self._update(entry["queue_id"], status="needs_attention" if busy else "failed", finished_at_utc=_utc(), error=f"{type(exc).__name__}: {exc}", help=explain(exc))
                 report["ran"].append(entry["queue_id"])
         finally:
             stop.set()
@@ -414,6 +432,13 @@ class JobQueue:
         }
 
 
+def _job_status(job_dir: str | None) -> str | None:
+    try:
+        return json.loads((Path(str(job_dir)) / "job.json").read_text(encoding="utf-8")).get("status") if job_dir else None
+    except (OSError, ValueError):
+        return None
+
+
 def job_history(job_root: str | Path, *, limit: int = 50) -> list[dict[str, Any]]:
     """Recent production jobs under ``job_root``, newest first (read-only)."""
     root = Path(job_root).expanduser()
@@ -429,6 +454,11 @@ def job_history(job_root: str | Path, *, limit: int = 50) -> list[dict[str, Any]
         except (OSError, ValueError):
             continue
         agents = doc.get("agents", {})
+        if doc.get("status") == "running":
+            from bangonpro.ai_engine.department.worker import worker_alive
+
+            if not worker_alive(d):
+                doc["status"] = "interrupted"
         rows.append(
             {
                 "job_id": doc.get("job_id", d.name),

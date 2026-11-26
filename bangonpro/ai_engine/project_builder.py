@@ -914,6 +914,9 @@ def emit_kdenlive_xml(
     _add_prop(seq_tr, "kdenlive:sequenceproperties.hasAudio", 1)
     _add_prop(seq_tr, "kdenlive:sequenceproperties.hasVideo", 1)
 
+    # V1.6: Quality Control notes stay out of the timeline by default (they were a dense wall of guides on
+    # every jump cut); they remain in the QC report, the Production panel and the optional QC overlay.
+    show_qc = os.environ.get("BANGONPRO_QC_GUIDES") == "1"
     guides_json = [
         {
             "comment": m["label"],
@@ -921,6 +924,7 @@ def emit_kdenlive_xml(
             "type": _GUIDE_CATEGORY_MAP.get(m["category"], 5),
         }
         for m in compiled.markers
+        if show_qc or not str(m.get("category") or "").startswith("qc")
     ]
     _add_prop(seq_tr, "kdenlive:sequenceproperties.guides", json.dumps(guides_json, indent=2))
 

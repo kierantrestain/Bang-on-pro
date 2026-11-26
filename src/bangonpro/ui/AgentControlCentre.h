@@ -6,11 +6,13 @@
 #pragma once
 
 #include <QElapsedTimer>
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QString>
 #include <QStringList>
 #include <QWidget>
 
+class QButtonGroup;
 class QCheckBox;
 class QComboBox;
 class QDoubleSpinBox;
@@ -22,6 +24,7 @@ class QProgressBar;
 class QPushButton;
 class QSpinBox;
 class QTimer;
+class QToolButton;
 class QTreeWidget;
 class QTreeWidgetItem;
 class QVBoxLayout;
@@ -29,13 +32,19 @@ class QVBoxLayout;
 namespace BangOnPro {
 
 /**
- * @brief Agent Control Centre: drives the V1.2 AI Production Department.
+ * @brief The Production panel (Agent Control Centre).
  *
- * Configure the automation mode, production profile, series and brief; enable or
- * disable specialist agents per job; watch live progress, confidence, cost and
- * neural/fallback status per agent (polled from the job's job.json); and accept,
- * reject or rerun individual agents. Drafts stay isolated until the editor sends
- * them to the timeline for review or promotes them (replacing an edit needs approval).
+ * V1.6 makes the normal workflow one column an editor can read top to bottom:
+ * sequence → what to make (First cut, Full edit, Social clips, Custom) → style and
+ * reference videos → instructions → Start editing → live stages → Editing complete →
+ * Open edited sequence. Everything an expert needs (modes, the 14 agents, accept /
+ * reject / rerun, budgets, timing, history, draft files) stays one click away under
+ * Advanced.
+ *
+ * Truthfulness rules: the stage list mirrors the stages the department records in
+ * job.json; a percentage appears only when the running stage reported a measurable
+ * fraction; a job recorded as running is shown as running only while a worker really
+ * holds the job (see jobWorkerAlive), so a dead worker can never freeze the panel.
  */
 class AgentControlCentre : public QWidget
 {
@@ -47,6 +56,9 @@ public:
 
     static QStringList agentIds();
     static QStringList automationModes();
+    static QStringList editTypes();
+    /** @brief True while some process holds <jobDir>/worker.lock (flock probe; released by the kernel when a worker dies). */
+    static bool jobWorkerAlive(const QString &jobDir);
 
     /** @brief Build the department CLI arguments ("run" sub-command onward) from the current UI state. */
     QStringList buildRunArguments(const QStringList &inputs) const;
@@ -54,64 +66,75 @@ public:
     QString selectedMode() const;
     void setSelectedMode(const QString &mode);
     QString selectedProfileId() const;
+    QString editType() const;
+    void setEditType(const QString &type);
     void setBrief(const QString &brief);
     QString brief() const;
     /** @brief Agents the editor explicitly disabled for this job. */
     QStringList disabledAgents() const;
     void setAgentEnabled(const QString &agentId, bool enabled);
     QString selectedAgentId() const;
-    // V1.3: conversational revisions of the draft (whole project or the timeline selection)
     QString revisionInstruction() const;
     void setRevisionInstruction(const QString &text);
     bool revisionSelectionOnly() const;
     void setRevisionSelectionOnly(bool on);
     void selectAgent(const QString &agentId);
 
-    /** @brief Render a job.json document (agents, progress, decisions, artifacts). */
+    /** @brief Current project and its sequences (names in tab order); @p current is the open one. */
+    void setProjectContext(const QString &projectName, const QStringList &sequenceNames, int current);
+    QString projectContextText() const;
+
+    /** @brief Render a job.json document (stages, agents, progress, reasoning, decisions, artifacts). */
     void loadJobStatus(const QJsonObject &jobDoc);
-    /** @brief V1.4: show the connected reasoning client, the agent at work and unresolved task issues
-     *  (draft/agent_presence.json and draft/agent_edits.json, written by the MCP adapter). */
     void loadAgentSession(const QJsonObject &presence, const QJsonObject &agentEdits);
     QString agentSessionText() const;
-    /** @brief V1.5: provider order / active provider / last automatic switch and the learning summary (header tooltip). */
     QString agentDetailText() const;
     /** @brief Start polling <jobDir>/job.json (and summary.md when the job finishes). */
     void setActiveJobDir(const QString &jobDir);
     QString activeJobDir() const;
     bool refreshFromDisk();
-    /** @brief Job recovery: reopen a job after restart; a "running" job with no live process is shown as interrupted. */
+    /** @brief Reopen a job after a restart; liveness is probed, never assumed. */
     void recoverJob(const QString &jobDir, bool processAlive);
     void setBusy(bool busy, const QString &text = QString());
+    /** @brief The integration's own department process for the active job is running (it may not hold the job lock yet). */
+    void setWorkerProcessRunning(bool running);
+    /** @brief Show a problem the department could not record in job.json (process failed to start, crashed, …). */
+    void showTaskProblem(const QString &title, const QString &fix, const QString &detail = QString());
 
     QString jobStatus() const;
     int reviewItemCount() const;
     QString agentStatus(const QString &agentId) const;
     QString summaryText() const;
+    /** @brief Stage list as "label=state" lines (state: pending, running, done, failed, stopped, skipped). */
+    QStringList stageStates() const;
+    QString statusText() const;
+    QString reasoningText() const;
+    QString problemText() const;
+    bool progressIsMeasured() const;
+    bool completionVisible() const;
+    bool advancedExpanded() const;
+    bool qcMarkersVisible() const;
+    void setQcMarkersVisible(bool visible);
+    void setAdvancedExpanded(bool expanded);
 
-    /** @brief V1.2.2: true when Start adds the production to the queue instead of running it now. */
     bool queueSelected() const;
     void setQueueSelected(bool queued);
-    /** @brief Render the output of the department `history` command ({"jobs": [...], "queue": [...]}). */
     void loadHistory(const QJsonObject &historyPayload);
     int historyCount() const;
-    /** @brief Adds a custom show profile (saved by the profile editor) to the profile list. */
     void addCustomProfile(const QString &profileId, const QString &displayName);
 
-    /** @brief Timed editing session (measurement): reflect the state the integration confirmed. */
     void setTimingActive(bool active, bool paused = false);
     bool timingActive() const;
     bool timingPaused() const;
-    /** @brief Deliverable name used for timing: episode title, else series, else the job id. */
     QString timingDeliverable() const;
-    /**
-     * @brief Records editor activity for the open timing session (setup, editing, review, correction,
-     * approval). Emitted at most once per category change or heartbeat interval, never while paused.
-     */
     void noteActivity(const QString &category);
     void setActivityHeartbeatSec(int seconds);
 
 Q_SIGNALS:
     void providerSettingsRequested();
+    void referenceVideosRequested();
+    void sequenceSelected(int index);
+    void newSequenceRequested();
     void startJobRequested(const QStringList &runArguments);
     void queueJobRequested(const QStringList &runArguments);
     void historyJobActivated(const QString &jobDir);
@@ -127,46 +150,88 @@ Q_SIGNALS:
     void undoRevisionRequested(const QString &jobDir);
     void agentDecisionRequested(const QString &jobDir, const QString &agentId, bool accept);
     void reviewDraftInTimelineRequested(const QString &jobDir);
+    /** @brief Put the edited sequence into the current project (or raise it if it is already there). */
+    void openEditedSequenceRequested(const QString &jobDir);
+    void exportRequested();
+    /** @brief Show or hide the Quality Control markers on the edited sequence (hidden by default). */
+    void qcMarkersToggled(const QString &jobDir, bool visible);
     void openDraftProjectRequested(const QString &kdenliveProjectPath);
     void promoteDraftRequested(const QString &jobDir);
     void jobFinished(const QString &jobDir, const QString &status);
+    /** @brief job.json says running but no worker holds the job: the integration persists the truth (department status). */
+    void workerLost(const QString &jobDir);
 
 private:
     void buildUi();
+    QWidget *buildSetup();
+    QWidget *buildRun();
+    QWidget *buildDone();
+    QWidget *buildAdvanced();
+    void buildTimingRow(QVBoxLayout *root, QWidget *parent);
+    void updateTimingLabel();
     void updateActionStates();
+    void applyEditType(const QString &type);
+    void renderStages(const QJsonArray &stages);
+    void renderProblem(const QJsonObject &doc);
     QTreeWidgetItem *agentItem(const QString &agentId) const;
+    bool isRunningStatus() const;
 
-    QComboBox *m_modeCombo{nullptr};
+    // context
+    QLabel *m_contextLabel{nullptr};
+    QComboBox *m_sequenceCombo{nullptr};
+    QPushButton *m_newSequenceBtn{nullptr};
+    // setup
+    QWidget *m_setupSection{nullptr};
+    QButtonGroup *m_editTypeGroup{nullptr};
     QComboBox *m_profileCombo{nullptr};
-    QLineEdit *m_seriesEdit{nullptr};
-    QLineEdit *m_episodeEdit{nullptr};
+    QPushButton *m_referencesBtn{nullptr};
     QPlainTextEdit *m_briefEdit{nullptr};
-    QCheckBox *m_exportCheck{nullptr};
-    QDoubleSpinBox *m_budgetSpin{nullptr};
     QPushButton *m_startBtn{nullptr};
+    QLabel *m_setupHint{nullptr};
+    // run
+    QWidget *m_runSection{nullptr};
+    QListWidget *m_stageList{nullptr};
+    QLabel *m_statusLabel{nullptr};
+    QProgressBar *m_progress{nullptr};
+    QLabel *m_reasoningLabel{nullptr};
+    QLabel *m_problemLabel{nullptr};
     QPushButton *m_cancelBtn{nullptr};
     QPushButton *m_resumeBtn{nullptr};
-    QPushButton *m_rerunBtn{nullptr};
+    // done
+    QWidget *m_doneSection{nullptr};
+    QLabel *m_doneTitle{nullptr};
+    QLabel *m_doneDetail{nullptr};
+    QPushButton *m_openSequenceBtn{nullptr};
+    QPushButton *m_exportBtn{nullptr};
+    QPushButton *m_newJobBtn{nullptr};
+    QCheckBox *m_qcMarkersCheck{nullptr};
     QLineEdit *m_reviseEdit{nullptr};
     QCheckBox *m_reviseSelection{nullptr};
     QPushButton *m_reviseBtn{nullptr};
     QPushButton *m_undoRevisionBtn{nullptr};
-    int m_revisionCount{0};
+    QLabel *m_reviewTitle{nullptr};
+    QListWidget *m_reviewList{nullptr};
+    // advanced
+    QToolButton *m_advancedToggle{nullptr};
+    QWidget *m_advancedSection{nullptr};
+    QComboBox *m_modeCombo{nullptr};
+    QLineEdit *m_seriesEdit{nullptr};
+    QLineEdit *m_episodeEdit{nullptr};
+    QCheckBox *m_exportCheck{nullptr};
+    QDoubleSpinBox *m_budgetSpin{nullptr};
+    QCheckBox *m_queueCheck{nullptr};
+    QLabel *m_jobMetaLabel{nullptr};
+    QTreeWidget *m_agentTree{nullptr};
     QPushButton *m_acceptBtn{nullptr};
     QPushButton *m_rejectBtn{nullptr};
+    QPushButton *m_rerunBtn{nullptr};
+    QPlainTextEdit *m_summaryView{nullptr};
     QPushButton *m_reviewBtn{nullptr};
     QPushButton *m_openDraftBtn{nullptr};
     QPushButton *m_promoteBtn{nullptr};
-    QTreeWidget *m_agentTree{nullptr};
-    QProgressBar *m_progress{nullptr};
-    QLabel *m_statusLabel{nullptr};
-    QLabel *m_jobMetaLabel{nullptr};
-    QLabel *m_reviewTitle{nullptr};
-    QWidget *m_setupSection{nullptr};
-    QPushButton *m_newJobBtn{nullptr};
-    bool m_setupAutoCollapsed{false};
-    QListWidget *m_reviewList{nullptr};
-    QPlainTextEdit *m_summaryView{nullptr};
+    QLabel *m_historyTitle{nullptr};
+    QListWidget *m_historyList{nullptr};
+
     QTimer *m_pollTimer{nullptr};
     QString m_jobDir;
     QString m_agentSessionText;
@@ -174,14 +239,16 @@ private:
     QString m_jobStatus;
     QString m_draftProject;
     QString m_lastStatusSeen;
-    bool m_interrupted{false};
+    QString m_editType;
+    int m_revisionCount{0};
+    bool m_workerProcessRunning{false};
+    bool m_progressMeasured{false};
+    int m_deadPolls{0};
+    bool m_lostReported{false};
+    bool m_hasDraft{false};
+    bool m_viewingFinished{false};
 
-    // V1.2.2: queue, history and timed sessions
-    void buildTimingRow(QVBoxLayout *root);
-    void updateTimingLabel();
-    QCheckBox *m_queueCheck{nullptr};
-    QLabel *m_historyTitle{nullptr};
-    QListWidget *m_historyList{nullptr};
+    // timed sessions (Advanced)
     QWidget *m_timingRow{nullptr};
     QComboBox *m_timingKind{nullptr};
     QPushButton *m_timingStartBtn{nullptr};

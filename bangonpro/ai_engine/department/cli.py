@@ -47,6 +47,11 @@ from bangonpro.ai_engine.department.registry import (
     capability_matrix,
 )
 from bangonpro.ai_engine.department.version import APP_VERSION
+from bangonpro.ai_engine.department.worker import (
+    WorkerTerminated,
+    install_termination_handlers,
+    worker_session,
+)
 
 DEFAULT_JOB_ROOT = str(Path.home() / ".local/share/bangonpro/jobs")
 DEFAULT_MEASURE_ROOT = str(Path.home() / ".local/share/bangonpro/measurement")
@@ -112,6 +117,8 @@ def _add_job_args(r: argparse.ArgumentParser) -> None:
     r.add_argument("--prefs-root", default=None)
     r.add_argument("--enable", nargs="*", default=[])
     r.add_argument("--disable", nargs="*", default=[])
+    r.add_argument("--edit-type", choices=("first_cut", "full_edit", "social_clips", "custom"), default=None,
+                   help="The Production panel's choice: what to make (recorded with the job; social_clips also asks for vertical clips)")
 
 
 def _options_from_args(a: argparse.Namespace) -> JobOptions:
@@ -125,6 +132,7 @@ def _options_from_args(a: argparse.Namespace) -> JobOptions:
         asr_model_id=a.asr_model,
         prefs_root=a.prefs_root,
         enabled_overrides=_parse_overrides(a.enable, a.disable),
+        edit_type=getattr(a, "edit_type", None),
     )
 
 
@@ -465,13 +473,25 @@ def _cmd_job(a: argparse.Namespace) -> int:
     job = ProductionJob(a.job_dir)
     if not job.doc:
         return _fail(FileNotFoundError(f"No production job at {a.job_dir}"))
+    if a.cmd in ("status", "summary", "cancel"):
+        return _cmd_job_owned(a, job)
+    # Everything that changes the job owns it first: a second process can never run it twice.
+    with worker_session(job.dir, command=a.cmd):
+        return _cmd_job_owned(a, job)
+
+
+def _cmd_job_owned(a: argparse.Namespace, job: ProductionJob) -> int:
     if a.cmd == "status":
-        return _emit(job.doc)
+        job.reconcile()  # a dead worker's 'running' is reported as interrupted, never shown as live
+        return _emit({**job.doc, "worker_alive": job.worker_alive()})
     if a.cmd == "summary":
         return _emit(json.loads((job.dir / "summary.json").read_text(encoding="utf-8")))
     if a.cmd == "cancel":
         job.cancel()
-        return _emit({"cancel_requested": True})
+        alive = job.worker_alive()
+        if not alive:
+            job.reconcile()  # nothing is running: record the cancellation now
+        return _emit({"cancel_requested": True, "worker_alive": alive, "status": job.doc.get("status")})
     if a.cmd == "resume":
         job.resume()
     elif a.cmd == "rebuild":
@@ -513,7 +533,10 @@ def _dispatch(a: argparse.Namespace) -> int:
             job_root=a.job_root, brief=a.brief, inputs=a.inputs or None, profile_ref=a.profile, mode=a.mode, options=_options_from_args(a),
             project_id=a.project_id, sequence_id=a.sequence_id, kdenlive_project=a.kdenlive_project, project_state=a.project_state, job_id=a.job_id,
         )
-        if not a.plan_only:
+        if a.plan_only:
+            job.doc["plan_only"] = True
+            job._save(force=True)
+        else:
             job.run()
         return _emit(_job_payload(job))
     if a.cmd == "learn":
@@ -558,11 +581,18 @@ def _dispatch(a: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     a = build_parser().parse_args(argv)
+    install_termination_handlers()
     try:
         return _dispatch(a)
     except (PreferenceError, QueueError) as exc:
         return _fail(exc)
-    except (ValueError, KeyError, FileNotFoundError, PermissionError, OSError) as exc:
+    except WorkerTerminated as exc:
+        # The job already recorded 'interrupted' or 'cancelled' before we got here.
+        return _fail(exc, code=143)
+    except Exception as exc:  # noqa: BLE001 - the app always gets one JSON explanation, never a bare traceback
+        import traceback
+
+        sys.stderr.write(traceback.format_exc()[-4000:])
         return _fail(exc)
 
 

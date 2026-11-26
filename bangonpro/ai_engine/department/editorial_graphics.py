@@ -45,7 +45,7 @@ for _alias, _base in (
 ):
     TEMPLATES[_alias] = dict(TEMPLATES[_base])
 _KIND_DEFAULT = {"lower_third": "studio_clean_bar", "title_card": "episode_opener", "topic_card": "topic_card"}
-RESHOW_DEFAULT: dict[str, float] = {"daily_news": 300.0, "podcast": 900.0, "interview": 900.0, "gameshow": 600.0, "sports_discussion": 600.0, "social": 0.0}
+RESHOW_DEFAULT: dict[str, float] = {"daily_news": 300.0, "podcast": 900.0, "interview": 900.0, "gameshow": 600.0, "sports_discussion": 600.0, "social": 0.0, "youtube": 600.0}
 TITLE_SAFE = 0.90
 ACTION_SAFE = 0.93
 

@@ -80,6 +80,7 @@ class JobOptions:
     enabled_overrides: dict[str, bool] = field(default_factory=dict)
     provider_config: dict[str, Any] | None = None
     asr_model_id: str | None = None
+    edit_type: str | None = None  # V1.6: first_cut | full_edit | social_clips | custom (the Production panel's choice)
 
 
 @dataclass

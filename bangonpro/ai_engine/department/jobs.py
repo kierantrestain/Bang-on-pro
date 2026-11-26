@@ -28,6 +28,7 @@ import re
 import shutil
 import threading
 import time
+import traceback
 import uuid
 from dataclasses import asdict
 from datetime import UTC, datetime
@@ -74,9 +75,20 @@ from bangonpro.ai_engine.department.registry import (
     MODE_MANUAL,
     transitive_dependents,
 )
+from bangonpro.ai_engine.department.stages import editor_stages
+from bangonpro.ai_engine.department.worker import (
+    JobBusyError,
+    WorkerTerminated,
+    worker_alive,
+    worker_session,
+)
 from bangonpro.ai_engine.orchestrator import CancellationToken, PipelineCancelledError
 from bangonpro.ai_engine.pipeline import map_inputs_to_profile_cameras
-from bangonpro.ai_engine.planner import ingest_project_context, interpret_instruction, shared_reasoning_interpreter
+from bangonpro.ai_engine.planner import (
+    ingest_project_context,
+    interpret_instruction,
+    shared_reasoning_interpreter,
+)
 from bangonpro.ai_engine.project_builder import (
     compile_command_batches,
     emit_kdenlive_xml,
@@ -95,6 +107,11 @@ class ApprovalRequiredError(PermissionError):
 
 def _utc() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _utc_ms() -> str:
+    """Millisecond precision: what Qt's ISODateWithMs parser reads exactly (the app's stall report)."""
+    return datetime.now(UTC).isoformat(timespec="milliseconds")
 
 
 class FileCancellationToken(CancellationToken):
@@ -168,15 +185,29 @@ class ProductionJob:
             project_id=project_id or f"bop_{uuid.uuid4().hex[:10]}",
             sequence_id=sequence_id or "seq_main",
         )
+        # V1.6: the edit type is an explicit request, and every clause of the editor's words is accounted for.
+        editor_brief = brief
+        if opts.edit_type == "social_clips" and not parse_brief_flags(brief).get("social"):
+            brief = f"{brief.rstrip()}{'.' if brief.strip() and not brief.rstrip().endswith('.') else ''} Make vertical social clips of the strongest moments.".strip()
+        from bangonpro.ai_engine.department.brief_coverage import brief_coverage, interpret_unhandled, job_reasoning_summary
+
+        coverage = brief_coverage(editor_brief)
+        if opts.provider_config is None:
+            brief, coverage = interpret_unhandled(brief, coverage, job_id=jid)
         interp = interpret_instruction(
             brief,
             context=context,
             export_override=True if opts.export_video else None,
             allow_default_empty=mode in AUTONOMOUS_MODES,
             provider_config=opts.provider_config,
-            llm_interpreter=shared_reasoning_interpreter() if opts.provider_config is None else None,
+            llm_interpreter=shared_reasoning_interpreter(task_id=jid) if opts.provider_config is None else None,
         )
-        profile = load_show_profile(profile_ref or interp.intent.profile_hint or context.profile_id or "podcast_multicam", custom_dirs=user_profile_dirs())
+        auto_profile = None
+        if not (profile_ref or interp.intent.profile_hint or context.profile_id):
+            # "Automatic" style: one camera is a talking head, two an interview, more a multicamera studio.
+            n_cams = _count_video_inputs(inputs) or len(context.extract_existing_media_inputs() or {})
+            auto_profile = "youtube_talking_head" if n_cams <= 1 else ("interview_two_camera" if n_cams == 2 else "podcast_multicam")
+        profile = load_show_profile(profile_ref or interp.intent.profile_hint or context.profile_id or auto_profile or "podcast_multicam", custom_dirs=user_profile_dirs())
         cams: dict[str, str] = {}
         if inputs:
             cams = map_inputs_to_profile_cameras(inputs, profile)
@@ -235,6 +266,10 @@ class ProductionJob:
             "needs_clarification": bool(intent.needs_clarification),
             "clarification_question": intent.clarification_question,
             "review_brief": bool(interp.intent.needs_clarification and not intent.needs_clarification and brief.strip()),
+            "editor_brief": editor_brief,
+            "edit_type": opts.edit_type,
+            "profile_chosen_automatically": auto_profile is not None,
+            "brief_coverage": coverage,
             "plan_path": str(job.plan_path),
         }
         write_json_atomic(job.plan_path, plan)
@@ -274,6 +309,9 @@ class ProductionJob:
             "approvals": [],
             "budget": {"limit_usd": opts.budget_usd, "spent_usd": 0.0},
             "artifacts": {},
+            "edit_type": opts.edit_type,
+            "brief_coverage": coverage,
+            "reasoning": job_reasoning_summary(jid, coverage),
         }
         job.state = state
         job._save(force=True)
@@ -289,6 +327,8 @@ class ProductionJob:
                 return
             self._last_write = now
             self.doc["updated_at_utc"] = _utc()
+            if self.doc.get("agents"):
+                self.doc["stages"] = editor_stages(self.doc)
             write_json_atomic(self.job_path, self.doc)
 
     def _event(self, agent: str, event: str, details: dict[str, Any] | None = None) -> None:
@@ -361,6 +401,112 @@ class ProductionJob:
 
     # --------------------------------------------------------------- execution
     def run(self, *, start_agent: str | None = None, progress_callback: Any = None) -> dict[str, Any]:
+        """Execute the plan while owning the job; every exit leaves a truthful terminal state.
+
+        V1.5 left ``status: running`` behind whenever anything outside an agent raised (draft
+        building, source verification, a moved file), so the app showed a frozen production.
+        """
+        with worker_session(self.dir, command="rerun" if start_agent else "run"):
+            self._t_run = time.perf_counter()
+            try:
+                return self._run_owned(start_agent=start_agent, progress_callback=progress_callback)
+            except (WorkerTerminated, KeyboardInterrupt) as exc:
+                self._record_stop(exc)
+                raise
+            except BaseException as exc:
+                self._record_failure(exc)
+                raise
+
+    def _record_stop(self, exc: BaseException) -> None:
+        """The worker was asked to stop: cancelled when the editor asked, otherwise interrupted."""
+        cancelled = self.cancel_path.exists()
+        state = "cancelled" if cancelled else "interrupted"
+        for r in self.doc.get("agents", {}).values():
+            if r.get("status") == "running":
+                r["status"] = state
+        self.doc["status"] = state
+        if cancelled:
+            self.doc["cancel_reason"] = self.cancel_path.read_text(encoding="utf-8").strip() or "Cancelled"
+        else:
+            self.doc["interruption"] = {"at_utc": _utc(), "stage": self._stage_name(), "reason": str(exc) or type(exc).__name__}
+            self.doc["error_help"] = _interrupted_help()
+        self.doc.pop("finalising", None)
+        self._add_processing_time(time.perf_counter() - getattr(self, "_t_run", time.perf_counter()))
+        self._event(self.doc.get("current_agent") or "executive", f"job_{state}", {"reason": str(exc)})
+        self._save(force=True)
+
+    def _record_failure(self, exc: BaseException) -> None:
+        """Anything unexpected ends the run as failed (or blocked when the editor can fix it), never 'running'."""
+        cur = self.doc.get("current_agent")
+        stage = self._stage_name()
+        help_ = explain(exc, context=cur or "")
+        status = {"missing_media": "blocked_missing_media", "no_space": "blocked_insufficient_storage"}.get(help_["code"], "failed")
+        for aid, r in self.doc.get("agents", {}).items():
+            if r.get("status") == "running":
+                r.update({"status": "failed", "error": f"{type(exc).__name__}: {exc}", "help": explain(exc, context=aid)})
+        signature = f"{stage}|{type(exc).__name__}|{str(exc)[:160]}"
+        self.doc["repeated_failure"] = self.doc.get("failure_signature") == signature
+        self.doc["failure_signature"] = signature
+        self.doc.update({"status": status, "error": f"{type(exc).__name__}: {exc}", "error_help": help_, "failed_stage": stage})
+        self.doc.pop("finalising", None)
+        self._add_processing_time(time.perf_counter() - getattr(self, "_t_run", time.perf_counter()))
+        self._event(cur or "executive", "job_failed", {"stage": stage, "error": self.doc["error"], "traceback": traceback.format_exc(limit=12)[-4000:]})
+        try:
+            self._save(force=True)
+        except OSError:
+            pass  # the disk itself failed; the app still sees the process exit and the lock released
+
+    def _stage_name(self) -> str | None:
+        if self.doc.get("finalising"):
+            return "finalising"
+        return self.doc.get("current_agent")
+
+    # ----------------------------------------------------------- reconciliation
+    def reconcile(self) -> bool:
+        """Report a job left 'running' (or never started) by a dead worker as interrupted.
+
+        Takes the job lock non-blockingly, so it can never overwrite a live worker's state.
+        Returns True when the recorded state changed.
+        """
+        if self.doc.get("status") not in ("running", "planned"):
+            return False
+        try:
+            with worker_session(self.dir, command="reconcile"):
+                return self._reconcile_owned()
+        except JobBusyError:
+            return False
+
+    def _reconcile_owned(self) -> bool:
+        status = self.doc.get("status")
+        if status == "planned":
+            # A plan is written by `run` moments before the worker takes the job; give it time.
+            try:
+                age = (datetime.now(UTC) - datetime.fromisoformat(str(self.doc.get("updated_at_utc")))).total_seconds()
+            except ValueError:
+                age = 1e9
+            if self.doc.get("plan_only") or age < 30.0:
+                return False
+        elif status != "running":
+            return False
+        cancelled = self.cancel_path.exists()
+        state = "cancelled" if cancelled else "interrupted"
+        stage = self._stage_name()
+        for r in self.doc.get("agents", {}).values():
+            if r.get("status") == "running":
+                r["status"] = state
+        self.doc["status"] = state
+        self.doc["interruption"] = {"at_utc": _utc(), "stage": stage, "worker_pid": self.doc.get("worker_pid"), "reason": "worker process ended without recording a result"}
+        if not cancelled:
+            self.doc["error_help"] = _interrupted_help()
+        self.doc.pop("finalising", None)
+        self._event("executive", "worker_lost", {"stage": stage, "worker_pid": self.doc.get("worker_pid"), "recorded_as": state})
+        self._save(force=True)
+        return True
+
+    def worker_alive(self) -> bool:
+        return worker_alive(self.dir)
+
+    def _run_owned(self, *, start_agent: str | None = None, progress_callback: Any = None) -> dict[str, Any]:
         plan = self.plan
         if self.state is None:
             self.state = self._load_checkpoint_before(start_agent) if start_agent else self._latest_state()
@@ -394,8 +540,9 @@ class ProductionJob:
         self.doc["status"] = "running"
         self.doc["started_at_utc"] = self.doc.get("started_at_utc") or _utc()
         self.doc["worker_pid"] = os.getpid()
-        self.doc.pop("error", None)
-        self.doc.pop("error_help", None)
+        for stale in ("error", "error_help", "interruption", "failed_stage", "repeated_failure", "cancel_reason"):
+            self.doc.pop(stale, None)
+        self.doc["last_progress_utc"] = _utc_ms()
         t_job = time.perf_counter()
         start_idx = AGENT_ORDER.index(start_agent) if start_agent else 0
         failed_or_blocked: set[str] = set()
@@ -419,11 +566,12 @@ class ProductionJob:
                 self._run_agent(idx, agent_id, st, token, cache, opts, plan, progress_callback, failed_or_blocked)
                 self._attach_help(agent_id)
                 _test_delay(token)
-            self._finalise(st, time.perf_counter() - t_job, failed_or_blocked)
+            self._finalise(st, time.perf_counter() - t_job, failed_or_blocked, token)
         except PipelineCancelledError as exc:
             cur = self.doc.get("current_agent")
-            if cur:
+            if cur and self.doc["agents"][cur].get("status") == "running":
                 self.doc["agents"][cur]["status"] = "cancelled"
+            self.doc.pop("finalising", None)
             self.doc["status"] = "cancelled"
             self.doc["cancel_reason"] = str(exc)
             self._add_processing_time(time.perf_counter() - t_job)
@@ -473,13 +621,13 @@ class ProductionJob:
         self.doc["current_agent"] = agent_id
         self._event(agent_id, "agent_started", {"reason": rec["activation_reason"]})
         self._save(force=True)
-        n = len(AGENT_ORDER)
 
         def _progress(frac: float, msg: str) -> None:
             # Monotonic: sub-stages (multi-window sync, quality-loop reruns) restart their own 0..1
             rec["progress"] = round(min(1.0, max(float(rec.get("progress") or 0.0), float(frac))), 3)
             rec["message"] = msg
-            self.doc["progress"] = round((idx + rec["progress"]) / n, 4)
+            self.doc["progress"] = self._overall_progress()
+            self.doc["last_progress_utc"] = _utc_ms()
             if progress_callback:
                 progress_callback(agent_id, self.doc["progress"], msg)
             self._save()
@@ -677,11 +825,52 @@ class ProductionJob:
         best_outcome.review_items = review
         return best_outcome, log
 
-    def _finalise(self, st: ProjectAnalysisState, elapsed: float, failed: set[str]) -> None:
+    def _overall_progress(self) -> float:
+        """Share of the active agents' work that is finished (a running agent adds its own reported fraction)."""
+        active = [r for r in self.doc["agents"].values() if r.get("active")]
+        if not active:
+            return 0.0
+        done = sum(1.0 for r in active if r.get("status") in ("completed", "skipped"))
+        done += sum(min(1.0, max(0.0, float(r.get("progress") or 0.0))) for r in active if r.get("status") == "running")
+        return round(min(0.99, done / len(active)), 4)
+
+    def _finalising(self, message: str, fraction: float | None = None) -> None:
+        self.doc["finalising"] = {"message": message, "fraction": None if fraction is None else round(float(fraction), 3)}
+        self.doc["last_progress_utc"] = _utc_ms()
+        self._save(force=fraction is None)
+
+    def _verify_sources(self, st: ProjectAnalysisState, token: Any) -> dict[str, bool]:
+        """Re-hash every source (read-only) with measurable progress; missing footage blocks the job."""
+        assets = list(st.media_assets.items())
+        missing = [a.file_path for _, a in assets if not Path(a.file_path).is_file()]
+        if missing:
+            names = ", ".join(Path(m).name for m in missing)
+            raise FileNotFoundError(2, f"Source media missing at the end of the production ({names})", missing[0])
+        total = sum(Path(a.file_path).stat().st_size for _, a in assets) or 1
+        done = 0
+        out: dict[str, bool] = {}
+        for cam, asset in assets:
+            h = hashlib.sha256()
+            with open(asset.file_path, "rb") as fh:
+                while chunk := fh.read(8 << 20):
+                    h.update(chunk)
+                    done += len(chunk)
+                    self._finalising("Verifying your footage is unchanged", done / total)
+                    if token is not None:
+                        token.check("verifying source media")
+            out[cam] = h.hexdigest() == asset.sha256
+        return out
+
+    def _finalise(self, st: ProjectAnalysisState, elapsed: float, failed: set[str], token: Any = None) -> None:
         self.doc["current_agent"] = None
-        integrity = verify_source_integrity(st) if st.media_assets else {}
+        self._finalising("Verifying your footage is unchanged")
+        integrity = self._verify_sources(st, token) if st.media_assets else {}
         self.doc["source_integrity"] = {"verified": all(integrity.values()) if integrity else None, "per_source": integrity}
+        self._finalising("Building the edited sequence")
+        if token is not None:
+            token.check("building the edited sequence")
         self.rebuild_draft(st)
+        self._finalising("Running final checks on the edited sequence")
         # The same independent draft QC the agents' tasks use checks the timeline that was actually emitted.
         for d in (self.doc.get("draft_qc") or {}).get("defects", []):
             if d["severity"] in ql.CRITICAL_SEVERITIES and d["agent"] in self.doc["agents"]:
@@ -695,6 +884,11 @@ class ProductionJob:
             self.doc["final_verification"]["draft_qc"] = {k: v for k, v in self.doc["draft_qc"].items() if k != "defects"}
         self.doc["processing_elapsed_sec"] = round(elapsed + float(self.doc.get("processing_elapsed_sec", 0.0)), 3)
         self.doc["status"] = "completed_with_errors" if failed else ("awaiting_review" if self.doc["mode"] == MODE_ASSISTED else "draft_ready")
+        from bangonpro.ai_engine.department.brief_coverage import job_reasoning_summary
+
+        self.doc["reasoning"] = job_reasoning_summary(str(self.doc["job_id"]), self.doc.get("brief_coverage"))
+        self.doc.pop("finalising", None)
+        self.doc["finished_at_utc"] = _utc()
         self.doc["progress"] = 1.0
         summary = self.build_summary(st)
         write_json_atomic(self.dir / "summary.json", summary)
@@ -754,7 +948,12 @@ class ProductionJob:
         arts = self.doc.setdefault("artifacts", {})
         arts["timeline_commands_json"] = str(cmds_path)
         if any(op["type"] == "place_clip" for b in batches for op in b["operations"]):
-            from bangonpro.ai_engine.department.edit_layer import EditLayer, file_sha256, protect_manual_edits, regenerate_captions
+            from bangonpro.ai_engine.department.edit_layer import (
+                EditLayer,
+                file_sha256,
+                protect_manual_edits,
+                regenerate_captions,
+            )
 
             # V1.4: direct agent edits (MCP tools, correction loop) are replayed after the agents' batches.
             layer = EditLayer(self.draft_dir)
@@ -800,12 +999,25 @@ class ProductionJob:
         self._event("executive", "cancel_requested", {"reason": reason})
 
     def resume(self, progress_callback: Any = None) -> dict[str, Any]:
-        for r in self.doc["agents"].values():
-            if r["status"] in ("running", "cancelled", "failed", "blocked"):
-                r["status"] = "pending"
-        self.state = self._latest_state()
-        self._event("executive", "job_resumed", {})
-        return self.run(progress_callback=progress_callback)
+        """Continue from the last finished agent. Refuses (JobBusyError) while another worker owns the job.
+
+        Work of an agent that did not finish is discarded, not merged: only checkpoints of agents
+        recorded as completed are trusted, and their batches are the only ones kept, so a resumed
+        production never duplicates an edit.
+        """
+        with worker_session(self.dir, command="resume"):
+            self._reconcile_owned()
+            for r in self.doc["agents"].values():
+                if r["status"] in ("running", "cancelled", "failed", "blocked", "interrupted"):
+                    r.update({"status": "pending", "error": None, "help": None})
+            kept = {rid for r in self.doc["agents"].values() if r.get("status") == "completed" for rid in r.get("batches", [])}
+            orphans = [rid for rid in self.doc.get("batches", {}) if rid not in kept]
+            for rid in orphans:
+                self.doc["batches"].pop(rid, None)
+            self.doc["resume_attempts"] = int(self.doc.get("resume_attempts") or 0) + 1
+            self.state = self._latest_state()
+            self._event("executive", "job_resumed", {"attempt": self.doc["resume_attempts"], "discarded_partial_batches": len(orphans)})
+            return self.run(progress_callback=progress_callback)
 
     def rerun(self, agent_id: str, *, profile_overrides: dict[str, Any] | None = None, progress_callback: Any = None, scope: dict[str, Any] | None = None) -> dict[str, Any]:
         """Re-execute one agent (and everything after it) from the checkpoint preceding it."""
@@ -853,7 +1065,11 @@ class ProductionJob:
 
     def revise(self, instruction: str, *, range_sec: tuple[float, float] | None = None, range_timeline: tuple[float, float] | None = None, progress_callback: Any = None) -> dict[str, Any]:
         """Apply a plain-language revision: interpret, snapshot, rerun only what it affects, keep the rest."""
-        from bangonpro.ai_engine.department.revisions import interpret_revision, previous_spans, timeline_to_master
+        from bangonpro.ai_engine.department.revisions import (
+            interpret_revision,
+            previous_spans,
+            timeline_to_master,
+        )
 
         st_now = self._latest_state()
         if range_timeline is not None:
@@ -1254,3 +1470,23 @@ def render_summary_markdown(s: dict[str, Any]) -> str:
         lines += ["", "## Needs human review", ""] + [f"- {i}" for i in s["review_items"]]
     lines += ["", "## Approvals still required", ""] + [f"- {i}" for i in s["approvals_required"]]
     return "\n".join(lines) + "\n"
+
+
+def _interrupted_help() -> dict[str, Any]:
+    return {
+        "code": "interrupted",
+        "title": "Production stopped before it finished",
+        "message": "Bang On Pro was closed, or the production process stopped unexpectedly. Every finished stage is kept.",
+        "fix": "Press Resume to continue from the last finished stage. Nothing is redone twice.",
+        "fix_action": "resume_job",
+    }
+
+
+_AUDIO_SUFFIXES = (".wav", ".mp3", ".flac", ".aac", ".m4a")
+
+
+def _count_video_inputs(inputs: list[str | Path] | dict[str, str | Path] | None) -> int:
+    if not inputs:
+        return 0
+    paths = list(inputs.values()) if isinstance(inputs, dict) else [str(i).split("=", 1)[-1] for i in inputs]
+    return sum(1 for p in paths if Path(str(p)).suffix.lower() not in _AUDIO_SUFFIXES)

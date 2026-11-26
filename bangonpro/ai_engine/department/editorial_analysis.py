@@ -31,7 +31,7 @@ import numpy as np
 
 from bangonpro.ai_engine.department import editorial_text as et
 
-MIN_TOPIC_DEFAULT: dict[str, float] = {"daily_news": 12.0, "podcast": 45.0, "interview": 45.0, "gameshow": 30.0, "sports_discussion": 30.0, "social": 15.0}
+MIN_TOPIC_DEFAULT: dict[str, float] = {"daily_news": 12.0, "podcast": 45.0, "interview": 45.0, "gameshow": 30.0, "sports_discussion": 30.0, "social": 15.0, "youtube": 20.0}
 _TOPIC_CUES = re.compile(
     r"^(?:(?:so|okay|ok|right|alright|well),?\s+)?(?:moving on|let'?s (?:talk|move|turn|get|switch) (?:about|on|to|over)|next up|turning (?:now )?to|"
     r"in other news|our next (?:story|guest|question|round|item)|first up|and now|switching gears|on to (?:the|our)|next question|"

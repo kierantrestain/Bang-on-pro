@@ -4,6 +4,7 @@
 */
 
 #include "BangOnProIntegration.h"
+#include "BangOnProAutotest.h"
 
 #include "effects_browser/PremierePresetBrowser.h"
 #include "roto_ui/RotoStudioDock.h"
@@ -20,6 +21,8 @@
 #include "ui/ShowProfileEditorDialog.h"
 #include "ui/TranscriptEditorWidget.h"
 
+#include "bin/bin.h"
+#include "bin/model/markerlistmodel.hpp"
 #include "bin/projectclip.h"
 #include "bin/projectitemmodel.h"
 #include "core.h"
@@ -30,6 +33,7 @@
 #include "monitor/monitormanager.h"
 #include "monitor/monitorproxy.h"
 #include "project/projectmanager.h"
+#include "timeline2/model/timelineitemmodel.hpp"
 #include "timeline2/view/timelinecontroller.h"
 #include "timeline2/view/timelinewidget.h"
 
@@ -37,6 +41,7 @@
 #include <QAction>
 #include <QApplication>
 #include <QCoreApplication>
+#include <QCryptographicHash>
 #include <QDateTime>
 #include <QDir>
 #include <QDockWidget>
@@ -205,6 +210,8 @@ BangOnProIntegration::BangOnProIntegration(QMainWindow *mainWindow, EffectListWi
     // Restored window geometry can come from a larger display; keep the editor on the current screen.
     QTimer::singleShot(0, m_mainWindow, [this]() { fitWindowToScreen(m_mainWindow); });
     QTimer::singleShot(1500, m_mainWindow, [this]() { fitWindowToScreen(m_mainWindow); });
+    // Editor acceptance tests drive this very window when BANGONPRO_AUTOTEST names a script (inactive otherwise).
+    BangOnProAutotest::startIfRequested(m_mainWindow, this);
 }
 
 BangOnProIntegration::~BangOnProIntegration()
@@ -214,11 +221,14 @@ BangOnProIntegration::~BangOnProIntegration()
         m_aiProcess->kill();
         m_aiProcess->waitForFinished(2000);
     }
-    // A queued production stopped by quitting is resumed from its checkpoint on the next launch.
+    // A production stopped by quitting records "interrupted" and resumes from its last finished stage.
+    if (m_deptProcess) {
+        m_deptProcess->disconnect(this);
+        stopProcessGracefully(m_deptProcess, 5000);
+    }
     if (m_queueWorker) {
         m_queueWorker->disconnect(this);
-        m_queueWorker->kill();
-        m_queueWorker->waitForFinished(2000);
+        stopProcessGracefully(m_queueWorker, 5000);
     }
 }
 
@@ -399,16 +409,45 @@ void BangOnProIntegration::setupAgentControlCentre()
     }
     connect(m_agentCentre, &AgentControlCentre::startJobRequested, this, &BangOnProIntegration::startDepartmentJob);
     connect(m_agentCentre, &AgentControlCentre::cancelJobRequested, this, [this](const QString &jobDir) {
-        // Cooperative cancellation: agents poll the CANCEL file; checkpoints make the job resumable.
+        // Cooperative first: agents poll the CANCEL file between steps; checkpoints make the job resumable.
         QFile cancelFile(QDir(jobDir).filePath(QStringLiteral("CANCEL")));
         if (cancelFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-            cancelFile.write("Cancelled from Agent Control Centre");
+            cancelFile.write("Cancelled from the Production panel");
         }
         m_aiWidget->appendActivityLog(QStringLiteral("department"), QStringLiteral("Cancellation requested for %1").arg(jobDir), QStringLiteral("WARN"));
+        escalateCancel(jobDir);
     });
     connect(m_agentCentre, &AgentControlCentre::resumeJobRequested, this, [this](const QString &jobDir) {
-        runDepartmentCommand({QStringLiteral("resume"), jobDir}, jobDir, QStringLiteral("Resuming job from checkpoint"));
+        runDepartmentCommand({QStringLiteral("resume"), jobDir}, jobDir, QStringLiteral("Resuming from the last finished stage"));
     });
+    // A job recorded as running with no worker behind it: persist the truth (department status reconciles it).
+    connect(m_agentCentre, &AgentControlCentre::workerLost, this, &BangOnProIntegration::reconcileJob);
+    connect(m_agentCentre, &AgentControlCentre::openEditedSequenceRequested, this, &BangOnProIntegration::openEditedSequence);
+    connect(m_agentCentre, &AgentControlCentre::qcMarkersToggled, this, &BangOnProIntegration::setQcMarkersVisible);
+    connect(m_agentCentre, &AgentControlCentre::newSequenceRequested, this, &BangOnProIntegration::createSequenceFromFootage);
+    connect(m_agentCentre, &AgentControlCentre::sequenceSelected, this, [this](int index) {
+        if (!pCore || !pCore->projectItemModel() || !pCore->projectManager()) {
+            return;
+        }
+        const QMap<QUuid, QString> seqs = pCore->projectItemModel()->getAllSequenceClips();
+        if (index >= 0 && index < seqs.size()) {
+            const QUuid uuid = seqs.keys().at(index);
+            pCore->projectManager()->openTimeline(seqs.value(uuid), -1, uuid);
+        }
+        refreshProjectContext();
+    });
+    connect(m_agentCentre, &AgentControlCentre::exportRequested, this, [this]() {
+        if (pCore && pCore->window()) {
+            if (QAction *render = pCore->window()->actionCollection()->action(QStringLiteral("project_render"))) {
+                render->trigger();
+            }
+        }
+    });
+    connect(m_agentCentre, &AgentControlCentre::referenceVideosRequested, this, &BangOnProIntegration::openReferenceStyles);
+    m_contextTimer = new QTimer(this);
+    m_contextTimer->setInterval(1500);
+    connect(m_contextTimer, &QTimer::timeout, this, &BangOnProIntegration::refreshProjectContext);
+    m_contextTimer->start();
     connect(m_agentCentre, &AgentControlCentre::rerunAgentRequested, this, [this](const QString &jobDir, const QString &agentId) {
         runDepartmentCommand({QStringLiteral("rerun"), jobDir, agentId}, jobDir, QStringLiteral("Rerunning %1").arg(agentId));
     });
@@ -438,12 +477,18 @@ void BangOnProIntegration::setupAgentControlCentre()
         m_lastKdenliveProjectPath = path;
         openLastGeneratedProject();
     });
-    // Job recovery: reopen the most recent production job after a restart or crash.
+    // Job recovery: reopen the most recent production after a restart or crash. Liveness is probed (a worker
+    // orphaned by an app crash may still be running and is followed); a dead worker's "running" is reconciled.
     {
         const QFileInfoList jobs = QDir(departmentJobsRoot()).entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Time);
         for (const QFileInfo &fi : jobs) {
             if (QFileInfo::exists(QDir(fi.absoluteFilePath()).filePath(QStringLiteral("job.json")))) {
-                m_agentCentre->recoverJob(fi.absoluteFilePath(), false);
+                const QString dir = fi.absoluteFilePath();
+                const bool alive = AgentControlCentre::jobWorkerAlive(dir);
+                m_agentCentre->recoverJob(dir, alive);
+                if (!alive) {
+                    reconcileJob(dir);
+                }
                 break;
             }
         }
@@ -464,7 +509,7 @@ void BangOnProIntegration::setupAgentControlCentre()
             m_aiWidget->appendActivityLog(QStringLiteral("department"), QStringLiteral("Wait for the running department task to finish"), QStringLiteral("WARN"));
             return;
         }
-        m_agentCentre->recoverJob(jobDir, m_queueWorker && jobDir == m_queueRunningJobDir);
+        m_agentCentre->recoverJob(jobDir, AgentControlCentre::jobWorkerAlive(jobDir));
     });
     connect(m_agentCentre, &AgentControlCentre::queueEntryActionRequested, this, [this](const QString &queueId, const QString &action) {
         runQuickDepartmentCommand({QStringLiteral("queue"), action, queueId, QStringLiteral("--queue-root"), queueRoot()}, [this](const QJsonObject &) { refreshHistory(); });
@@ -513,7 +558,10 @@ bool BangOnProIntegration::prepareJobArguments(QStringList &args)
     m_deptBaseProjectId = m_engine->activeProjectId().isEmpty() ? QStringLiteral("active_project") : m_engine->activeProjectId();
     m_deptBaseSequenceId = m_engine->activeSequenceId().isEmpty() ? QStringLiteral("seq_main") : m_engine->activeSequenceId();
     if (!args.contains(QStringLiteral("--inputs"))) {
-        QStringList inputs = collectProjectBinMediaPaths();
+        QStringList inputs = collectSequenceMediaPaths();
+        if (inputs.isEmpty()) {
+            inputs = collectProjectBinMediaPaths();
+        }
         if (inputs.isEmpty()) {
             inputs = QFileDialog::getOpenFileNames(m_mainWindow, QStringLiteral("Select camera / microphone media for this production"), QString(),
                                                    QStringLiteral("Media (*.mp4 *.mov *.mxf *.mkv *.m4v *.wav *.mp3);;All files (*)"));
@@ -842,33 +890,424 @@ void BangOnProIntegration::runDepartmentCommand(const QStringList &subcommandArg
         m_aiWidget->appendActivityLog(QStringLiteral("department"), QStringLiteral("Wait for the running department task to finish"), QStringLiteral("WARN"));
         return;
     }
+    if (!jobDir.isEmpty() && QFileInfo::exists(QDir(jobDir).filePath(QStringLiteral("job.json"))) && AgentControlCentre::jobWorkerAlive(jobDir)) {
+        // Another process (a queue worker, or a worker left running by a crashed session) owns this job.
+        m_agentCentre->recoverJob(jobDir, true);
+        m_agentCentre->showTaskProblem(QStringLiteral("This production is already running"),
+                                       QStringLiteral("It is being followed below. Press Cancel to stop it, then Resume."));
+        return;
+    }
     QStringList args{QStringLiteral("-m"), QStringLiteral("bangonpro.ai_engine.department")};
     args << subcommandArgs;
     QProcess *proc = startPython(args);
     if (!proc) {
+        m_agentCentre->showTaskProblem(QStringLiteral("Bang On Pro's production engine is missing"),
+                                       QStringLiteral("Reinstall Bang On Pro from the DMG, then run System check."));
         m_aiWidget->appendActivityLog(QStringLiteral("department"), QStringLiteral("Cannot start AI department: bangonpro package not found"),
                                       QStringLiteral("ERROR"));
         return;
     }
     m_deptProcess = proc;
+    m_deptJobDir = jobDir;
     m_agentCentre->setActiveJobDir(jobDir);
     m_agentCentre->setBusy(true, description);
     m_aiWidget->appendActivityLog(QStringLiteral("department"), QStringLiteral("%1 (%2)").arg(description, jobDir));
+    // A process that never starts emits errorOccurred but never finished(): without this the panel waited for ever.
+    connect(proc, &QProcess::errorOccurred, this, [this, proc, jobDir](QProcess::ProcessError error) {
+        if (error != QProcess::FailedToStart || m_deptProcess != proc) {
+            return;
+        }
+        m_deptProcess.clear();
+        m_deptJobDir.clear();
+        proc->deleteLater();
+        m_agentCentre->setBusy(false);
+        m_agentCentre->showTaskProblem(QStringLiteral("The production could not start"),
+                                       QStringLiteral("Bang On Pro could not run its Python engine. Run System check, or reinstall from the DMG."),
+                                       proc->errorString());
+        reconcileJob(jobDir);
+    });
     connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this, [this, proc, jobDir](int code, QProcess::ExitStatus status) {
         m_deptProcess.clear();
+        m_deptJobDir.clear();
         proc->deleteLater();
         m_agentCentre->setBusy(false);
         m_agentCentre->refreshFromDisk();
         if (status != QProcess::NormalExit || code != 0) {
-            // V1.2.2: the department explains failures as {"error", "help": {"title", "fix"}}.
-            const QJsonObject help = QJsonDocument::fromJson(proc->readAllStandardOutput()).object().value(QStringLiteral("help")).toObject();
-            const QString detail = help.isEmpty() ? QString::fromUtf8(proc->readAllStandardError().right(800))
-                                                  : QStringLiteral("%1. %2").arg(help.value(QStringLiteral("title")).toString(), help.value(QStringLiteral("fix")).toString());
+            // The department explains failures as {"error", "help": {"title", "fix"}} and records them in job.json.
+            const QJsonObject res = QJsonDocument::fromJson(proc->readAllStandardOutput()).object();
+            const QJsonObject help = res.value(QStringLiteral("help")).toObject();
+            const QString stderrTail = QString::fromUtf8(proc->readAllStandardError().right(1200));
+            const QString detail =
+                help.isEmpty() ? stderrTail
+                               : QStringLiteral("%1. %2").arg(help.value(QStringLiteral("title")).toString(), help.value(QStringLiteral("fix")).toString());
             m_aiWidget->appendActivityLog(QStringLiteral("department"), QStringLiteral("Department task failed (exit=%1): %2").arg(code).arg(detail), QStringLiteral("ERROR"));
+            const QJsonObject job = readJsonFile(QDir(jobDir).filePath(QStringLiteral("job.json")), nullptr);
+            if (job.value(QStringLiteral("error_help")).toObject().isEmpty()) {
+                // Nothing in job.json explains it (a crash, or a command that is not a production run): say it here.
+                m_agentCentre->showTaskProblem(
+                    help.isEmpty() ? QStringLiteral("The task stopped unexpectedly") : help.value(QStringLiteral("title")).toString(),
+                    help.isEmpty() ? QStringLiteral("Press Resume to continue from the last finished stage. If it happens again, export diagnostics.")
+                                   : help.value(QStringLiteral("fix")).toString(),
+                    res.value(QStringLiteral("error")).toString(stderrTail));
+            }
+            reconcileJob(jobDir);
         }
         refreshHistory();
-        Q_UNUSED(jobDir)
     });
+}
+
+void BangOnProIntegration::reconcileJob(const QString &jobDir)
+{
+    if (jobDir.isEmpty() || !QFileInfo::exists(QDir(jobDir).filePath(QStringLiteral("job.json")))) {
+        return;
+    }
+    // `status` takes the job lock non-blockingly: a live worker's state is never overwritten.
+    runQuickDepartmentCommand({QStringLiteral("status"), jobDir}, [this, jobDir](const QJsonObject &) {
+        if (m_agentCentre->activeJobDir() == jobDir) {
+            m_agentCentre->refreshFromDisk();
+        }
+        refreshHistory();
+    });
+}
+
+void BangOnProIntegration::escalateCancel(const QString &jobDir)
+{
+    // Most steps stop within seconds. A step stuck inside a long native call (a render, a damaged file) is asked to
+    // stop (SIGTERM: the job records "cancelled" itself), and only killed if it still does not respond.
+    QPointer<QProcess> proc = (m_deptProcess && m_deptJobDir == jobDir) ? m_deptProcess : QPointer<QProcess>();
+    if (!proc) {
+        // Not our process (a queued production, or a worker left by a crashed session): the CANCEL file stops it,
+        // and if nothing holds the job any more the department records the cancellation now.
+        runQuickDepartmentCommand({QStringLiteral("cancel"), jobDir}, [this, jobDir](const QJsonObject &) {
+            if (m_agentCentre->activeJobDir() == jobDir) {
+                m_agentCentre->refreshFromDisk();
+            }
+        });
+        return;
+    }
+    QTimer::singleShot(20000, this, [this, proc]() {
+        if (proc && proc->state() != QProcess::NotRunning) {
+            m_aiWidget->appendActivityLog(QStringLiteral("department"), QStringLiteral("The current step did not stop in 20 s; stopping it"),
+                                          QStringLiteral("WARN"));
+            proc->terminate();
+            QTimer::singleShot(8000, this, [proc]() {
+                if (proc && proc->state() != QProcess::NotRunning) {
+                    proc->kill(); // finished() then reconciles job.json to "cancelled" (the CANCEL file is present)
+                }
+            });
+        }
+    });
+}
+
+void BangOnProIntegration::stopProcessGracefully(QProcess *proc, int terminateWaitMs)
+{
+    if (!proc || proc->state() == QProcess::NotRunning) {
+        return;
+    }
+    // SIGTERM lets the department record a truthful "interrupted" state before exiting (V1.5 used SIGKILL only,
+    // which left "running" behind).
+    proc->terminate();
+    if (!proc->waitForFinished(terminateWaitMs)) {
+        proc->kill();
+        proc->waitForFinished(2000);
+    }
+}
+
+// ---------------------------------------------------------------------------- V1.6 sequences
+namespace {
+QString sequenceName(const QUuid &uuid)
+{
+    if (!pCore || !pCore->projectItemModel()) {
+        return {};
+    }
+    const QString binId = pCore->projectItemModel()->getAllSequenceClips().value(uuid);
+    const auto clip = binId.isEmpty() ? nullptr : pCore->projectItemModel()->getClipByBinID(binId);
+    return clip ? clip->clipName() : QString();
+}
+
+bool isQcMarker(const TimelineOperation &op)
+{
+    return op.type == QLatin1String("add_marker") && op.params.value(QStringLiteral("category")).toString().startsWith(QLatin1String("qc"));
+}
+} // namespace
+
+void BangOnProIntegration::refreshProjectContext()
+{
+    if (!m_agentCentre || !pCore || !pCore->currentDoc() || !pCore->projectItemModel()) {
+        if (m_agentCentre && !m_contextSignature.isEmpty()) {
+            m_contextSignature.clear();
+            m_agentCentre->setProjectContext(QString(), {}, -1);
+        }
+        return;
+    }
+    const QUrl url = pCore->currentDoc()->url();
+    const QString project = url.isValid() && !url.isEmpty() ? QFileInfo(url.toLocalFile()).completeBaseName() : QStringLiteral("Untitled project");
+    const QMap<QUuid, QString> seqs = pCore->projectItemModel()->getAllSequenceClips();
+    const QUuid current = pCore->currentTimelineId();
+    QStringList names;
+    int currentIndex = -1;
+    for (auto it = seqs.constBegin(); it != seqs.constEnd(); ++it) {
+        if (it.key() == current) {
+            currentIndex = names.size();
+        }
+        names << sequenceName(it.key());
+    }
+    const QString signature = project + QLatin1Char('|') + names.join(QLatin1Char('|')) + QLatin1Char('|') + QString::number(currentIndex);
+    if (signature != m_contextSignature) {
+        m_contextSignature = signature;
+        m_agentCentre->setProjectContext(project, names, currentIndex);
+    }
+}
+
+void BangOnProIntegration::createSequenceFromFootage()
+{
+    if (!pCore || !pCore->currentDoc() || !pCore->bin() || !pCore->window()) {
+        return;
+    }
+    // Footage selected in the Project Bin goes into the new sequence, in Bin order (Premiere's "New Sequence From Clip").
+    std::vector<QString> selected;
+    for (const QString &id : pCore->bin()->selectedClipsIds()) {
+        const auto clip = pCore->projectItemModel()->getClipByBinID(id);
+        if (clip && clip->clipType() != ClipType::Timeline && !clip->clipUrl().isEmpty()) {
+            selected.push_back(id);
+        }
+    }
+    const QUuid before = pCore->currentTimelineId();
+    pCore->bin()->buildSequenceClip(); // Kdenlive's own named-sequence dialog; it opens the new sequence
+    const QUuid created = pCore->currentTimelineId();
+    if (created == before || created.isNull()) {
+        return; // cancelled
+    }
+    if (!selected.empty()) {
+        if (TimelineWidget *tw = pCore->window()->getCurrentTimeline(); tw && tw->controller()) {
+            const std::shared_ptr<TimelineItemModel> tl = pCore->projectManager()->getTimeline();
+            const QList<int> videoTracks = tl ? tl->getTracksIds(false) : QList<int>();
+            int pos = 0;
+            for (const QString &id : selected) {
+                const int tid = videoTracks.isEmpty() ? tw->controller()->activeTrack() : videoTracks.first();
+                const int clipId = tw->controller()->insertClip(tid, pos, id, true, true, true);
+                if (clipId > -1 && tl) {
+                    pos += tl->getClipPlaytime(clipId);
+                }
+            }
+        }
+    }
+    refreshProjectContext();
+    m_aiWidget->appendActivityLog(QStringLiteral("project"),
+                                  QStringLiteral("New sequence: %1 (%2 clip(s) placed)").arg(sequenceName(created)).arg(selected.size()));
+}
+
+QStringList BangOnProIntegration::collectSequenceMediaPaths() const
+{
+    // The footage the editor put in the open sequence, in timeline order (V1.5 always sent the whole Project Bin).
+    QStringList paths;
+    if (!pCore || !pCore->projectManager() || !pCore->projectItemModel()) {
+        return paths;
+    }
+    const std::shared_ptr<TimelineItemModel> tl = pCore->projectManager()->getTimeline();
+    if (!tl) {
+        return paths;
+    }
+    QVector<QPair<int, QString>> ordered;
+    for (bool audio : {false, true}) {
+        for (int tid : tl->getTracksIds(audio)) {
+            for (int item : tl->getItemsInRange(tid, 0, -1, false)) {
+                const QString binId = tl->getClipBinId(item);
+                const auto clip = binId.isEmpty() ? nullptr : pCore->projectItemModel()->getClipByBinID(binId);
+                if (!clip || clip->clipType() == ClipType::Timeline || clip->clipType() == ClipType::Text || clip->clipType() == ClipType::Color) {
+                    continue;
+                }
+                const QString url = clip->clipUrl();
+                if (!url.isEmpty() && QFileInfo::exists(url)) {
+                    ordered.append({tl->getClipPosition(item), url});
+                }
+            }
+        }
+    }
+    std::sort(ordered.begin(), ordered.end(), [](const auto &a, const auto &b) { return a.first < b.first; });
+    for (const auto &e : std::as_const(ordered)) {
+        if (!paths.contains(e.second)) {
+            paths << e.second;
+        }
+    }
+    return paths;
+}
+
+void BangOnProIntegration::openEditedSequence(const QString &jobDir)
+{
+    if (!pCore || !pCore->currentDoc() || !pCore->projectItemModel() || !pCore->projectManager()) {
+        m_agentCentre->showTaskProblem(QStringLiteral("Open a project first"),
+                                       QStringLiteral("The edited sequence is added to the open project, next to your original."));
+        return;
+    }
+    QString err;
+    const QJsonObject job = readJsonFile(QDir(jobDir).filePath(QStringLiteral("job.json")), &err);
+    const QString cmdsPath = job.value(QStringLiteral("artifacts")).toObject().value(QStringLiteral("timeline_commands_json")).toString();
+    QFile f(cmdsPath);
+    if (!f.open(QIODevice::ReadOnly)) {
+        m_agentCentre->showTaskProblem(QStringLiteral("The edit is not available"),
+                                       QStringLiteral("Its files were moved or deleted. Run the production again."), cmdsPath);
+        return;
+    }
+    const QByteArray raw = f.readAll();
+    const QString key = jobDir + QLatin1Char('|') + QString::fromLatin1(QCryptographicHash::hash(raw, QCryptographicHash::Sha1).toHex().left(12));
+    const QMap<QUuid, QString> seqs = pCore->projectItemModel()->getAllSequenceClips();
+    // Already in this project: show it again instead of making a copy.
+    if (m_editedSequences.contains(key)) {
+        const QUuid uuid(m_editedSequences.value(key));
+        if (seqs.contains(uuid)) {
+            pCore->projectManager()->openTimeline(seqs.value(uuid), -1, uuid);
+            refreshProjectContext();
+            return;
+        }
+    }
+    const QJsonObject cmds = QJsonDocument::fromJson(raw).object();
+    // Name it after the sequence the editor started from; later versions of the same production are v2, v3…
+    QString base = sequenceName(pCore->currentTimelineId());
+    if (base.isEmpty() || base.contains(QStringLiteral(" · Edited"))) {
+        base = base.section(QStringLiteral(" · Edited"), 0, 0);
+    }
+    if (base.isEmpty()) {
+        base = job.value(QStringLiteral("options")).toObject().value(QStringLiteral("episode_title")).toString(QStringLiteral("Sequence"));
+    }
+    QStringList existing;
+    for (const QUuid &u : seqs.keys()) {
+        existing << sequenceName(u);
+    }
+    QString name = QStringLiteral("%1 · Edited").arg(base);
+    for (int v = 2; existing.contains(name); ++v) {
+        name = QStringLiteral("%1 · Edited v%2").arg(base).arg(v);
+    }
+
+    TimelineCommandBatch merged;
+    merged.requestId = QStringLiteral("dept-seq-") + QUuid::createUuid().toString(QUuid::WithoutBraces);
+    merged.projectId = m_engine->activeProjectId().isEmpty() ? cmds.value(QStringLiteral("project_id")).toString(QStringLiteral("active_project"))
+                                                             : m_engine->activeProjectId();
+    // Not a sequence UUID on purpose: every operation resolves to the sequence the first operation creates
+    // (Kdenlive opens it as the current timeline). The editor's original sequence is never addressed.
+    merged.sequenceId = QStringLiteral("bop_edited_sequence");
+    merged.agentId = QStringLiteral("executive");
+    merged.agentRole = QStringLiteral("ai_production_department");
+    merged.requiresApproval = false; // the editor's click is the approval; one undoable transaction
+    merged.expectedRevision = m_engine->currentRevision();
+    merged.transactionLabel = QStringLiteral("Bang On Pro: %1").arg(name);
+    TimelineOperation create;
+    bool haveCreate = false;
+    int videoTracks = 0;
+    int audioTracks = 0;
+    QVector<TimelineOperation> rest;
+    QJsonArray qcMarkers;
+    const QJsonObject batchAgents = cmds.value(QStringLiteral("batch_agents")).toObject();
+    for (const QJsonValue &bv : cmds.value(QStringLiteral("batches")).toArray()) {
+        TimelineCommandBatch b;
+        QString berr;
+        if (!TimelineCommandEngine::batchFromJson(bv.toObject(), &b, &berr)) {
+            m_aiWidget->appendActivityLog(QStringLiteral("department"), QStringLiteral("Skipped invalid batch: %1").arg(berr), QStringLiteral("WARN"));
+            continue;
+        }
+        const QString agent = batchAgents.value(b.requestId).toString(b.agentId);
+        const QJsonArray rawOps = bv.toObject().value(QStringLiteral("operations")).toArray();
+        for (int oi = 0; oi < b.operations.size(); ++oi) {
+            TimelineOperation op = b.operations.at(oi);
+            if (op.type == QLatin1String("export_sequence")) {
+                continue; // exporting is the editor's own action
+            }
+            if (op.type == QLatin1String("create_sequence") && !haveCreate) {
+                create = op;
+                haveCreate = true;
+                continue;
+            }
+            if (op.type == QLatin1String("create_track")) {
+                // Tracks are created with the sequence; V1/V2/A1/A2 then resolve to them by position.
+                (op.params.value(QStringLiteral("track_type")).toString() == QLatin1String("audio") ? audioTracks : videoTracks) += 1;
+                continue;
+            }
+            if (isQcMarker(op)) {
+                qcMarkers.append(rawOps.at(oi));
+                if (!m_agentCentre->qcMarkersVisible()) {
+                    continue; // clean timeline by default; the notes stay in the panel's review list
+                }
+            }
+            op.rationale = QStringLiteral("[%1] %2").arg(agent, op.rationale);
+            rest.append(op);
+        }
+    }
+    if (!haveCreate) {
+        create.opId = QStringLiteral("op_create_edited_sequence");
+        create.type = QStringLiteral("create_sequence");
+    }
+    create.params.insert(QStringLiteral("name"), name);
+    create.params.insert(QStringLiteral("video_tracks"), qMax(1, videoTracks));
+    create.params.insert(QStringLiteral("audio_tracks"), qMax(1, audioTracks));
+    merged.operations = {create};
+    merged.operations += rest;
+    const TimelineCommandResponse resp = m_engine->executeBatch(merged);
+    if (resp.status != CommandStatus::Ok) {
+        m_agentCentre->showTaskProblem(QStringLiteral("The edited sequence could not be created"),
+                                       QStringLiteral("Your project was not changed. Export diagnostics and send them to the team."), resp.errorMessage);
+        m_aiWidget->appendActivityLog(QStringLiteral("department"), QStringLiteral("Edited sequence failed: %1").arg(resp.errorMessage),
+                                      QStringLiteral("ERROR"));
+        return;
+    }
+    const QUuid createdUuid = pCore->currentTimelineId();
+    m_editedSequences.insert(key, createdUuid.toString());
+    if (KdenliveDoc *doc = pCore->currentDoc()) {
+        // Kept with the project so the overlay toggle and "already added" work after reopening it.
+        doc->setDocumentProperty(QStringLiteral("bangonpro.edited.%1").arg(createdUuid.toString(QUuid::WithoutBraces)), key);
+        doc->setDocumentProperty(QStringLiteral("bangonpro.qc.%1").arg(createdUuid.toString(QUuid::WithoutBraces)),
+                                 QString::fromUtf8(QJsonDocument(qcMarkers).toJson(QJsonDocument::Compact)));
+    }
+    refreshProjectContext();
+    m_aiWidget->appendActivityLog(QStringLiteral("department"),
+                                  QStringLiteral("Edited sequence '%1' added to the project: %2 operations in one undoable step (%3 QC markers %4)")
+                                      .arg(name)
+                                      .arg(merged.operations.size())
+                                      .arg(qcMarkers.size())
+                                      .arg(m_agentCentre->qcMarkersVisible() ? QStringLiteral("shown") : QStringLiteral("kept off the timeline")));
+}
+
+void BangOnProIntegration::setQcMarkersVisible(const QString &jobDir, bool visible)
+{
+    Q_UNUSED(jobDir)
+    if (!pCore || !pCore->currentDoc() || !pCore->projectManager()) {
+        return;
+    }
+    const QUuid uuid = pCore->currentTimelineId();
+    const QString stored = pCore->currentDoc()->getDocumentProperty(QStringLiteral("bangonpro.qc.%1").arg(uuid.toString(QUuid::WithoutBraces)));
+    const std::shared_ptr<TimelineItemModel> tl = pCore->projectManager()->getTimeline();
+    if (stored.isEmpty() || !tl) {
+        m_aiWidget->appendActivityLog(QStringLiteral("department"), QStringLiteral("Open the edited sequence to show or hide its quality-check markers"));
+        return;
+    }
+    const QJsonArray ops = QJsonDocument::fromJson(stored.toUtf8()).array();
+    const std::shared_ptr<MarkerListModel> guides = tl->getGuideModel();
+    QMap<GenTime, QString> toAdd;
+    int removed = 0;
+    for (const QJsonValue &v : ops) {
+        const QJsonObject op = v.toObject();
+        const QJsonObject fr = op.value(QStringLiteral("frame_range")).toObject();
+        const double fps = qMax(1.0, fr.value(QStringLiteral("fps_num")).toDouble(25.0) / qMax(1.0, fr.value(QStringLiteral("fps_den")).toDouble(1.0)));
+        const GenTime pos(fr.value(QStringLiteral("timeline_start")).toInt(), fps);
+        const QString label = op.value(QStringLiteral("params")).toObject().value(QStringLiteral("label")).toString();
+        bool exists = false;
+        const CommentedTime marker = guides->getMarker(pos, &exists);
+        if (visible && !(exists && marker.comment() == label)) {
+            toAdd.insert(pos, toAdd.contains(pos) ? toAdd.value(pos) + QStringLiteral(" · ") + label : label);
+        } else if (!visible && exists && marker.comment().startsWith(QStringLiteral("QC"))) {
+            removed += guides->removeMarker(pos) ? 1 : 0; // each removal is one native undo step
+        }
+    }
+    if (visible && !toAdd.isEmpty()) {
+        guides->addMarkers(toAdd); // one native undo step
+    }
+    m_aiWidget->appendActivityLog(QStringLiteral("department"), visible ? QStringLiteral("Showing %1 quality-check marker(s)").arg(toAdd.size())
+                                                                        : QStringLiteral("Hid %1 quality-check marker(s)").arg(removed));
+}
+
+void BangOnProIntegration::openReferenceStyles()
+{
+    // Filled in by the reference-style dialog (V1.6 style learning).
+    m_aiWidget->appendActivityLog(QStringLiteral("styles"), QStringLiteral("Reference videos"));
 }
 
 void BangOnProIntegration::stageDepartmentDraft(const QString &jobDir)

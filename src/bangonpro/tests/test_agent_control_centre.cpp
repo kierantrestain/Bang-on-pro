@@ -8,19 +8,25 @@
 
 #include <QCheckBox>
 #include <QComboBox>
+#include <QCoreApplication>
 #include <QDir>
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLabel>
+#include <QLayout>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QPushButton>
-#include <QSpinBox>
 #include <QSignalSpy>
+#include <QSpinBox>
 #include <QTemporaryDir>
 #include <QTest>
+
+#include <fcntl.h>
+#include <sys/file.h>
+#include <unistd.h>
 
 using namespace BangOnPro;
 
@@ -51,6 +57,26 @@ QJsonObject sampleJob(const QString &status)
                        {QStringLiteral("budget"), QJsonObject{{QStringLiteral("spent_usd"), 0.0}}},
                        {QStringLiteral("artifacts"), QJsonObject{{QStringLiteral("kdenlive_project"), QStringLiteral("/tmp/none.kdenlive")}}}};
 }
+// Clicks need real geometry: show the panel at a narrow MacBook dock size, as an editor sees it.
+void showAsDock(QWidget &w)
+{
+    w.resize(320, 1800);
+    w.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&w));
+}
+
+// Lay out whatever just became visible (an expanded section, a finished job's view), then click like a user.
+void click(QWidget *button)
+{
+    QVERIFY(button);
+    for (int i = 0; i < 3; ++i) {
+        QCoreApplication::processEvents();
+        if (QWidget *top = button->window(); top && top->layout()) {
+            top->layout()->activate();
+        }
+    }
+    QTest::mouseClick(button, Qt::LeftButton);
+}
 } // namespace
 
 class TestAgentControlCentre : public QObject
@@ -66,13 +92,138 @@ private Q_SLOTS:
     void compactControlCentreKeepsPrimaryActionAndStableIds()
     {
         AgentControlCentre acc;
-        QCOMPARE(acc.minimumWidth(), 280);
+        QVERIFY(acc.minimumWidth() <= 280); // fits a narrow MacBook dock column
         auto *start = acc.findChild<QPushButton *>(QStringLiteral("acc_start"));
         QVERIFY(start);
         QVERIFY(start->property("bangOnProPrimary").toBool());
         QVERIFY(acc.findChild<QPushButton *>(QStringLiteral("acc_review_draft")));
         QVERIFY(acc.findChild<QPushButton *>(QStringLiteral("acc_open_draft")));
         QVERIFY(acc.findChild<QPushButton *>(QStringLiteral("acc_promote")));
+        QVERIFY(acc.findChild<QPushButton *>(QStringLiteral("acc_open_sequence")));
+        // V1.6: the essential workflow is visible; the expert controls are one disclosure away.
+        for (const QString &type : AgentControlCentre::editTypes()) {
+            QVERIFY2(acc.findChild<QPushButton *>(QStringLiteral("acc_edit_%1").arg(type)), qPrintable(type));
+        }
+        QVERIFY(acc.findChild<QPushButton *>(QStringLiteral("acc_references")));
+        QVERIFY(acc.findChild<QComboBox *>(QStringLiteral("acc_sequence")));
+        QVERIFY(!acc.advancedExpanded());
+        QVERIFY(acc.findChild<QWidget *>(QStringLiteral("acc_advanced"))->isHidden());
+        QVERIFY(acc.findChild<QWidget *>(QStringLiteral("acc_agents"))->isVisibleTo(&acc) == false);
+        QCOMPARE(start->text(), QStringLiteral("Start editing"));
+    }
+
+    void editTypesMapToModesAndCustomOpensAdvanced()
+    {
+        AgentControlCentre acc;
+        showAsDock(acc);
+        QCOMPARE(acc.editType(), QStringLiteral("full_edit"));
+        QCOMPARE(acc.selectedMode(), QStringLiteral("full_production_draft"));
+        click(acc.findChild<QPushButton *>(QStringLiteral("acc_edit_first_cut")));
+        QCOMPARE(acc.selectedMode(), QStringLiteral("autonomous_first_cut"));
+        QVERIFY(acc.buildRunArguments({}).join(QLatin1Char(' ')).contains(QStringLiteral("--edit-type first_cut")));
+        click(acc.findChild<QPushButton *>(QStringLiteral("acc_edit_social_clips")));
+        QCOMPARE(acc.selectedMode(), QStringLiteral("full_production_draft"));
+        QVERIFY(!acc.advancedExpanded());
+        click(acc.findChild<QPushButton *>(QStringLiteral("acc_edit_custom")));
+        QVERIFY(acc.advancedExpanded()); // custom choices live under Advanced
+        // Automatic style sends no --profile: the department picks one from the footage.
+        QVERIFY(!acc.buildRunArguments({}).contains(QStringLiteral("--profile")));
+    }
+
+    void stagesComeFromJobEventsAndProgressIsOnlyShownWhenMeasured()
+    {
+        QTemporaryDir tmp;
+        AgentControlCentre acc;
+        acc.setActiveJobDir(tmp.path());
+        acc.setWorkerProcessRunning(true);
+        QJsonObject job = sampleJob(QStringLiteral("running"));
+        QJsonArray stages;
+        const QStringList ids{QStringLiteral("analyse"), QStringLiteral("understand"), QStringLiteral("rough_cut"), QStringLiteral("audio"),
+                              QStringLiteral("colour"),  QStringLiteral("graphics"),   QStringLiteral("qc"),        QStringLiteral("prepare")};
+        for (const QString &id : ids) {
+            const QString state =
+                id == QLatin1String("analyse")
+                    ? QStringLiteral("done")
+                    : (id == QLatin1String("understand") ? QStringLiteral("running")
+                                                         : (id == QLatin1String("colour") ? QStringLiteral("skipped") : QStringLiteral("pending")));
+            stages.append(
+                QJsonObject{{QStringLiteral("id"), id}, {QStringLiteral("state"), state}, {QStringLiteral("message"), QStringLiteral("Detecting pauses")}});
+        }
+        job.insert(QStringLiteral("stages"), stages);
+        acc.loadJobStatus(job);
+        QVERIFY(acc.stageStates().contains(QStringLiteral("Analysing footage=done")));
+        QVERIFY(acc.stageStates().contains(QStringLiteral("Transcribing and understanding dialogue=running")));
+        QVERIFY(acc.stageStates().contains(QStringLiteral("Colour correction=skipped")));
+        QVERIFY(acc.statusText().contains(QStringLiteral("1 of 7 stages done")));
+        QVERIFY(!acc.progressIsMeasured()); // no fraction reported: busy indicator, no invented percentage
+        QJsonObject running = stages.at(1).toObject();
+        running.insert(QStringLiteral("fraction"), 0.4);
+        stages.replace(1, running);
+        job.insert(QStringLiteral("stages"), stages);
+        acc.loadJobStatus(job);
+        QVERIFY(acc.progressIsMeasured());
+        // Reasoning is reported exactly as the department recorded it.
+        job.insert(QStringLiteral("reasoning"),
+                   QJsonObject{{QStringLiteral("message"), QStringLiteral("Processed on this Mac: no subscription reasoning was needed")}});
+        acc.loadJobStatus(job);
+        QVERIFY(acc.reasoningText().contains(QStringLiteral("no subscription reasoning")));
+    }
+
+    void deadWorkerIsNeverShownAsRunning()
+    {
+        // The V1.5 freeze: job.json said "running" after its worker died; the panel waited for ever.
+        QTemporaryDir tmp;
+        QFile f(QDir(tmp.path()).filePath(QStringLiteral("job.json")));
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        QJsonObject job = sampleJob(QStringLiteral("running"));
+        job.insert(QStringLiteral("error_help"), QJsonObject{{QStringLiteral("title"), QStringLiteral("Production stopped before it finished")},
+                                                             {QStringLiteral("fix"), QStringLiteral("Press Resume")}});
+        f.write(QJsonDocument(job).toJson());
+        f.close();
+        AgentControlCentre acc;
+        QSignalSpy lost(&acc, &AgentControlCentre::workerLost);
+        acc.setActiveJobDir(tmp.path());
+        QVERIFY(acc.refreshFromDisk());
+        QCOMPARE(acc.jobStatus(), QStringLiteral("interrupted"));
+        QCOMPARE(lost.count(), 1); // the integration persists the truth once
+        QVERIFY(acc.findChild<QPushButton *>(QStringLiteral("acc_resume"))->isEnabled());
+        QVERIFY(!acc.findChild<QPushButton *>(QStringLiteral("acc_cancel"))->isEnabled());
+        QVERIFY(acc.problemText().contains(QStringLiteral("Production stopped before it finished")));
+        QVERIFY(!acc.stageStates().join(QLatin1Char(',')).contains(QStringLiteral("=running")));
+        // A live worker (holding worker.lock) is followed, not overridden.
+        const QByteArray lockPath = QFile::encodeName(QDir(tmp.path()).filePath(QStringLiteral("worker.lock")));
+        const int fd = ::open(lockPath.constData(), O_RDWR | O_CREAT, 0644);
+        QVERIFY(fd >= 0 && ::flock(fd, LOCK_EX | LOCK_NB) == 0);
+        QVERIFY(AgentControlCentre::jobWorkerAlive(tmp.path()));
+        AgentControlCentre live;
+        live.recoverJob(tmp.path(), AgentControlCentre::jobWorkerAlive(tmp.path()));
+        QCOMPARE(live.jobStatus(), QStringLiteral("running"));
+        ::flock(fd, LOCK_UN);
+        ::close(fd);
+        QVERIFY(!AgentControlCentre::jobWorkerAlive(tmp.path()));
+    }
+
+    void completionShowsOpenEditedSequence()
+    {
+        QTemporaryDir tmp;
+        AgentControlCentre acc;
+        showAsDock(acc);
+        acc.setActiveJobDir(tmp.path());
+        QJsonObject job = sampleJob(QStringLiteral("draft_ready"));
+        job.insert(QStringLiteral("processing_elapsed_sec"), 92.0);
+        acc.loadJobStatus(job);
+        QVERIFY(acc.completionVisible());
+        auto *open = acc.findChild<QPushButton *>(QStringLiteral("acc_open_sequence"));
+        QVERIFY(open->isEnabled() && open->property("bangOnProPrimary").toBool());
+        QCOMPARE(acc.findChild<QLabel *>(QStringLiteral("acc_done_title"))->text(), QStringLiteral("Editing complete"));
+        QSignalSpy opened(&acc, &AgentControlCentre::openEditedSequenceRequested);
+        click(open);
+        QCOMPARE(opened.count(), 1);
+        QSignalSpy qc(&acc, &AgentControlCentre::qcMarkersToggled);
+        auto *qcBox = acc.findChild<QCheckBox *>(QStringLiteral("acc_qc_markers"));
+        QVERIFY(!qcBox->isChecked()); // clean timeline by default
+        qcBox->setChecked(true);
+        QCOMPARE(qc.count(), 1);
     }
 
     void buildsRunArgumentsFromUi()
@@ -86,7 +237,7 @@ private Q_SLOTS:
         QCOMPARE(args.first(), QStringLiteral("run"));
         QCOMPARE(args.at(1), QStringLiteral("Tight cut with captions"));
         QVERIFY(args.contains(QStringLiteral("full_production_draft")));
-        QVERIFY(args.contains(QStringLiteral("podcast_multicam")));
+        QVERIFY(!args.contains(QStringLiteral("--profile"))); // "Automatic": the department matches the footage
         const int d = args.indexOf(QStringLiteral("--disable"));
         QVERIFY(d > 0);
         QCOMPARE(args.at(d + 1), QStringLiteral("vfx"));
@@ -169,24 +320,24 @@ private Q_SLOTS:
 
     void primaryActionHandsOverToReviewWhenDraftReady()
     {
-        // One primary action at a time: Start before a run, Review once a draft exists.
+        // One view at a time: Start in setup, Open edited sequence once the edit exists.
         QTemporaryDir tmp;
         AgentControlCentre acc;
+        showAsDock(acc);
         auto *start = acc.findChild<QPushButton *>(QStringLiteral("acc_start"));
-        auto *review = acc.findChild<QPushButton *>(QStringLiteral("acc_review_draft"));
+        auto *done = acc.findChild<QWidget *>(QStringLiteral("acc_done"));
         QVERIFY(start->property("bangOnProPrimary").toBool());
-        QVERIFY(!review->property("bangOnProPrimary").toBool());
+        QVERIFY(done->isHidden());
         acc.setActiveJobDir(tmp.path());
         acc.loadJobStatus(sampleJob(QStringLiteral("draft_ready")));
-        QVERIFY(review->property("bangOnProPrimary").toBool());
-        QVERIFY(!start->property("bangOnProPrimary").toBool());
+        QVERIFY(!done->isHidden());
         QVERIFY(acc.agentStatus(QStringLiteral("colourist")).startsWith(QStringLiteral("Done")));
         // Setup collapses while reviewing; "New production" brings it back.
         auto *setup = acc.findChild<QWidget *>(QStringLiteral("acc_setup"));
         auto *newJob = acc.findChild<QPushButton *>(QStringLiteral("acc_new_job"));
         QVERIFY(setup && newJob);
         QVERIFY(setup->isHidden());
-        QTest::mouseClick(newJob, Qt::LeftButton);
+        click(newJob);
         QVERIFY(!setup->isHidden());
         auto *reviewTitle = acc.findChild<QLabel *>(QStringLiteral("acc_review_title"));
         QVERIFY(reviewTitle && reviewTitle->text().contains(QStringLiteral("1")));
@@ -210,6 +361,7 @@ private Q_SLOTS:
     {
         QTemporaryDir tmp;
         AgentControlCentre acc;
+        showAsDock(acc);
         acc.setActiveJobDir(tmp.path());
         auto *edit = acc.findChild<QLineEdit *>(QStringLiteral("acc_revise_text"));
         auto *revise = acc.findChild<QPushButton *>(QStringLiteral("acc_revise"));
@@ -224,7 +376,7 @@ private Q_SLOTS:
         QSignalSpy spy(&acc, &AgentControlCentre::reviseDraftRequested);
         acc.setRevisionInstruction(QStringLiteral("Tighten the opening but keep the natural conversation"));
         acc.setRevisionSelectionOnly(true);
-        QTest::mouseClick(revise, Qt::LeftButton);
+        click(revise);
         QCOMPARE(spy.count(), 1);
         QCOMPARE(spy.first().at(1).toString(), QStringLiteral("Tighten the opening but keep the natural conversation"));
         QCOMPARE(spy.first().at(2).toBool(), true);
@@ -234,7 +386,7 @@ private Q_SLOTS:
         acc.loadJobStatus(job);
         QVERIFY(undo->isEnabled());
         QSignalSpy undoSpy(&acc, &AgentControlCentre::undoRevisionRequested);
-        QTest::mouseClick(undo, Qt::LeftButton);
+        click(undo);
         QCOMPARE(undoSpy.count(), 1);
     }
 
@@ -242,6 +394,7 @@ private Q_SLOTS:
     {
         QTemporaryDir tmp;
         AgentControlCentre acc;
+        showAsDock(acc);
         acc.setActiveJobDir(tmp.path());
         acc.loadJobStatus(sampleJob(QStringLiteral("draft_ready")));
         acc.selectAgent(QStringLiteral("colourist"));
@@ -254,8 +407,8 @@ private Q_SLOTS:
         QVERIFY(reject && rerunBtn && cancelBtn);
         QVERIFY(reject->isEnabled());
         QVERIFY(!cancelBtn->isEnabled()); // nothing running
-        QTest::mouseClick(reject, Qt::LeftButton);
-        QTest::mouseClick(rerunBtn, Qt::LeftButton);
+        click(reject);
+        click(rerunBtn);
         QCOMPARE(decide.count(), 1);
         QCOMPARE(decide.first().at(1).toString(), QStringLiteral("colourist"));
         QCOMPARE(decide.first().at(2).toBool(), false);
@@ -263,7 +416,7 @@ private Q_SLOTS:
         acc.setBusy(true, QStringLiteral("running"));
         QVERIFY(cancelBtn->isEnabled());
         QVERIFY(!reject->isEnabled());
-        QTest::mouseClick(cancelBtn, Qt::LeftButton);
+        click(cancelBtn);
         QCOMPARE(cancel.count(), 1);
     }
 
@@ -271,6 +424,7 @@ private Q_SLOTS:
     void queueToggleQueuesInsteadOfStarting()
     {
         AgentControlCentre acc;
+        showAsDock(acc);
         auto *queue = acc.findChild<QCheckBox *>(QStringLiteral("acc_queue"));
         auto *start = acc.findChild<QPushButton *>(QStringLiteral("acc_start"));
         QVERIFY(queue && start);
@@ -282,13 +436,13 @@ private Q_SLOTS:
         QVERIFY(start->property("bangOnProPrimary").toBool()); // still the one primary action
         acc.setBusy(true, QStringLiteral("running"));
         QVERIFY(start->isEnabled()); // productions can be queued while one runs
-        QTest::mouseClick(start, Qt::LeftButton);
+        click(start);
         QCOMPARE(queued.count(), 1);
         QCOMPARE(started.count(), 0);
         QCOMPARE(queued.first().at(0).toStringList().first(), QStringLiteral("run"));
         acc.setQueueSelected(false);
         QVERIFY(!start->isEnabled()); // but not started
-        QCOMPARE(start->text(), QStringLiteral("Start production"));
+        QCOMPARE(start->text(), QStringLiteral("Start editing"));
     }
 
     void historyShowsQueueThenJobsAndOpensJobs()
@@ -314,7 +468,7 @@ private Q_SLOTS:
         auto *list = acc.findChild<QListWidget *>(QStringLiteral("acc_history"));
         QVERIFY(list);
         QVERIFY(list->item(0)->text().startsWith(QStringLiteral("Episode 13 · Queued")));
-        QVERIFY(list->item(1)->text().contains(QStringLiteral("Draft ready")));
+        QVERIFY(list->item(1)->text().contains(QStringLiteral("Editing complete")));
         QVERIFY(list->item(1)->toolTip().contains(QStringLiteral("machine 1:32")));
         auto *title = acc.findChild<QLabel *>(QStringLiteral("acc_history_title"));
         QVERIFY(title && title->text().endsWith(QStringLiteral("2")));
@@ -328,6 +482,8 @@ private Q_SLOTS:
     void timingSessionRecordsThrottledActivityAndPause()
     {
         AgentControlCentre acc;
+        showAsDock(acc);
+        acc.setAdvancedExpanded(true); // timing lives under Advanced
         auto *startTiming = acc.findChild<QPushButton *>(QStringLiteral("acc_timing_start"));
         auto *pause = acc.findChild<QPushButton *>(QStringLiteral("acc_timing_pause"));
         auto *finish = acc.findChild<QPushButton *>(QStringLiteral("acc_timing_finish"));
@@ -336,7 +492,7 @@ private Q_SLOTS:
         QVERIFY(!pause->isVisibleTo(&acc) && !finish->isVisibleTo(&acc)); // one quiet control until timing starts
         QSignalSpy startReq(&acc, &AgentControlCentre::timingStartRequested);
         acc.findChild<QLineEdit *>(QStringLiteral("acc_episode"))->setText(QStringLiteral("Episode 12"));
-        QTest::mouseClick(startTiming, Qt::LeftButton);
+        click(startTiming);
         QCOMPARE(startReq.count(), 1);
         QCOMPARE(startReq.first().at(0).toString(), QStringLiteral("agent_assisted"));
         QCOMPARE(startReq.first().at(1).toString(), QStringLiteral("Episode 12"));
@@ -356,10 +512,10 @@ private Q_SLOTS:
         acc.loadJobStatus(sampleJob(QStringLiteral("draft_ready")));
         acc.selectAgent(QStringLiteral("graphics"));
         acc.setActivityHeartbeatSec(0);
-        QTest::mouseClick(acc.findChild<QPushButton *>(QStringLiteral("acc_promote")), Qt::LeftButton);
+        click(acc.findChild<QPushButton *>(QStringLiteral("acc_promote")));
         QCOMPARE(activity.last().at(0).toString(), QStringLiteral("approval"));
         QSignalSpy paused(&acc, &AgentControlCentre::timingPauseToggled);
-        QTest::mouseClick(pause, Qt::LeftButton);
+        click(pause);
         QCOMPARE(paused.count(), 1);
         QVERIFY(paused.first().at(0).toBool());
         acc.setTimingActive(true, true);
@@ -369,7 +525,7 @@ private Q_SLOTS:
         QCOMPARE(activity.count(), before);
         QSignalSpy finished(&acc, &AgentControlCentre::timingFinishRequested);
         rating->setValue(5);
-        QTest::mouseClick(finish, Qt::LeftButton);
+        click(finish);
         QCOMPARE(finished.count(), 1);
         QCOMPARE(finished.first().at(0).toInt(), 5);
         acc.setTimingActive(false);
@@ -398,7 +554,7 @@ private Q_SLOTS:
             }
         }
         QVERIFY(found);
-        QVERIFY(acc.findChild<QLabel *>(QStringLiteral("acc_status"))->text().contains(QStringLiteral("machine 1:15")));
+        QVERIFY(acc.statusText().contains(QStringLiteral("1:15 on this Mac")));
         acc.addCustomProfile(QStringLiteral("weekly_chat"), QStringLiteral("Weekly chat"));
         acc.addCustomProfile(QStringLiteral("weekly_chat"), QStringLiteral("Weekly chat")); // no duplicates
         auto *profiles = acc.findChild<QComboBox *>(QStringLiteral("acc_profile"));

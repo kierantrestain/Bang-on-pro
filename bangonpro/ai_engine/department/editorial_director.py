@@ -27,7 +27,7 @@ from typing import Any
 from bangonpro.ai_engine.department import editorial_text as et
 
 # Format cut-rate bands (camera changes per edited minute) above which a cut reads as choppy
-REF_MAX_CAMERA_CUTS_PER_MIN: dict[str, float] = {"daily_news": 10.0, "podcast": 12.0, "interview": 8.0, "gameshow": 24.0, "sports_discussion": 18.0, "social": 30.0}
+REF_MAX_CAMERA_CUTS_PER_MIN: dict[str, float] = {"daily_news": 10.0, "podcast": 12.0, "interview": 8.0, "gameshow": 24.0, "sports_discussion": 18.0, "social": 30.0, "youtube": 20.0}
 CUTAWAY_REASONS = ("cutaway", "reaction", "listener", "wide", "intro", "outro", "bridge", "exchange", "topic_change", "unavailable", "interjection")
 
 

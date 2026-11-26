@@ -325,7 +325,7 @@ class PlanExecutionReport:
 # ---------------------------------------------------------------------------
 
 
-def shared_reasoning_interpreter() -> LlmInterpreterFn | None:
+def shared_reasoning_interpreter(task_id: str | None = None) -> LlmInterpreterFn | None:
     """Instruction interpreter backed by the department's shared provider router, or ``None``.
 
     The AI Assistant uses the same authorised CLIs, priority order, failover, cooldowns and daily
@@ -338,6 +338,8 @@ def shared_reasoning_interpreter() -> LlmInterpreterFn | None:
         router = CliReasoner()
     except ReasonerError:
         return None
+    if task_id:
+        router.begin_task(task_id)  # ledger rows are attributed to this production (Production panel reasoning report)
 
     def interpret(instruction: str, ctx_summary: dict[str, Any]) -> dict[str, Any]:
         def prompt(policy: dict[str, Any]) -> str:
