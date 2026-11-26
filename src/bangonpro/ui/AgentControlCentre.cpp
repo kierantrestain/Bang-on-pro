@@ -869,6 +869,7 @@ void AgentControlCentre::loadJobStatus(const QJsonObject &doc)
     m_reviewList->clear();
     int done = 0;
     int active = 0;
+    bool anyAgentRunning = false;
     for (int i = 0; i < m_agentTree->topLevelItemCount(); ++i) {
         QTreeWidgetItem *it = m_agentTree->topLevelItem(i);
         const QJsonObject a = agents.value(it->data(ColAgent, kIdRole).toString()).toObject();
@@ -910,6 +911,7 @@ void AgentControlCentre::loadJobStatus(const QJsonObject &doc)
         it->setText(ColSummary, err.isEmpty() ? summary : err);
         it->setToolTip(ColSummary, a.value(QStringLiteral("rationale")).toString());
         if (status == QLatin1String("running")) {
+            anyAgentRunning = true;
             m_statusLabel->setText(tr("%1 · %2").arg(it->text(ColAgent), a.value(QStringLiteral("message")).toString()));
         }
         for (const QJsonValue &r : review) {
@@ -924,6 +926,11 @@ void AgentControlCentre::loadJobStatus(const QJsonObject &doc)
             row->setData(kIdRole, it->data(ColAgent, kIdRole));
             row->setToolTip(err);
         }
+    }
+    if (m_jobStatus == QLatin1String("running") && !anyAgentRunning && active > 0) {
+        // Between agents, or building the draft after the last one: say what is actually happening.
+        m_statusLabel->setText(done >= active ? tr("Preparing the edited sequence and final checks")
+                                              : tr("Continuing from the last finished step · %1 of %2 agents done").arg(done).arg(active));
     }
     const QJsonObject jobHelp = doc.value(QStringLiteral("error_help")).toObject();
     if (!jobHelp.isEmpty()) {
@@ -955,6 +962,16 @@ void AgentControlCentre::loadJobStatus(const QJsonObject &doc)
         const QString revMsg = lastRev.value(QStringLiteral("message")).toString();
         if (!revMsg.isEmpty()) {
             m_statusLabel->setText(revMsg);
+        }
+        // A production that stopped says why and what to do, in the status line itself.
+        const QJsonObject help = doc.value(QStringLiteral("error_help")).toObject();
+        if (m_jobStatus == QLatin1String("failed")) {
+            m_statusLabel->setText(help.isEmpty() ? tr("Production stopped: %1").arg(doc.value(QStringLiteral("error")).toString())
+                                                  : tr("Production stopped: %1. %2").arg(help.value(QStringLiteral("title")).toString(),
+                                                                                        help.value(QStringLiteral("fix")).toString()));
+            m_statusLabel->setToolTip(doc.value(QStringLiteral("error")).toString());
+        } else if (m_jobStatus == QLatin1String("interrupted")) {
+            m_statusLabel->setText(tr("Production interrupted · %1 of %2 agents done. Resume continues from the last finished step.").arg(done).arg(active));
         }
     }
     updateActionStates();
@@ -1118,6 +1135,12 @@ void AgentControlCentre::setBusy(bool busy, const QString &text)
     updateActionStates();
 }
 
+void AgentControlCentre::showProblem(const QString &text)
+{
+    m_statusLabel->setText(text);
+    m_statusLabel->setToolTip(text);
+}
+
 void AgentControlCentre::updateActionStates()
 {
     const bool hasJob = !m_jobDir.isEmpty();
@@ -1125,7 +1148,7 @@ void AgentControlCentre::updateActionStates()
     const bool hasAgent = !selectedAgentId().isEmpty() && selectedAgentId() != QLatin1String("executive");
     m_cancelBtn->setEnabled(hasJob && running);
     m_resumeBtn->setEnabled(hasJob && !running &&
-                            (m_jobStatus == QLatin1String("cancelled") || m_jobStatus == QLatin1String("interrupted") ||
+                            (m_jobStatus == QLatin1String("cancelled") || m_jobStatus == QLatin1String("interrupted") || m_jobStatus == QLatin1String("failed") ||
                              m_jobStatus == QLatin1String("completed_with_errors") || m_jobStatus.startsWith(QLatin1String("blocked"))));
     m_cancelBtn->setVisible(running || !hasJob);
     m_resumeBtn->setVisible(m_resumeBtn->isEnabled());

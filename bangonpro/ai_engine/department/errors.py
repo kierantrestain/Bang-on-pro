@@ -50,6 +50,17 @@ def explain(err: BaseException | str, *, context: str = "") -> dict[str, Any]:
 
     if type(err).__name__ == "PipelineCancelledError" or "pipelinecancellederror" in low:
         return _entry("cancelled", "Production paused", "The job was cancelled. Finished agents are kept.", "Press Resume to continue from the last checkpoint.", "resume_job")
+    if type(err).__name__ == "JobBusyError" or "already running (process" in low:
+        return _entry(
+            "job_busy",
+            "Already running",
+            "This production is already being worked on, so a second copy was not started.",
+            "Follow its progress here, or press Cancel and then Resume.",
+            None,
+        )
+    if type(err).__name__ in ("JobInterruptedError", "KeyboardInterrupt") or low == "interrupted":
+        return _entry("interrupted", "Production interrupted", "Bang On Pro stopped before the production finished. Finished agents are kept.",
+                      "Press Resume to continue from the last finished step.", "resume_job")
     if type(err).__name__ == "InsufficientStorageError" or "insufficient storage" in low or errnum == errno.ENOSPC or "no space left" in low:
         return _entry(
             "no_space",

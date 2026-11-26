@@ -38,6 +38,10 @@ from bangonpro.ai_engine.department.checkpoint import write_json_atomic
 from bangonpro.ai_engine.department.errors import explain
 
 STALE_AFTER_SEC = 120.0
+# A production interrupted this many times (worker crash, force quit) is not resumed again automatically:
+# every launch would otherwise resume it, crash, and resume it again.
+MAX_QUEUE_ATTEMPTS = 3
+BUSY_POLL_SEC = 2.0
 HEARTBEAT_SEC = 5.0
 QUEUE_STATES = ("queued", "interrupted", "running", "completed", "needs_attention", "failed", "cancelled")
 ACTIVE_STATES = frozenset({"queued", "interrupted", "running"})
@@ -314,7 +318,16 @@ class JobQueue:
             doc = self._load()
             for e in doc["entries"]:
                 if e["status"] == "running":
-                    e.update({"status": "interrupted", "recovered": True, "interrupted_at_utc": _utc()})
+                    # Left "running" means its worker died without saying so (crash, force quit, power loss).
+                    e["crashes"] = int(e.get("crashes", 0)) + 1
+                    if e["crashes"] >= MAX_QUEUE_ATTEMPTS:
+                        msg = f"Its worker stopped unexpectedly {e['crashes']} times, so it is no longer resumed automatically"
+                        e.update({"status": "failed", "recovered": True, "finished_at_utc": _utc(), "error": msg,
+                                  "help": {"code": "resume_loop_stopped", "title": "Production stopped repeatedly", "message": msg + ".",
+                                           "fix": "Open it from History and press Resume when you are ready, or Export diagnostics and send them to the team.",
+                                           "fix_action": "resume_job"}})
+                    else:
+                        e.update({"status": "interrupted", "recovered": True, "interrupted_at_utc": _utc()})
                     out.append(e["queue_id"])
             if out:
                 self._save(doc)
@@ -322,12 +335,23 @@ class JobQueue:
 
     def _run_entry(self, entry: dict[str, Any], progress_callback: Any = None) -> dict[str, Any]:
         from bangonpro.ai_engine.department.agents import JobOptions
-        from bangonpro.ai_engine.department.jobs import ProductionJob
+        from bangonpro.ai_engine.department.jobs import JobBusyError, ProductionJob, job_owner_alive
 
         job_dir = Path(entry["job_dir"])
         if (job_dir / "job.json").exists():
-            job = ProductionJob(job_dir)
-            job.resume(progress_callback=progress_callback)  # finished agents are kept
+            while True:
+                job = ProductionJob(job_dir)
+                if str(job.doc.get("status")) in DONE_JOB_STATES:
+                    return job.doc  # finished meanwhile (e.g. the editor resumed it by hand): never run it twice
+                if job_owner_alive(job_dir, job.doc) and job.doc.get("status") == "running":
+                    time.sleep(BUSY_POLL_SEC)  # someone else is running it right now; wait, then re-check
+                    continue
+                try:
+                    job.resume(progress_callback=progress_callback)  # finished agents are kept
+                except JobBusyError:
+                    time.sleep(BUSY_POLL_SEC)
+                    continue
+                break
         else:
             spec = entry["spec"]
             opts_raw = dict(spec.get("options") or {})
@@ -396,6 +420,10 @@ class JobQueue:
                     self._update(entry["queue_id"], status=status, job_status=js, finished_at_utc=_utc(), error=doc.get("error"), help=help_, processing_elapsed_sec=doc.get("processing_elapsed_sec"))
                 except Exception as exc:  # noqa: BLE001 - one broken job must not stop the queue
                     self._update(entry["queue_id"], status="failed", finished_at_utc=_utc(), error=f"{type(exc).__name__}: {exc}", help=explain(exc))
+                except BaseException:
+                    # Quit / SIGTERM: a clean interruption, resumed first next time (not counted as a crash).
+                    self._update(entry["queue_id"], status="interrupted", interrupted_at_utc=_utc())
+                    raise
                 report["ran"].append(entry["queue_id"])
         finally:
             stop.set()
@@ -429,11 +457,13 @@ def job_history(job_root: str | Path, *, limit: int = 50) -> list[dict[str, Any]
         except (OSError, ValueError):
             continue
         agents = doc.get("agents", {})
+        from bangonpro.ai_engine.department.jobs import effective_status
+
         rows.append(
             {
                 "job_id": doc.get("job_id", d.name),
                 "job_dir": str(d.resolve()),
-                "status": doc.get("status"),
+                "status": effective_status(doc, d),
                 "mode": doc.get("mode"),
                 "profile_id": doc.get("profile_id"),
                 "series_id": doc.get("series_id"),

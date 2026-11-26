@@ -247,7 +247,8 @@ jobs:
             tests/bangonpro/test_security_and_compliance.py \
             tests/bangonpro/test_project_integrity.py \
             tests/bangonpro/test_macos_perf.py \
-            tests/bangonpro/test_v12_department.py
+            tests/bangonpro/test_v12_department.py \
+            tests/bangonpro/test_production_reliability.py
 
           # V1.2: run a full production-department job INSIDE the packaged app's bundled runtime
           # (synthetic generated footage; virtualised Apple Silicon runner) and keep the evidence.

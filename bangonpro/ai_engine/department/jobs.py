@@ -26,9 +26,11 @@ import json
 import os
 import re
 import shutil
+import socket
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -87,6 +89,81 @@ from bangonpro.show_profiles.loader import load_show_profile, user_profile_dirs
 
 JOB_SCHEMA_VERSION = "1.2"
 TERMINAL_AGENT_STATES = frozenset({"completed", "skipped", "failed", "blocked", "rolled_back"})
+# A job whose owning process is gone while job.json still says "running" is reported as interrupted.
+LIVE_JOB_STATES = frozenset({"running"})
+# An agent that was mid-flight when its process died this many times is not resumed again automatically:
+# it is marked failed so the rest of the production can finish (and the editor can rerun it by hand).
+MAX_AGENT_INTERRUPTIONS = 3
+# job.json written by another machine (shared drive) counts as abandoned after this long without an update.
+FOREIGN_OWNER_STALE_SEC = 600.0
+
+
+class JobBusyError(RuntimeError):
+    """Another live process is already running this production (one writer per job)."""
+
+
+class JobInterruptedError(BaseException):
+    """The worker was asked to stop (SIGTERM / quit): the job is saved as interrupted, not failed."""
+
+
+def _pid_alive(pid: int) -> bool:
+    from bangonpro.ai_engine.department.queue import pid_alive
+
+    return pid_alive(pid)
+
+
+def _is_production_process(pid: int) -> bool:
+    """The pid belongs to a Bang On Pro Python process (guards against a pid reused after a crash or reboot)."""
+    if pid == os.getpid():
+        return True
+    try:
+        cmd = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8", "replace")
+    except OSError:
+        import subprocess
+
+        try:
+            res = subprocess.run(["ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True, timeout=5, check=False)  # noqa: S603, S607
+        except (OSError, subprocess.SubprocessError):
+            return True  # cannot tell: trust the live pid
+        if res.returncode != 0:
+            return False
+        cmd = res.stdout
+    return "bangonpro" in cmd
+
+
+def read_job_owner(job_dir: str | Path) -> dict[str, Any] | None:
+    try:
+        data = json.loads((Path(job_dir) / "run.lock").read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def job_owner_alive(job_dir: str | Path, doc: dict[str, Any] | None = None) -> bool:
+    """True when a live Bang On Pro process currently owns (is running) the job in ``job_dir``.
+
+    Every run takes ``run.lock`` and removes it only after recording a final status, so a job
+    that says "running" without a lock (or with a lock whose process is gone) is not running.
+    """
+    owner = read_job_owner(job_dir)
+    if owner is None:
+        return False
+    if owner.get("host") not in (None, socket.gethostname()):
+        try:
+            age = time.time() - (Path(job_dir) / "job.json").stat().st_mtime
+        except OSError:
+            return False
+        return age <= FOREIGN_OWNER_STALE_SEC
+    pid = int(owner.get("pid") or 0)
+    return _pid_alive(pid) and _is_production_process(pid)
+
+
+def effective_status(doc: dict[str, Any], job_dir: str | Path) -> str:
+    """The truthful status: a "running" job nobody is running any more is "interrupted"."""
+    status = str(doc.get("status") or "")
+    if status in LIVE_JOB_STATES and not job_owner_alive(job_dir, doc):
+        return "interrupted"
+    return status
 
 
 class ApprovalRequiredError(PermissionError):
@@ -132,6 +209,9 @@ class ProductionJob:
         self.state: ProjectAnalysisState | None = None
         self._lock = threading.Lock()
         self._last_write = 0.0
+        self.owner_path = self.dir / "run.lock"
+        self._owner_depth = 0
+        self._owner_token: str | None = None
         if self.job_path.exists():
             self.doc = json.loads(self.job_path.read_text(encoding="utf-8"))
 
@@ -359,8 +439,89 @@ class ProductionJob:
         raw = dict(self.doc.get("options", {}))
         return JobOptions(**{**raw, "provider_config": None})
 
+    # --------------------------------------------------------------- ownership
+    def _acquire_owner(self) -> None:
+        """Take ``run.lock`` (pid, host, token). A lock whose process is gone is taken over."""
+        self.dir.mkdir(parents=True, exist_ok=True)
+        for _ in range(5):
+            token = uuid.uuid4().hex
+            payload = {"pid": os.getpid(), "host": socket.gethostname(), "started_at_utc": _utc(), "token": token}
+            try:
+                fd = os.open(self.owner_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            except FileExistsError:
+                if job_owner_alive(self.dir, self.doc):
+                    owner = read_job_owner(self.dir) or {}
+                    raise JobBusyError(
+                        f"This production is already running (process {owner.get('pid', '?')}). Wait for it to finish, or press Cancel first."
+                    ) from None
+                stale = self.owner_path.with_name(f"run.lock.stale-{int(time.time() * 1000)}")
+                try:
+                    os.replace(self.owner_path, stale)
+                    stale.unlink(missing_ok=True)
+                except FileNotFoundError:
+                    pass  # another process took it over first; retry
+                continue
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh)
+            self._owner_token = token
+            return
+        raise JobBusyError("Could not take ownership of this production; try again")
+
+    def _release_owner(self) -> None:
+        owner = read_job_owner(self.dir)
+        if owner and owner.get("token") == self._owner_token:
+            self.owner_path.unlink(missing_ok=True)
+        self._owner_token = None
+
+    @contextmanager
+    def exclusive(self):
+        """One writer per job: run, resume, rerun and revise never execute twice at once."""
+        outermost = self._owner_depth == 0
+        if outermost:
+            self._acquire_owner()
+            # Another process may have advanced the job since this object read job.json.
+            try:
+                disk = json.loads(self.job_path.read_text(encoding="utf-8"))
+                if str(disk.get("updated_at_utc") or "") > str(self.doc.get("updated_at_utc") or ""):
+                    self.doc = disk
+                    self.state = None
+            except (OSError, ValueError):
+                pass
+        self._owner_depth += 1
+        try:
+            yield
+        except (JobInterruptedError, KeyboardInterrupt) as exc:
+            if outermost and self.doc.get("status") == "running":
+                self.doc["status"] = "interrupted"
+                self.doc["interrupted_reason"] = str(exc) or "Bang On Pro stopped the production"
+                self._save(force=True)
+            raise
+        except Exception as exc:
+            # Failed before or after the agent loop (unreadable plan or checkpoint, ...): never leave "running".
+            if outermost and self.doc and self.doc.get("status") == "running":
+                self.doc["status"] = "failed"
+                self.doc["error"] = f"{type(exc).__name__}: {exc}"
+                self.doc["error_help"] = explain(exc)
+                self.doc["current_agent"] = None
+                self._event("executive", "job_failed", {"error": self.doc["error"]})
+                self._save(force=True)
+            raise
+        finally:
+            self._owner_depth -= 1
+            if outermost:
+                self._release_owner()
+
+    @property
+    def status(self) -> str:
+        """Truthful status (a "running" job without a live owner is "interrupted")."""
+        return effective_status(self.doc, self.dir)
+
     # --------------------------------------------------------------- execution
     def run(self, *, start_agent: str | None = None, progress_callback: Any = None) -> dict[str, Any]:
+        with self.exclusive():
+            return self._run(start_agent=start_agent, progress_callback=progress_callback)
+
+    def _run(self, *, start_agent: str | None = None, progress_callback: Any = None) -> dict[str, Any]:
         plan = self.plan
         if self.state is None:
             self.state = self._load_checkpoint_before(start_agent) if start_agent else self._latest_state()
@@ -394,8 +555,10 @@ class ProductionJob:
         self.doc["status"] = "running"
         self.doc["started_at_utc"] = self.doc.get("started_at_utc") or _utc()
         self.doc["worker_pid"] = os.getpid()
+        self.doc["worker_host"] = socket.gethostname()
         self.doc.pop("error", None)
         self.doc.pop("error_help", None)
+        self.doc.pop("interrupted_reason", None)
         t_job = time.perf_counter()
         start_idx = AGENT_ORDER.index(start_agent) if start_agent else 0
         failed_or_blocked: set[str] = set()
@@ -410,6 +573,11 @@ class ProductionJob:
                     continue
                 if rec["status"] == "completed" and start_agent is None:
                     continue  # resume: keep finished work
+                if rec.get("gave_up") and start_agent != agent_id:
+                    # Stopped the production too many times: leave it failed, finish everything else.
+                    rec["status"] = "failed"
+                    failed_or_blocked.add(agent_id)
+                    continue
                 blockers = [d for d in AGENTS_BY_ID[agent_id].depends_on if d in failed_or_blocked]
                 if blockers:
                     rec["status"] = "blocked"
@@ -436,6 +604,32 @@ class ProductionJob:
             self._add_processing_time(time.perf_counter() - t_job)
             self._event("media_ingest", "blocked_insufficient_storage", {"error": str(exc)})
             self._save(force=True)
+        except (JobInterruptedError, KeyboardInterrupt) as exc:
+            # Asked to stop (quit / SIGTERM): finished agents are kept, the current one restarts on Resume.
+            cur = self.doc.get("current_agent")
+            if cur and self.doc["agents"][cur]["status"] == "running":
+                self.doc["agents"][cur].update({"status": "pending", "message": "Interrupted; restarts on Resume"})
+            self.doc["status"] = "interrupted"
+            self.doc["interrupted_reason"] = str(exc) or "Bang On Pro stopped the production"
+            self.doc["current_agent"] = None
+            self._add_processing_time(time.perf_counter() - t_job)
+            self._event(cur or "executive", "job_interrupted", {"reason": self.doc["interrupted_reason"]})
+            self._save(force=True)
+            raise
+        except Exception as exc:
+            # Anything unexpected ends the job truthfully as failed, never as a "running" job nobody runs.
+            cur = self.doc.get("current_agent")
+            err = f"{type(exc).__name__}: {exc}"
+            if cur and self.doc["agents"][cur]["status"] == "running":
+                self.doc["agents"][cur].update({"status": "failed", "error": err})
+            self.doc["status"] = "failed"
+            self.doc["error"] = err
+            self.doc["error_help"] = explain(exc, context=cur or "")
+            self.doc["current_agent"] = None
+            self._add_processing_time(time.perf_counter() - t_job)
+            self._event(cur or "executive", "job_failed", {"error": err})
+            self._save(force=True)
+            raise
         return self.doc
 
     def _add_processing_time(self, elapsed: float) -> None:
@@ -798,19 +992,47 @@ class ProductionJob:
     def cancel(self, reason: str = "Cancelled from Agent Control Centre") -> None:
         self.cancel_path.write_text(reason, encoding="utf-8")
         self._event("executive", "cancel_requested", {"reason": reason})
+        if self.doc.get("status") == "running" and not job_owner_alive(self.dir, self.doc):
+            # Nobody is running it any more, so nobody would read the CANCEL file: end it here.
+            for r in self.doc["agents"].values():
+                if r["status"] == "running":
+                    r["status"] = "cancelled"
+            self.doc.update({"status": "cancelled", "cancel_reason": reason, "current_agent": None})
+            self._event("executive", "job_cancelled", {"reason": reason, "owner": "none"})
+            self._save(force=True)
 
     def resume(self, progress_callback: Any = None) -> dict[str, Any]:
-        for r in self.doc["agents"].values():
-            if r["status"] in ("running", "cancelled", "failed", "blocked"):
-                r["status"] = "pending"
-        self.state = self._latest_state()
-        self._event("executive", "job_resumed", {})
-        return self.run(progress_callback=progress_callback)
+        with self.exclusive():
+            resumed_from = effective_status(self.doc, self.dir)
+            gave_up: list[str] = []
+            for aid, r in self.doc["agents"].items():
+                if r["status"] == "running":
+                    # Its process died inside this agent (crash, force quit, power loss).
+                    r["interruptions"] = int(r.get("interruptions", 0)) + 1
+                    if r["interruptions"] >= MAX_AGENT_INTERRUPTIONS:
+                        r.update({"status": "failed", "gave_up": True,
+                                  "error": f"Stopped the production {r['interruptions']} times, so it was skipped to let the rest finish"})
+                        r["help"] = {"code": "agent_gave_up", "title": f"{r.get('display_name') or aid} kept stopping",
+                                     "message": "This step was interrupted repeatedly and is no longer retried automatically.",
+                                     "fix": "Rerun this agent from its row when you are ready, or Export diagnostics and send them to the team.",
+                                     "fix_action": "rerun_agent"}
+                        gave_up.append(aid)
+                        continue
+                if r["status"] in ("running", "cancelled", "failed", "blocked") and not r.get("gave_up"):
+                    r["status"] = "pending"
+            self.doc["resume_count"] = int(self.doc.get("resume_count", 0)) + 1
+            self.state = self._latest_state()
+            self._event("executive", "job_resumed", {"from_status": resumed_from, "resume_count": self.doc["resume_count"], "gave_up": gave_up})
+            return self.run(progress_callback=progress_callback)
 
     def rerun(self, agent_id: str, *, profile_overrides: dict[str, Any] | None = None, progress_callback: Any = None, scope: dict[str, Any] | None = None) -> dict[str, Any]:
         """Re-execute one agent (and everything after it) from the checkpoint preceding it."""
         if agent_id == "executive":
             raise ValueError("Create a new job to re-plan; the executive plan is immutable per job")
+        with self.exclusive():
+            return self._rerun(agent_id, profile_overrides=profile_overrides, progress_callback=progress_callback, scope=scope)
+
+    def _rerun(self, agent_id: str, *, profile_overrides: dict[str, Any] | None = None, progress_callback: Any = None, scope: dict[str, Any] | None = None) -> dict[str, Any]:
         st = self._load_checkpoint_before(agent_id)
         st.metadata.pop("revision_scope", None)  # a stale scope from an earlier revision never re-applies
         if scope:
@@ -839,6 +1061,8 @@ class ProductionJob:
                 for rid in r.get("batches", []):
                     self.doc["batches"].pop(rid, None)
                 r.update({"status": "pending", "decision": None, "batches": []})
+                r.pop("gave_up", None)
+                r.pop("interruptions", None)
         self.state = st
         self._event(agent_id, "rerun_requested", {})
         return self.run(start_agent=agent_id, progress_callback=progress_callback)
@@ -853,6 +1077,10 @@ class ProductionJob:
 
     def revise(self, instruction: str, *, range_sec: tuple[float, float] | None = None, range_timeline: tuple[float, float] | None = None, progress_callback: Any = None) -> dict[str, Any]:
         """Apply a plain-language revision: interpret, snapshot, rerun only what it affects, keep the rest."""
+        with self.exclusive():
+            return self._revise(instruction, range_sec=range_sec, range_timeline=range_timeline, progress_callback=progress_callback)
+
+    def _revise(self, instruction: str, *, range_sec: tuple[float, float] | None = None, range_timeline: tuple[float, float] | None = None, progress_callback: Any = None) -> dict[str, Any]:
         from bangonpro.ai_engine.department.revisions import interpret_revision, previous_spans, timeline_to_master
 
         st_now = self._latest_state()

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import signal
 import sys
 from pathlib import Path
 from typing import Any
@@ -21,7 +22,7 @@ from typing import Any
 from bangonpro.ai_engine.department.agents import JobOptions
 from bangonpro.ai_engine.department.cache import AnalysisCache
 from bangonpro.ai_engine.department.errors import explain
-from bangonpro.ai_engine.department.jobs import ApprovalRequiredError, ProductionJob
+from bangonpro.ai_engine.department.jobs import ApprovalRequiredError, JobBusyError, JobInterruptedError, ProductionJob
 from bangonpro.ai_engine.department.learning import (
     PreferenceError,
     ProfilePreferenceStore,
@@ -466,7 +467,8 @@ def _cmd_job(a: argparse.Namespace) -> int:
     if not job.doc:
         return _fail(FileNotFoundError(f"No production job at {a.job_dir}"))
     if a.cmd == "status":
-        return _emit(job.doc)
+        # Truthful status: "running" with no live owner process is reported as "interrupted".
+        return _emit({**job.doc, "status": job.status, "recorded_status": job.doc.get("status")})
     if a.cmd == "summary":
         return _emit(json.loads((job.dir / "summary.json").read_text(encoding="utf-8")))
     if a.cmd == "cancel":
@@ -556,14 +558,34 @@ def _dispatch(a: argparse.Namespace) -> int:
     return _cmd_job(a)
 
 
+def _on_sigterm(signum: int, _frame: Any) -> None:
+    # Bang On Pro asks running productions to stop when it quits: save them as interrupted, then exit.
+    raise JobInterruptedError(f"Stopped by signal {signum} (Bang On Pro quit or the task was stopped)")
+
+
 def main(argv: list[str] | None = None) -> int:
     a = build_parser().parse_args(argv)
     try:
+        signal.signal(signal.SIGTERM, _on_sigterm)
+    except ValueError:  # pragma: no cover - not the main thread (embedded use)
+        pass
+    try:
         return _dispatch(a)
+    except JobBusyError as exc:
+        _emit({"error": str(exc), "busy": True, "help": explain(exc)})
+        return 4
+    except (JobInterruptedError, KeyboardInterrupt) as exc:
+        _emit({"error": str(exc) or "Interrupted", "interrupted": True, "help": explain("interrupted")})
+        return 143
     except (PreferenceError, QueueError) as exc:
         return _fail(exc)
     except (ValueError, KeyError, FileNotFoundError, PermissionError, OSError) as exc:
         return _fail(exc)
+    except Exception as exc:  # noqa: BLE001 - the app needs {"error", "help"}, never a bare traceback
+        import traceback
+
+        traceback.print_exc(file=sys.stderr)
+        return _fail(exc, 1)
 
 
 if __name__ == "__main__":
