@@ -748,11 +748,13 @@ def _reasoning_presence(ws: Workspace) -> dict[str, Any]:
 
         rs = reasoning_status()
         auth = [p for p in rs["priority"] if rs["providers"][p]["authorised"]]
-        if auth:
+        if rs["app_driven"] == "off":
+            out["providers"] = "Reasoning: Local Only or no authorised subscription"
+        elif auth:
             line = "Reasoning: " + " > ".join(PROVIDER_INFO[p]["title"] + ("" if rs["providers"][p]["available"] else " (waiting)") for p in auth)
             if rs.get("active") in auth:
                 line += f" · active {PROVIDER_INFO[rs['active']]['title']}"
-            ev = (rs.get("failover_events") or [])[-1:]
+            ev = [event for event in rs.get("failover_events", []) if event.get("to")][-1:]
             if ev:
                 line += f" · last switch {ev[0]['from']} > {ev[0].get('to') or 'none'} ({ev[0]['kind']})"
             out["providers"] = line

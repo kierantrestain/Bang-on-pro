@@ -52,6 +52,36 @@ def _range_from_text(low: str, duration: float) -> tuple[float, float] | None:
     return None
 
 
+# Only complete requests in these offline forms can change the draft. The broader
+# recognisers below still describe which actions a partial request appears to contain.
+_OFFLINE_CLAUSES = (
+    r"(?:tighten|shorten|trim|loosen)(?: the)?(?: pacing| pauses| cut)?",
+    r"(?:use |add |give us )?(?:more|fewer|less) (?:reaction shots?|reactions?|cutaways?|cuts|camera (?:cuts|switches|changes)|wides?|wide shots)",
+    r"(?:keep|preserve|retain) (?:the )?(?:natural conversation|natural rhythm|natural flow|every word)",
+    r"(?:preserve|protect|keep) (?:the )?(?:suspense|dramatic pauses?|tension)(?: before (?:each |the )?(?:gameshow )?reveals?)?",
+    r"(?:remove|trim) (?:the )?(?:fillers?|ums?|uhs?|false starts|stutters)",
+    r"(?:add|enable|use) (?:our |the )?(?:existing |standard )?(?:graphics|lower thirds?|title card|branding)",
+    r"(?:add|enable|include) (?:the )?(?:captions?|subtitles?)",
+    r"(?:create|make|export) (?:(?:[0-9]+|" + "|".join(_NUM) + r") )?(?:(?:strong|standalone|good|short|best) )*(?:vertical|social|short[- ]form|shorts|reels?|tiktok) (?:clips?|versions?)",
+)
+_SCOPE_SUFFIX = re.compile(
+    r" (?:from this episode|where appropriate|(?:(?:during|in|on) )?(?:the (?:opening|intro|start|beginning|cold open|ending|outro|close|closing|end)|"
+    r"(?:this|the selected|this selected) (?:section|part|bit|range|debate))|(?:from|between) [0-9]+:[0-9]{2} (?:to|and|-) [0-9]+:[0-9]{2}|please)$"
+)
+
+
+def _fully_supported(text: str) -> bool:
+    text = re.sub(r"^please\s+|[.!?]+$", "", text.strip())
+    text = re.sub(r"\bgraphics and lower thirds\b", "graphics", text)
+    text = re.sub(r"(from|between) (\d+:\d{2}) and (\d+:\d{2})", r"\1 \2 to \3", text)
+    clauses = re.split(r"[,;]\s*(?:and |then |but )?|\s+(?:and then|and|then|but)\s+|[.!?]\s+", text)
+    for clause in clauses:
+        clause = _SCOPE_SUFFIX.sub("", clause.strip())
+        if not any(re.fullmatch(pattern, clause) for pattern in _OFFLINE_CLAUSES):
+            return False
+    return True
+
+
 def interpret_revision(text: str, profile: dict[str, Any], *, duration_sec: float = 0.0, selected_range: tuple[float, float] | None = None) -> dict[str, Any]:
     """Map a plain-language revision to ``{overlay, start_agent, range_sec, actions, not_understood}``."""
     low = (text or "").lower()
@@ -130,7 +160,7 @@ def interpret_revision(text: str, profile: dict[str, Any], *, duration_sec: floa
         "start_agent": start,
         "range_sec": [round(rng[0], 3), round(rng[1], 3)] if rng else None,
         "actions": actions,
-        "not_understood": start is None,
+        "not_understood": start is None or not _fully_supported(low),
         "needs_selection": bool(re.search(r"\b(this|selected) (section|part|bit|range|debate)\b", low)) and selected_range is None,
     }
 

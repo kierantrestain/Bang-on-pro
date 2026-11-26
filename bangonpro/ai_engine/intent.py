@@ -317,8 +317,13 @@ def parse_production_instruction(
             scope="clarification",
         )
 
+    covered: set[int] = set()
+
     def _has(pattern: str) -> bool:
-        return bool(re.search(pattern, lower))
+        matches = list(re.finditer(pattern, lower))
+        for match in matches:
+            covered.update(range(*match.span()))
+        return bool(matches)
 
     targets = _extract_editorial_targets(raw)
 
@@ -367,7 +372,7 @@ def parse_production_instruction(
     captions_mentioned = _has(r"\b(captions?|subtitles?|srt|ass)\b")
     transcribe_mentioned = _has(r"\b(transcrib\w+|transcript|diaris\w+|diariz\w+)\b")
     audio_mentioned = _has(
-        r"\b(clean\s*(?:up)?\s+(?:the\s+)?audio|restore\s+(?:the\s+)?audio|"
+        r"\b(clean\s*(?:up)?\s+(?:the\s+)?(?:dialogue\s+)?audio|restore\s+(?:the\s+)?audio|"
         r"master\s+(?:the\s+)?audio|audio\s+(?:clean\w*|restor\w*|mix\w*|level\w*|master\w*|norm\w*)|"
         r"denoise|de[\s-]*noise|noise\s+reduc\w*|remove\s+(?:background\s+|room\s+)?(?:noise|hum|rumble)|"
         r"normali[sz]e|loudness|lufs|compress(?:or|ion)?|duck\s+music|level\s+(?:the\s+)?(?:audio|mics?|microphones?))\b"
@@ -419,7 +424,39 @@ def parse_production_instruction(
         )
     )
 
-    if not any_recognized_action:
+    # Check that each clause was understood. Qualifiers such as a custom title,
+    # B-roll cue or a condition need interpretation even when a keyword matched.
+    for pattern in _NEGATION_PATTERNS.values():
+        _has(pattern)
+    clauses = re.finditer(r"(?:[^,;.!?]|(?<=\d)\.(?=\d))+", lower)
+    partial = False
+    for clause in clauses:
+        for part in re.finditer(r"(?:^|\b(?:and|then|but|also)\s+)(.*?)(?=\b(?:and|then|but|also)\s+|$)", clause.group()):
+            beginning = clause.start() + part.start(1)
+            fragment = part.group(1).strip()
+            if not fragment:
+                continue
+            recognised = any(beginning + i in covered for i, char in enumerate(part.group(1)) if char.isalnum())
+            loudness_or_scope = bool(re.fullmatch(
+                r"(?:normalize|normalise)(?: (?:dialogue )?audio)? to -?\d+(?:\.\d+)? lufs(?: on a\d+)?", fragment
+            ))
+            generic_graphics_or_captions = re.fullmatch(
+                r"(?:please )?(?:(?:add|use|enable|include|keep|skip|omit|disable|no) )?(?:the |our )?"
+                r"(?:existing |standard )?(?:graphics?|lower[ -]thirds?|captions?|subtitles?|srt|ass)"
+                r"(?: for (?:all )?speakers)?(?: only)?(?: please)?", fragment
+            )
+            requires_more_detail = bool(re.match(
+                r"(?:(?:add|use|enable|include|keep) )?(?:the |our )?(?:existing |standard )?"
+                r"(?:captions?|subtitles?|graphics?|lower[ -]thirds?)\b", fragment
+            )) and not generic_graphics_or_captions and not (
+                targets.time_range_sec or targets.target_tracks or targets.target_speakers or targets.target_clips
+            )
+            if (not recognised and not loudness_or_scope) or requires_more_detail:
+                partial = True
+                break
+    creative_qualifier = bool(re.search(r'["“”]|\b(?:b[ -]?roll|unless|except|zoom|montage|fade|only if|the moment|longest answer|cutaway)\b', lower))
+
+    if not any_recognized_action or partial or creative_qualifier:
         return ProductionIntent(
             raw_instruction=raw,
             needs_clarification=True,

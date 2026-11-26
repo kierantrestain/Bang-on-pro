@@ -198,7 +198,7 @@ Q_SIGNALS:
     /** @brief Emitted when the user clicks Edit Profile to open ShowProfileEditorDialog. */
     void editProfileRequested();
 
-    /** @brief Emitted when the user clicks AI Providers & Consent to open ExternalProviderConsentDialog. */
+    /** @brief Emitted when the user clicks AI Providers & Subscriptions to open ExternalProviderConsentDialog. */
     void providerSettingsRequested();
 
     /** @brief Emitted when the user clicks Manage Models to open ModelManagerDialog. */

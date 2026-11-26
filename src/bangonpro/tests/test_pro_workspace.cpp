@@ -242,7 +242,7 @@ private Q_SLOTS:
         const QString outPath = tmp.filePath(QStringLiteral("custom_profile.json"));
         QVERIFY(profDlg.saveProfileToFile(outPath));
 
-        ExternalProviderConsentDialog consentDlg(nullptr, QStringLiteral("BangOnProTest"), QStringLiteral("ConsentUnitTest"));
+        ExternalProviderConsentDialog consentDlg(nullptr, {}, QStringLiteral("BangOnProTest"), QStringLiteral("ConsentUnitTest"));
         // Default must be LocalOnly (free & offline, zero external transmission)
         QCOMPARE(consentDlg.currentSettings().mode, AiBackendMode::LocalOnly);
         QVERIFY(!consentDlg.currentSettings().isExternalTransmissionAllowed());
@@ -250,8 +250,6 @@ private Q_SLOTS:
 
         // Switching to ExternalProvider without explicit consent MUST be blocked
         consentDlg.setBackendMode(AiBackendMode::ExternalProvider);
-        consentDlg.setEndpointUrl(QStringLiteral("https://api.example.com/v1"));
-        consentDlg.setModelName(QStringLiteral("gpt-4o-mini"));
         consentDlg.setExplicitConsentGranted(false);
         QVERIFY(!consentDlg.canAcceptConfiguration());
         QVERIFY(!consentDlg.currentSettings().isExternalTransmissionAllowed());

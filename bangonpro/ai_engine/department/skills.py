@@ -42,7 +42,6 @@ CHECKS = {"camera_at", "camera_share", "has_clip", "title_at", "effect_at", "tra
 TIME_KEYS = {"start", "end", "time"}
 ANCHOR_KEYS = {"$at": {"$at", "speaker_role", "rank", "point", "offset", "camera_role"}, "$rel": {"$rel", "offset"}, "$camera": {"$camera"}, "$speaker": {"$speaker"},
                "$input": {"$input", "kind", "name"}}
-MATCH_THRESHOLD = 0.5
 
 
 class SkillError(ValueError):
@@ -82,8 +81,10 @@ def _check_value(v: Any, where: str) -> None:
 
 def validate_spec(spec: dict[str, Any], *, depth: int = 0) -> dict[str, Any]:
     """Strict structural validation: only declarative steps over allowlisted tools and checks."""
-    if not isinstance(spec, dict) or set(spec) - {"name", "instruction", "triggers", "agent", "agents", "applicability", "steps", "expect", "inputs"}:
+    if not isinstance(spec, dict) or set(spec) - {"name", "instruction", "instruction_sha256", "triggers", "agent", "agents", "applicability", "steps", "expect", "inputs"}:
         raise SkillError("unknown skill fields")
+    if "instruction_sha256" in spec and not re.fullmatch("[a-f0-9]{64}", str(spec["instruction_sha256"])):
+        raise SkillError("invalid instruction fingerprint")
     steps = spec.get("steps")
     if not isinstance(steps, list) or not 1 <= len(steps) <= 12:
         raise SkillError("a skill has 1 to 12 steps")
@@ -234,7 +235,8 @@ def acquire_from_task(intel: Any, ctx: dict[str, Any], task: dict[str, Any], v: 
     expect = [generalise_check(v, e, []) for e in task.get("expect") or [] if isinstance(e, dict) and e.get("check") in CHECKS]
     agents = [s["args"].get("agent") for s in steps]
     spec = {"name": "_".join(sorted(tokens(task["instruction"]), key=task["instruction"].lower().find)[:5]) or "skill", "instruction": task["instruction"][:300],
-            "triggers": sorted(tokens(task["instruction"])), "agent": max(set(agents), key=agents.count), "agents": sorted(set(agents)),
+            "triggers": sorted(tokens(task["instruction"])), "instruction_sha256": hashlib.sha256(_normal_instruction(task["instruction"]).encode()).hexdigest(),
+            "agent": max(set(agents), key=agents.count), "agents": sorted(set(agents)),
             "applicability": {"format": ctx["format"], "roles": sorted({json.dumps(x) for s in steps for x in _roles(s["args"])})}, "steps": steps, "expect": expect}
     spec["applicability"]["roles"] = sorted({r for s in steps for r in _roles(s["args"])})
     try:
@@ -335,20 +337,30 @@ def bind(intel: Any, spec: dict[str, Any], v: Any, assets: list[Path], *, depth:
     return steps, expect
 
 
+def _normal_instruction(text: str) -> str:
+    return " ".join(text.casefold().split()).removeprefix("please ").strip(" .!?")
+
+
 def match(intel: Any, ctx: dict[str, Any], instruction: str, v: Any, assets: list[Path]) -> dict[str, Any] | None:
     """The best applicable skill for this instruction in this series and format, or None."""
     allowed = ("candidate", "validated", "active") if intel.settings().get("trial_candidate_skills", True) else ("validated", "active")
-    want = tokens(instruction)
+    normal = _normal_instruction(instruction)
+    fingerprint = hashlib.sha256(normal.encode()).hexdigest()
     best = None
     for s in intel.latest_skills(allowed):
         if s["format"] not in (None, ctx["format"]) or s["series_id"] not in (None, ctx["series"]):
             continue
         if s["status"] == "candidate" and s["origin_job"] == ctx["job_id"]:
             continue  # a candidate is tried on a different production, never re-run where it was learned
-        trig = set(s["spec"].get("triggers") or [])
-        sim = len(want & trig) / max(1, len(want | trig))
-        if sim < MATCH_THRESHOLD:
+        spec = s["spec"]
+        # A skill must cover the whole instruction. Token overlap alone can drop a
+        # new action, time range or negation which is absent from the learned steps.
+        if spec.get("instruction_sha256"):
+            if fingerprint != spec["instruction_sha256"]:
+                continue
+        elif len(spec.get("instruction", "")) >= 300 or normal != _normal_instruction(spec.get("instruction", "")):
             continue
+        sim = 1.0
         try:
             steps, expect = bind(intel, s["spec"], v, assets)
         except SkillError:

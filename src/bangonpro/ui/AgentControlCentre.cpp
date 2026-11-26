@@ -190,6 +190,10 @@ void AgentControlCentre::buildUi()
     header->addWidget(title);
     header->addStretch(1);
     header->addWidget(m_jobMetaLabel);
+    auto *subscriptions = new QPushButton(tr("AI Providers…"), this);
+    subscriptions->setToolTip(tr("Open AI Providers & Subscriptions"));
+    connect(subscriptions, &QPushButton::clicked, this, &AgentControlCentre::providerSettingsRequested);
+    header->addWidget(subscriptions);
     header->addWidget(m_newJobBtn);
     root->addLayout(header);
 

@@ -7,360 +7,404 @@
 #include "BangOnProTheme.h"
 
 #include <QCheckBox>
-#include <QComboBox>
 #include <QDateTime>
+#include <QDesktopServices>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QJsonArray>
+#include <QJsonDocument>
 #include <QLabel>
-#include <QLineEdit>
+#include <QLocale>
+
+#include <QProcess>
 #include <QPushButton>
 #include <QRadioButton>
+#include <QScrollArea>
 #include <QSettings>
+#include <QSpinBox>
 #include <QUrl>
 #include <QVBoxLayout>
+#include <utility>
 
 namespace BangOnPro {
+namespace {
 
-ExternalProviderConsentDialog::ExternalProviderConsentDialog(QWidget *parent, const QString &settingsOrg, const QString &settingsApp)
+QString displayTime(const QJsonValue &value)
+{
+    const QDateTime time = QDateTime::fromString(value.toString(), Qt::ISODate);
+    return time.isValid() ? QLocale().toString(time.toLocalTime(), QLocale::ShortFormat) : QString();
+}
+
+QLabel *statusLabel(QWidget *parent)
+{
+    auto *label = new QLabel(parent);
+    label->setTextFormat(Qt::PlainText);
+    label->setWordWrap(true);
+    label->setObjectName(QStringLiteral("bangOnProMutedLabel"));
+    return label;
+}
+
+} // namespace
+
+ExternalProviderConsentDialog::ExternalProviderConsentDialog(QWidget *parent, StartPython startPython, const QString &settingsOrg, const QString &settingsApp)
     : QDialog(parent)
+    , m_startPython(std::move(startPython))
     , m_settingsOrg(settingsOrg)
     , m_settingsApp(settingsApp)
+    , m_priority{QStringLiteral("claude"), QStringLiteral("codex"), QStringLiteral("grok"), QStringLiteral("agy")}
 {
-    qRegisterMetaType<BangOnPro::ExternalProviderSettings>("BangOnPro::ExternalProviderSettings");
     setObjectName(QStringLiteral("bangOnProExternalProviderConsentDialog"));
-    setWindowTitle(tr("Bang On Pro — AI Providers && Data Privacy Consent"));
-    resize(620, 520);
-    buildUi();
-    setSettings(loadSettings(m_settingsOrg, m_settingsApp));
-}
-
-void ExternalProviderConsentDialog::buildUi()
-{
+    setWindowTitle(tr("AI Providers & Subscriptions"));
+    resize(760, 770);
     auto *root = new QVBoxLayout(this);
-    root->setContentsMargins(12, 12, 12, 12);
-    root->setSpacing(10);
+    auto *scroll = new QScrollArea(this);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    auto *content = new QWidget(scroll);
+    auto *layout = new QVBoxLayout(content);
+    scroll->setWidget(content);
+    root->addWidget(scroll);
 
-    // 1. Mode Selection
-    auto *modeGroup = new QGroupBox(tr("AI Processing Mode"), this);
-    auto *modeLayout = new QVBoxLayout(modeGroup);
-    modeLayout->setSpacing(6);
+    auto *privacy = new QGroupBox(tr("Processing and privacy"), content);
+    auto *privacyLayout = new QVBoxLayout(privacy);
+    m_local = new QRadioButton(tr("Local Only"), privacy);
+    m_connected = new QRadioButton(tr("Connected Subscriptions"), privacy);
+    m_local->setObjectName(QStringLiteral("localOnlyModeRadio"));
+    m_connected->setObjectName(QStringLiteral("connectedSubscriptionsRadio"));
+    privacyLayout->addWidget(m_local);
+    privacyLayout->addWidget(m_connected);
+    auto *privacyHelp = statusLabel(privacy);
+    privacyHelp->setText(tr("Media processing stays on this computer. Connected reasoning sends editing instructions as text to an authorised subscription. "
+                            "Your official client handles account sign-in separately."));
+    privacyLayout->addWidget(privacyHelp);
+    m_consent = new QCheckBox(tr("Allow external reasoning for my editing instructions"), privacy);
+    m_consent->setObjectName(QStringLiteral("explicitConsentCheckBox"));
+    setTone(m_consent, "warning");
+    m_metadata = new QCheckBox(tr("Include project context such as cut times, camera labels and graphics"), privacy);
+    m_transcript = new QCheckBox(tr("Include transcript excerpts with project context"), privacy);
+    privacyLayout->addWidget(m_consent);
+    privacyLayout->addWidget(m_metadata);
+    privacyLayout->addWidget(m_transcript);
+    layout->addWidget(privacy);
 
-    m_localOnlyRadio = new QRadioButton(tr("Local Only — Free && Offline [Default, Recommended]"), modeGroup);
-    m_localOnlyRadio->setObjectName(QStringLiteral("localOnlyModeRadio"));
-    auto *localNote = new QLabel(tr("All sync, VAD, speaker diarisation, rough cutting, audio restoration, and captions run 100% locally on your "
-                                    "machine. Zero media, audio, or transcript data leaves your computer."),
-                                 modeGroup);
-    localNote->setWordWrap(true);
-    localNote->setObjectName(QStringLiteral("bangOnProMutedLabel"));
-    localNote->setContentsMargins(20, 0, 0, 4);
+    auto *providers = new QGroupBox(tr("Subscription providers"), content);
+    m_providers = new QVBoxLayout(providers);
+    const QStringList titles{tr("Claude Code"), tr("OpenAI Codex"), tr("Grok Build"), tr("Google Antigravity")};
+    const QStringList accounts{tr("Anthropic account · claude"), tr("ChatGPT account · codex"), tr("Eligible Grok account · grok"),
+                               tr("Eligible Google account · agy")};
+    for (int i = 0; i < m_priority.size(); ++i) {
+        const QString id = m_priority.at(i);
+        ProviderRow row;
+        row.widget = new QWidget(providers);
+        row.widget->setObjectName(QStringLiteral("subscriptionProvider_") + id);
+        auto *section = new QVBoxLayout(row.widget);
+        section->setContentsMargins(0, 3, 0, 3);
+        auto *heading = new QHBoxLayout;
+        auto *name = new QLabel(tr("%1 · %2").arg(titles.at(i), accounts.at(i)), row.widget);
+        heading->addWidget(name, 1);
+        row.up = new QPushButton(tr("↑"), row.widget);
+        row.down = new QPushButton(tr("↓"), row.widget);
+        row.up->setAccessibleName(tr("Move %1 up").arg(titles.at(i)));
+        row.down->setAccessibleName(tr("Move %1 down").arg(titles.at(i)));
+        heading->addWidget(row.up);
+        heading->addWidget(row.down);
+        section->addLayout(heading);
+        row.status = statusLabel(row.widget);
+        row.status->setText(tr("Checking installation…"));
+        section->addWidget(row.status);
+        auto *buttons = new QHBoxLayout;
+        row.connect = new QPushButton(tr("Connect"), row.widget);
+        row.check = new QPushButton(tr("Check sign-in"), row.widget);
+        row.test = new QPushButton(tr("Test"), row.widget);
+        row.disconnect = new QPushButton(tr("Disconnect"), row.widget);
+        row.install = new QPushButton(tr("Install instructions"), row.widget);
+        for (auto *button : {row.connect, row.check, row.test, row.disconnect, row.install}) {
+            buttons->addWidget(button);
+        }
+        buttons->addStretch();
+        section->addLayout(buttons);
+        connect(row.up, &QPushButton::clicked, this, [this, id] { moveProvider(id, -1); });
+        connect(row.down, &QPushButton::clicked, this, [this, id] { moveProvider(id, 1); });
+        connect(row.connect, &QPushButton::clicked, this,
+                [this, id] { run({QStringLiteral("--client"), id, QStringLiteral("--connect"), QStringLiteral("--check-auth")}); });
+        connect(row.check, &QPushButton::clicked, this,
+                [this, id] { run({QStringLiteral("--client"), id, QStringLiteral("--check-sign-in"), QStringLiteral("--check-auth")}); });
+        connect(row.test, &QPushButton::clicked, this,
+                [this, id] { run({QStringLiteral("--client"), id, QStringLiteral("--test"), QStringLiteral("--check-auth")}); });
+        connect(row.disconnect, &QPushButton::clicked, this,
+                [this, id] { run({QStringLiteral("--client"), id, QStringLiteral("--disconnect"), QStringLiteral("--check-auth")}); });
+        connect(row.install, &QPushButton::clicked, this, [this, id] {
+            const QUrl url(m_status.value(QStringLiteral("providers")).toObject().value(id).toObject().value(QStringLiteral("install_url")).toString());
+            if (url.scheme() == QStringLiteral("https")) {
+                QDesktopServices::openUrl(url);
+            }
+        });
+        m_providers->addWidget(row.widget);
+        m_rows.insert(id, row);
+    }
+    layout->addWidget(providers);
 
-    m_externalRadio = new QRadioButton(tr("External AI Provider (Optional Opt-In)"), modeGroup);
-    m_externalRadio->setObjectName(QStringLiteral("externalProviderModeRadio"));
-    auto *extNote = new QLabel(tr("When the local rules cannot interpret an instruction, the AI Assistant may ask the reasoning providers you "
-                                  "authorised for Bang On Pro (Claude Code, Codex, Grok Build or Antigravity, through the shared provider router). "
-                                  "Requires explicit privacy consent below."),
-                               modeGroup);
-    extNote->setWordWrap(true);
-    extNote->setObjectName(QStringLiteral("bangOnProMutedLabel"));
-    extNote->setContentsMargins(20, 0, 0, 0);
+    auto *routing = new QGroupBox(tr("Routing and usage limits"), content);
+    auto *routingLayout = new QFormLayout(routing);
+    m_failover = new QCheckBox(tr("Switch automatically when the preferred provider is unavailable"), routing);
+    m_failover->setChecked(true);
+    m_taskLimit = new QSpinBox(routing);
+    m_taskLimit->setRange(1, 1000000);
+    m_taskLimit->setValue(3);
+    m_dayLimit = new QSpinBox(routing);
+    m_dayLimit->setRange(0, 1000000);
+    m_dayLimit->setSpecialValueText(tr("Unlimited"));
+    routingLayout->addRow(m_failover);
+    routingLayout->addRow(tr("Maximum reasoning calls per task"), m_taskLimit);
+    routingLayout->addRow(tr("Maximum reasoning calls per day"), m_dayLimit);
+    m_routing = statusLabel(routing);
+    routingLayout->addRow(m_routing);
+    layout->addWidget(routing);
 
-    modeLayout->addWidget(m_localOnlyRadio);
-    modeLayout->addWidget(localNote);
-    modeLayout->addWidget(m_externalRadio);
-    modeLayout->addWidget(extNote);
-    root->addWidget(modeGroup);
-
-    // 2. External Endpoint Configuration
-    m_externalConfigGroup = new QGroupBox(tr("External Provider Endpoint"), this);
-    auto *cfgForm = new QFormLayout(m_externalConfigGroup);
-    cfgForm->setSpacing(6);
-
-    m_providerCombo = new QComboBox(m_externalConfigGroup);
-    m_providerCombo->setObjectName(QStringLiteral("externalProviderPresetCombo"));
-    m_providerCombo->addItem(tr("OpenAI-Compatible"), QStringLiteral("https://api.openai.com/v1"));
-    m_providerCombo->addItem(tr("Anthropic"), QStringLiteral("https://api.anthropic.com/v1"));
-    m_providerCombo->addItem(tr("Remote LAN / Self-Hosted (Ollama / vLLM)"), QStringLiteral("http://localhost:11434/v1"));
-    m_providerCombo->addItem(tr("Custom HTTPS Endpoint"), QString());
-
-    m_endpointEdit = new QLineEdit(m_externalConfigGroup);
-    m_endpointEdit->setObjectName(QStringLiteral("externalEndpointUrlEdit"));
-    m_endpointEdit->setPlaceholderText(QStringLiteral("https://api.example.com/v1"));
-
-    m_modelEdit = new QLineEdit(m_externalConfigGroup);
-    m_modelEdit->setObjectName(QStringLiteral("externalModelNameEdit"));
-    m_modelEdit->setPlaceholderText(QStringLiteral("e.g. gpt-4o-mini, claude-3-5-sonnet, llama3.1"));
-
-    auto *keyNote = new QLabel(tr("Security: API keys are never saved in plaintext settings. Export BANGONPRO_AI_API_KEY in your environment."),
-                               m_externalConfigGroup);
-    keyNote->setWordWrap(true);
-    keyNote->setObjectName(QStringLiteral("bangOnProMutedLabel"));
-
-    cfgForm->addRow(tr("Provider:"), m_providerCombo);
-    cfgForm->addRow(tr("Endpoint URL*:"), m_endpointEdit);
-    cfgForm->addRow(tr("Model ID*:"), m_modelEdit);
-    cfgForm->addRow(QString(), keyNote);
-    root->addWidget(m_externalConfigGroup);
-
-    // 3. Explicit Privacy & Data Transmission Checklist
-    m_privacyGroup = new QGroupBox(tr("External Data Transmission && Privacy Consent Checklist"), this);
-    auto *privLayout = new QVBoxLayout(m_privacyGroup);
-    privLayout->setSpacing(6);
-
-    auto *privIntro = new QLabel(tr("Choose exactly which project data may be transmitted externally when running an external AI request. "
-                                    "Full-resolution raw camera media files are NEVER uploaded."),
-                                 m_privacyGroup);
-    privIntro->setWordWrap(true);
-    privIntro->setObjectName(QStringLiteral("bangOnProMutedLabel"));
-
-    m_sendTranscriptCheck = new QCheckBox(tr("Transcript text && speaker labels (from local speech/diarisation engine)"), m_privacyGroup);
-    m_sendTranscriptCheck->setObjectName(QStringLiteral("consentSendTranscriptCheck"));
-
-    m_sendAudioCheck = new QCheckBox(tr("Compressed mono audio excerpts (only when requesting external ASR/transcription)"), m_privacyGroup);
-    m_sendAudioCheck->setObjectName(QStringLiteral("consentSendAudioCheck"));
-
-    m_sendFramesCheck = new QCheckBox(tr("Downscaled keyframe thumbnails (only when requesting external visual framing checks)"), m_privacyGroup);
-    m_sendFramesCheck->setObjectName(QStringLiteral("consentSendFramesCheck"));
-
-    m_sendMetadataCheck = new QCheckBox(tr("Sequence edit metadata (cut timecodes, markers, and active Show Profile rules)"), m_privacyGroup);
-    m_sendMetadataCheck->setObjectName(QStringLiteral("consentSendMetadataCheck"));
-
-    m_explicitConsentCheck =
-        new QCheckBox(tr("I explicitly consent to sending the selected data above to the configured external AI endpoint."), m_privacyGroup);
-    m_explicitConsentCheck->setObjectName(QStringLiteral("explicitConsentCheckBox"));
-    setTone(m_explicitConsentCheck, "warning");
-
-    privLayout->addWidget(privIntro);
-    privLayout->addWidget(m_sendTranscriptCheck);
-    privLayout->addWidget(m_sendAudioCheck);
-    privLayout->addWidget(m_sendFramesCheck);
-    privLayout->addWidget(m_sendMetadataCheck);
-    privLayout->addSpacing(4);
-    privLayout->addWidget(m_explicitConsentCheck);
-    root->addWidget(m_privacyGroup);
-
-    // Status / gate banner
-    m_statusLabel = new QLabel(this);
-    m_statusLabel->setObjectName(QStringLiteral("providerConsentStatusLabel"));
-    m_statusLabel->setWordWrap(true);
-    root->addWidget(m_statusLabel);
-
-    // Footer buttons
-    auto *footer = new QHBoxLayout();
-    m_cancelButton = new QPushButton(tr("Cancel"), this);
-    m_saveButton = new QPushButton(tr("Save AI provider settings"), this);
-    m_saveButton->setObjectName(QStringLiteral("saveProviderSettingsButton"));
-    m_saveButton->setProperty("bangOnProPrimary", true);
-    m_saveButton->setDefault(true);
-
-    footer->addStretch(1);
-    footer->addWidget(m_cancelButton);
-    footer->addWidget(m_saveButton);
+    m_feedback = statusLabel(this);
+    root->addWidget(m_feedback);
+    auto *footer = new QHBoxLayout;
+    m_refresh = new QPushButton(tr("Refresh status"), this);
+    auto *close = new QPushButton(tr("Close"), this);
+    m_save = new QPushButton(tr("Save settings"), this);
+    m_save->setObjectName(QStringLiteral("saveProviderSettingsButton"));
+    m_save->setProperty("bangOnProPrimary", true);
+    footer->addWidget(m_refresh);
+    footer->addStretch();
+    footer->addWidget(close);
+    footer->addWidget(m_save);
     root->addLayout(footer);
 
-    connect(m_localOnlyRadio, &QRadioButton::toggled, this, &ExternalProviderConsentDialog::handleModeChanged);
-    connect(m_externalRadio, &QRadioButton::toggled, this, &ExternalProviderConsentDialog::handleModeChanged);
-    connect(m_providerCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &ExternalProviderConsentDialog::handleProviderPresetChanged);
-    connect(m_endpointEdit, &QLineEdit::textChanged, this, &ExternalProviderConsentDialog::updateConsentGate);
-    connect(m_modelEdit, &QLineEdit::textChanged, this, &ExternalProviderConsentDialog::updateConsentGate);
-    connect(m_sendTranscriptCheck, &QCheckBox::toggled, this, &ExternalProviderConsentDialog::updateConsentGate);
-    connect(m_sendAudioCheck, &QCheckBox::toggled, this, &ExternalProviderConsentDialog::updateConsentGate);
-    connect(m_sendFramesCheck, &QCheckBox::toggled, this, &ExternalProviderConsentDialog::updateConsentGate);
-    connect(m_sendMetadataCheck, &QCheckBox::toggled, this, &ExternalProviderConsentDialog::updateConsentGate);
-    connect(m_explicitConsentCheck, &QCheckBox::toggled, this, &ExternalProviderConsentDialog::updateConsentGate);
-    connect(m_saveButton, &QPushButton::clicked, this, &ExternalProviderConsentDialog::handleSaveClicked);
-    connect(m_cancelButton, &QPushButton::clicked, this, &QDialog::reject);
-}
+    connect(m_local, &QRadioButton::toggled, this, &ExternalProviderConsentDialog::syncControls);
+    connect(m_consent, &QCheckBox::toggled, this, &ExternalProviderConsentDialog::syncControls);
+    connect(m_metadata, &QCheckBox::toggled, this, &ExternalProviderConsentDialog::syncControls);
+    connect(m_refresh, &QPushButton::clicked, this, [this] { run({QStringLiteral("--check-auth")}, !m_loaded); });
+    connect(m_save, &QPushButton::clicked, this, &ExternalProviderConsentDialog::save);
+    connect(close, &QPushButton::clicked, this, &QDialog::reject);
 
-ExternalProviderSettings ExternalProviderConsentDialog::loadSettings(const QString &settingsOrg, const QString &settingsApp)
-{
-    ExternalProviderSettings s;
-    QSettings qs(settingsOrg, settingsApp);
-    const QString modeStr = qs.value(QStringLiteral("mode"), QStringLiteral("local_only")).toString();
-    s.mode = (modeStr == QStringLiteral("external_provider")) ? AiBackendMode::ExternalProvider : AiBackendMode::LocalOnly;
-    s.providerName = qs.value(QStringLiteral("provider_name"), s.providerName).toString();
-    s.endpointUrl = qs.value(QStringLiteral("endpoint_url"), s.endpointUrl).toString();
-    s.modelName = qs.value(QStringLiteral("model_name"), s.modelName).toString();
-    s.sendTranscriptText = qs.value(QStringLiteral("send_transcript_text"), true).toBool();
-    s.sendAudioExcerpts = qs.value(QStringLiteral("send_audio_excerpts"), false).toBool();
-    s.sendFrameSnapshots = qs.value(QStringLiteral("send_frame_snapshots"), false).toBool();
-    s.sendProjectMetadata = qs.value(QStringLiteral("send_project_metadata"), true).toBool();
-    s.explicitConsentGranted = qs.value(QStringLiteral("explicit_consent_granted"), false).toBool();
-    s.consentTimestampUtc = qs.value(QStringLiteral("consent_timestamp_utc")).toString();
-
-    // Safety invariant: never restore external mode without explicit consent
-    if (s.mode == AiBackendMode::ExternalProvider && !s.explicitConsentGranted) {
-        s.mode = AiBackendMode::LocalOnly;
-    }
-    return s;
-}
-
-void ExternalProviderConsentDialog::saveSettings(const ExternalProviderSettings &settings, const QString &settingsOrg, const QString &settingsApp)
-{
-    QSettings qs(settingsOrg, settingsApp);
-    const bool allowExternal = settings.isExternalTransmissionAllowed();
-    qs.setValue(QStringLiteral("mode"), allowExternal ? QStringLiteral("external_provider") : QStringLiteral("local_only"));
-    qs.setValue(QStringLiteral("provider_name"), settings.providerName);
-    qs.setValue(QStringLiteral("endpoint_url"), settings.endpointUrl.trimmed());
-    qs.setValue(QStringLiteral("model_name"), settings.modelName.trimmed());
-    qs.setValue(QStringLiteral("send_transcript_text"), settings.sendTranscriptText);
-    qs.setValue(QStringLiteral("send_audio_excerpts"), settings.sendAudioExcerpts);
-    qs.setValue(QStringLiteral("send_frame_snapshots"), settings.sendFrameSnapshots);
-    qs.setValue(QStringLiteral("send_project_metadata"), settings.sendProjectMetadata);
-    qs.setValue(QStringLiteral("explicit_consent_granted"), allowExternal && settings.explicitConsentGranted);
-    qs.setValue(QStringLiteral("consent_timestamp_utc"), allowExternal ? settings.consentTimestampUtc : QString());
-    qs.sync();
+    m_local->setChecked(true);
+    run({QStringLiteral("--check-auth")}, true);
 }
 
 ExternalProviderSettings ExternalProviderConsentDialog::currentSettings() const
 {
-    ExternalProviderSettings s;
-    s.mode = m_externalRadio->isChecked() ? AiBackendMode::ExternalProvider : AiBackendMode::LocalOnly;
-    s.providerName = m_providerCombo->currentText();
-    s.endpointUrl = m_endpointEdit->text().trimmed();
-    s.modelName = m_modelEdit->text().trimmed();
-    s.sendTranscriptText = m_sendTranscriptCheck->isChecked();
-    s.sendAudioExcerpts = m_sendAudioCheck->isChecked();
-    s.sendFrameSnapshots = m_sendFramesCheck->isChecked();
-    s.sendProjectMetadata = m_sendMetadataCheck->isChecked();
-    s.explicitConsentGranted = m_explicitConsentCheck->isChecked();
-    if (s.mode == AiBackendMode::ExternalProvider && s.explicitConsentGranted) {
-        s.consentTimestampUtc =
-            m_existingConsentTimestamp.isEmpty() ? QDateTime::currentDateTimeUtc().toString(Qt::ISODate) : m_existingConsentTimestamp;
-    }
-    return s;
-}
-
-void ExternalProviderConsentDialog::setSettings(const ExternalProviderSettings &settings)
-{
-    m_existingConsentTimestamp = settings.consentTimestampUtc;
-    m_localOnlyRadio->setChecked(settings.mode == AiBackendMode::LocalOnly);
-    m_externalRadio->setChecked(settings.mode == AiBackendMode::ExternalProvider);
-
-    const int pIdx = m_providerCombo->findText(settings.providerName);
-    m_providerCombo->blockSignals(true);
-    if (pIdx >= 0) {
-        m_providerCombo->setCurrentIndex(pIdx);
-    }
-    m_providerCombo->blockSignals(false);
-
-    m_endpointEdit->setText(settings.endpointUrl);
-    m_modelEdit->setText(settings.modelName);
-    m_sendTranscriptCheck->setChecked(settings.sendTranscriptText);
-    m_sendAudioCheck->setChecked(settings.sendAudioExcerpts);
-    m_sendFramesCheck->setChecked(settings.sendFrameSnapshots);
-    m_sendMetadataCheck->setChecked(settings.sendProjectMetadata);
-    m_explicitConsentCheck->setChecked(settings.explicitConsentGranted);
-
-    handleModeChanged();
+    return {m_connected->isChecked() ? AiBackendMode::ExternalProvider : AiBackendMode::LocalOnly, m_transcript->isChecked(), m_metadata->isChecked(),
+            m_consent->isChecked()};
 }
 
 bool ExternalProviderConsentDialog::canAcceptConfiguration() const
 {
-    return validationError().isEmpty();
-}
-
-QString ExternalProviderConsentDialog::validationError() const
-{
-    if (m_localOnlyRadio->isChecked()) {
-        return {};
-    }
-
-    const QString urlStr = m_endpointEdit->text().trimmed();
-    if (urlStr.isEmpty()) {
-        return tr("External endpoint URL is required.");
-    }
-    const QUrl parsed(urlStr);
-    const QString scheme = parsed.scheme().toLower();
-    if (!parsed.isValid() || (scheme != QStringLiteral("https") && scheme != QStringLiteral("http")) || parsed.host().isEmpty()) {
-        return tr("Endpoint URL must be a valid http:// or https:// address.");
-    }
-
-    if (m_modelEdit->text().trimmed().isEmpty()) {
-        return tr("Target model ID is required for external provider mode.");
-    }
-
-    const bool anyDataSelected = m_sendTranscriptCheck->isChecked() || m_sendAudioCheck->isChecked() || m_sendFramesCheck->isChecked() ||
-                                 m_sendMetadataCheck->isChecked();
-    if (!anyDataSelected) {
-        return tr("Select at least one permitted data scope or switch to Local Only mode.");
-    }
-
-    if (!m_explicitConsentCheck->isChecked()) {
-        return tr("Explicit opt-in consent checkbox is required before enabling external AI transmission.");
-    }
-
-    return {};
+    return m_local->isChecked() || m_consent->isChecked();
 }
 
 void ExternalProviderConsentDialog::setBackendMode(AiBackendMode mode)
 {
-    if (mode == AiBackendMode::ExternalProvider) {
-        m_externalRadio->setChecked(true);
-    } else {
-        m_localOnlyRadio->setChecked(true);
-    }
-}
-
-void ExternalProviderConsentDialog::setEndpointUrl(const QString &url)
-{
-    m_endpointEdit->setText(url);
-}
-
-void ExternalProviderConsentDialog::setModelName(const QString &model)
-{
-    m_modelEdit->setText(model);
+    (mode == AiBackendMode::LocalOnly ? m_local : m_connected)->setChecked(true);
 }
 
 void ExternalProviderConsentDialog::setExplicitConsentGranted(bool granted)
 {
-    m_explicitConsentCheck->setChecked(granted);
+    m_consent->setChecked(granted);
 }
 
-void ExternalProviderConsentDialog::handleModeChanged()
+void ExternalProviderConsentDialog::syncControls()
 {
-    const bool isExternal = m_externalRadio->isChecked();
-    m_externalConfigGroup->setEnabled(isExternal);
-    m_privacyGroup->setEnabled(isExternal);
-    updateConsentGate();
-}
-
-void ExternalProviderConsentDialog::handleProviderPresetChanged(int index)
-{
-    const QString defaultUrl = m_providerCombo->itemData(index).toString();
-    if (!defaultUrl.isEmpty()) {
-        m_endpointEdit->setText(defaultUrl);
+    m_consent->setEnabled(m_connected->isChecked());
+    m_metadata->setEnabled(m_connected->isChecked());
+    m_transcript->setEnabled(m_connected->isChecked() && m_metadata->isChecked());
+    m_refresh->setEnabled(!m_busy && bool(m_startPython));
+    m_save->setEnabled(m_loaded && !m_busy && canAcceptConfiguration());
+    const QJsonObject privacy = m_status.value(QStringLiteral("privacy")).toObject();
+    const bool testingAllowed =
+        privacy.value(QStringLiteral("mode")).toString() == QStringLiteral("connected_subscriptions") && privacy.value(QStringLiteral("consent")).toBool();
+    const auto providers = m_status.value(QStringLiteral("providers")).toObject();
+    for (int i = 0; i < m_priority.size(); ++i) {
+        const QString &id = m_priority.at(i);
+        const auto &row = m_rows[id];
+        const auto state = providers.value(id).toObject();
+        const bool ready = m_loaded && !m_busy;
+        const bool installed = state.value(QStringLiteral("installed")).toBool();
+        const bool authorised = state.value(QStringLiteral("authorised")).toBool();
+        const bool account = state.value(QStringLiteral("auth")).toString() == QStringLiteral("account");
+        row.connect->setEnabled(ready && installed && (!authorised || !account));
+        row.check->setEnabled(ready && installed);
+        row.test->setEnabled(ready && installed && authorised && testingAllowed && state.value(QStringLiteral("test_supported")).toBool());
+        row.test->setToolTip(tr("Requires saved Connected Subscriptions consent and uses one reasoning call if eligible."));
+        row.disconnect->setEnabled(ready && authorised);
+        row.install->setVisible(!installed);
+        row.install->setEnabled(ready);
+        row.up->setEnabled(ready && i > 0);
+        row.down->setEnabled(ready && i + 1 < m_priority.size());
     }
 }
 
-void ExternalProviderConsentDialog::updateConsentGate()
+void ExternalProviderConsentDialog::run(const QStringList &args, bool reloadSettings, bool closeOnSuccess)
 {
-    const QString err = validationError();
-    const bool ok = err.isEmpty();
-
-    if (m_localOnlyRadio->isChecked()) {
-        m_statusLabel->setText(tr("✓ Local Only mode active — 100% offline, free, and private."));
-        setTone(m_statusLabel, "success");
-    } else if (ok) {
-        m_statusLabel->setText(tr("✓ Explicit consent recorded — external requests permitted for selected scopes only."));
-        setTone(m_statusLabel, "warning");
-    } else {
-        m_statusLabel->setText(tr("⚠ External transmission blocked: %1").arg(err));
-        setTone(m_statusLabel, "danger");
-    }
-
-    m_saveButton->setEnabled(ok);
-}
-
-void ExternalProviderConsentDialog::handleSaveClicked()
-{
-    if (!canAcceptConfiguration()) {
+    if (!m_startPython || m_busy) {
+        syncControls();
         return;
     }
-    const ExternalProviderSettings s = currentSettings();
-    saveSettings(s, m_settingsOrg, m_settingsApp);
-    Q_EMIT settingsSaved(s);
-    accept();
+    auto *process = m_startPython(QStringList{QStringLiteral("-m"), QStringLiteral("bangonpro.ai_engine.mcp"), QStringLiteral("providers")} + args);
+    if (!process) {
+        m_feedback->setText(tr("The bundled reasoning runtime could not be found."));
+        return;
+    }
+    m_busy = true;
+    m_feedback->setText(tr("Checking subscription settings…"));
+    syncControls();
+    connect(process, &QProcess::errorOccurred, this, [this, process](QProcess::ProcessError error) {
+        if (error == QProcess::FailedToStart) {
+            process->deleteLater();
+            m_busy = false;
+            m_feedback->setText(tr("The bundled reasoning runtime could not start."));
+            syncControls();
+        }
+    });
+    connect(process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
+            [this, process, reloadSettings, closeOnSuccess](int code, QProcess::ExitStatus status) {
+                const auto result = QJsonDocument::fromJson(process->readAllStandardOutput()).object();
+                process->deleteLater();
+                m_busy = false;
+                if (status != QProcess::NormalExit || code != 0 || !result.contains(QStringLiteral("providers"))) {
+                    m_feedback->setText(
+                        result.value(QStringLiteral("error")).toString(tr("The reasoning runtime could not read or save the subscription settings.")));
+                    syncControls();
+                    return;
+                }
+                showStatus(result, reloadSettings);
+                if (closeOnSuccess) {
+                    QSettings legacy(m_settingsOrg, m_settingsApp);
+                    for (const QString &key : {QStringLiteral("provider_name"), QStringLiteral("endpoint_url"), QStringLiteral("model_name")}) {
+                        legacy.remove(key);
+                    }
+                    const bool connected = currentSettings().isExternalTransmissionAllowed();
+                    Q_EMIT settingsSaved(connected);
+                    accept();
+                }
+            });
+}
+
+void ExternalProviderConsentDialog::showStatus(const QJsonObject &status, bool reloadSettings)
+{
+    m_loaded = true;
+    m_status = status;
+    const auto privacy = status.value(QStringLiteral("privacy")).toObject();
+    const auto budget = status.value(QStringLiteral("budget")).toObject();
+    if (reloadSettings) {
+        if (privacy.isEmpty()) {
+            // Legacy consent named an API endpoint. Retain the data preferences and ask for consent to the new flow.
+            const QSettings legacy(m_settingsOrg, m_settingsApp);
+            m_metadata->setChecked(legacy.value(QStringLiteral("send_project_metadata"), true).toBool());
+            m_transcript->setChecked(legacy.value(QStringLiteral("send_transcript_text"), true).toBool());
+        } else {
+            m_metadata->setChecked(privacy.value(QStringLiteral("metadata")).toBool());
+            m_transcript->setChecked(privacy.value(QStringLiteral("transcript")).toBool());
+            setExplicitConsentGranted(privacy.value(QStringLiteral("consent")).toBool());
+            setBackendMode(privacy.value(QStringLiteral("mode")).toString() == QStringLiteral("connected_subscriptions") ? AiBackendMode::ExternalProvider
+                                                                                                                         : AiBackendMode::LocalOnly);
+        }
+        m_priority.clear();
+        for (const QJsonValue &id : status.value(QStringLiteral("priority")).toArray()) {
+            m_priority.append(id.toString());
+        }
+        for (const auto &id : m_priority) {
+            m_providers->removeWidget(m_rows[id].widget);
+            m_providers->addWidget(m_rows[id].widget);
+        }
+        m_failover->setChecked(status.value(QStringLiteral("auto_failover")).toBool());
+        m_taskLimit->setValue(budget.value(QStringLiteral("max_calls_per_task")).toInt(3));
+        m_dayLimit->setValue(budget.value(QStringLiteral("max_calls_per_day")).toInt());
+    }
+
+    const auto providers = status.value(QStringLiteral("providers")).toObject();
+    QStringList available;
+    QStringList unavailable;
+    for (const auto &id : m_priority) {
+        const auto provider = providers.value(id).toObject();
+        const auto auth = provider.value(QStringLiteral("auth")).toString();
+        const QString authText = auth == QStringLiteral("account")      ? tr("Account signed in")
+                                 : auth == QStringLiteral("signed_out") ? tr("Signed out")
+                                 : auth == QStringLiteral("other")      ? tr("Alternate sign-in detected")
+                                                                        : tr("Sign-in unverified");
+        auto &names = provider.value(QStringLiteral("available")).toBool() ? available : unavailable;
+        names << provider.value(QStringLiteral("title")).toString();
+        QStringList lines{
+            QStringList{provider.value(QStringLiteral("installed")).toBool() ? tr("Installed") : tr("Missing"), authText,
+                        provider.value(QStringLiteral("authorised")).toBool() ? tr("Authorised") : tr("Unauthorised")}
+                .join(QStringLiteral(" · ")),
+            provider.value(QStringLiteral("state")).toString(),
+            tr("Subscription access: %1").arg(provider.value(QStringLiteral("subscription")).toString()),
+        };
+        const auto tested = displayTime(provider.value(QStringLiteral("last_test")));
+        lines << tr("Last successful test: %1").arg(tested.isEmpty() ? tr("None") : tested);
+        const auto cooldown = displayTime(provider.value(QStringLiteral("cooldown_until")));
+        const auto reset = displayTime(provider.value(QStringLiteral("reported_reset")));
+        if (!cooldown.isEmpty()) {
+            lines << tr("Cooldown until %1").arg(cooldown);
+        }
+        if (!reset.isEmpty()) {
+            lines << tr("Reported reset: %1").arg(reset);
+        }
+        m_rows[id].status->setText(lines.join(QStringLiteral("\n")));
+    }
+    const auto title = [&providers, this](const QString &provider) {
+        return providers.value(provider).toObject().value(QStringLiteral("title")).toString(tr("None"));
+    };
+    const auto events = status.value(QStringLiteral("failover_events")).toArray();
+    QString lastSwitch = tr("None");
+    for (qsizetype i = events.size(); i > 0; --i) {
+        const auto entry = events.at(i - 1).toObject();
+        if (entry.value(QStringLiteral("to")).isString()) {
+            lastSwitch = tr("%1 → %2 · %3")
+                             .arg(title(entry.value(QStringLiteral("from")).toString()), title(entry.value(QStringLiteral("to")).toString()),
+                                  displayTime(entry.value(QStringLiteral("at"))));
+            break;
+        }
+    }
+    m_routing->setText(tr("Active provider: %1\nAvailable: %2\nLimited or unavailable: %3\nLast failover: %4\nReasoning calls today: %5")
+                           .arg(title(status.value(QStringLiteral("active")).toString()),
+                                available.isEmpty() ? tr("None") : available.join(QStringLiteral(", ")),
+                                unavailable.isEmpty() ? tr("None") : unavailable.join(QStringLiteral(", ")), lastSwitch,
+                                QString::number(budget.value(QStringLiteral("used_today")).toInt())));
+    const QJsonArray tests = status.value(QStringLiteral("self_test")).toArray();
+    if (!tests.isEmpty()) {
+        const auto test = tests.first().toObject();
+        m_feedback->setText(test.value(QStringLiteral("ok")).toBool() ? tr("Connection test passed.") : test.value(QStringLiteral("error")).toString());
+    } else {
+        m_feedback->setText(status.value(QStringLiteral("message")).toString());
+    }
+    syncControls();
+}
+
+void ExternalProviderConsentDialog::moveProvider(const QString &id, int delta)
+{
+    const int index = m_priority.indexOf(id);
+    const int destination = index + delta;
+    if (index < 0 || destination < 0 || destination >= m_priority.size()) {
+        return;
+    }
+    m_priority.move(index, destination);
+    m_providers->removeWidget(m_rows[id].widget);
+    m_providers->insertWidget(destination, m_rows[id].widget);
+    syncControls();
+}
+
+void ExternalProviderConsentDialog::save()
+{
+    const auto settings = currentSettings();
+    const bool connected = settings.isExternalTransmissionAllowed();
+    const QJsonObject policy{{QStringLiteral("mode"), connected ? QStringLiteral("connected_subscriptions") : QStringLiteral("local_only")},
+                             {QStringLiteral("consent"), connected},
+                             {QStringLiteral("metadata"), settings.sendProjectMetadata},
+                             {QStringLiteral("transcript"), settings.sendTranscriptText}};
+    const int dayLimit = m_dayLimit->value();
+    const QJsonObject config{{QStringLiteral("privacy"), policy},
+                             {QStringLiteral("auto_failover"), m_failover->isChecked()},
+                             {QStringLiteral("priority"), QJsonArray::fromStringList(m_priority)},
+                             {QStringLiteral("max_calls_per_task"), m_taskLimit->value()},
+                             {QStringLiteral("max_calls_per_day"), dayLimit > 0 ? QJsonValue(dayLimit) : QJsonValue(QJsonValue::Null)}};
+    run({QStringLiteral("--configure"), QString::fromUtf8(QJsonDocument(config).toJson(QJsonDocument::Compact))}, false, true);
 }
 
 } // namespace BangOnPro

@@ -340,15 +340,16 @@ def shared_reasoning_interpreter() -> LlmInterpreterFn | None:
         return None
 
     def interpret(instruction: str, ctx_summary: dict[str, Any]) -> dict[str, Any]:
-        prompt = (
-            "You interpret one video-editing instruction for Bang On Pro's AI Assistant. Reply with ONE JSON object and nothing else. "
-            "Allowed keys (omit any you do not need): booleans sync_cameras, transcribe, remove_setup_delay, remove_silence, build_rough_cut, "
-            "multicam_switch, restore_audio, add_captions, add_lower_thirds, run_qc, export_video, needs_clarification; strings "
-            "clarification_question, profile_hint; lists of strings target_clips, target_tracks, target_speakers; time_range_sec [start, end] "
-            "in seconds; numbers loudness_target_lufs, silence_threshold_db, min_pause_sec. If the instruction cannot be expressed with these, "
-            'set needs_clarification true and ask one short question.\n'
-            f"Project: {json.dumps(ctx_summary, default=str)[:1500]}\nInstruction: {instruction[:600]}"
-        )
+        def prompt(policy: dict[str, Any]) -> str:
+            return (
+                "You interpret one video-editing instruction for Bang On Pro's AI Assistant. Reply with ONE JSON object and nothing else. "
+                "Allowed keys (omit any you do not need): booleans sync_cameras, transcribe, remove_setup_delay, remove_silence, build_rough_cut, "
+                "multicam_switch, restore_audio, add_captions, add_lower_thirds, run_qc, export_video, needs_clarification; strings "
+                "clarification_question, profile_hint; lists of strings target_clips, target_tracks, target_speakers; time_range_sec [start, end] "
+                "in seconds; numbers loudness_target_lufs, silence_threshold_db, min_pause_sec. If the instruction cannot be expressed with these, "
+                'set needs_clarification true and ask one short question.\n'
+                f"Project: {json.dumps({k: v for k, v in ctx_summary.items() if k != 'source_path'} if policy.get('metadata') is True else {}, default=str)[:1500]}\nInstruction: {instruction}"
+            )
         out = router.plan(prompt, purpose="interpret", agent="executive")
         return {k: v for k, v in out.items() if k in _ALLOWED_LLM_INTENT_KEYS}
 
@@ -431,8 +432,7 @@ def interpret_instruction(
         call_llm = llm_interpreter is not None
     elif llm_interpreter is not None and base_intent.needs_clarification:
         # The shared reasoning router (the editor's authorised CLIs, one budget, automatic failover) is
-        # asked only when the local rules could not interpret the instruction. Authorising a provider
-        # (``python -m bangonpro.ai_engine.mcp authorise``) is the editor's consent for this call.
+        # asked only when the local rules could not interpret the instruction. It enforces saved privacy consent.
         provider_id = str(getattr(llm_interpreter, "provider_id", "shared_reasoning_router"))
         call_llm = True
         shared_router = True

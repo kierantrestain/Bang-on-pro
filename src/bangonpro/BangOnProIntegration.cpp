@@ -412,6 +412,7 @@ void BangOnProIntegration::setupAgentControlCentre()
     connect(m_agentCentre, &AgentControlCentre::rerunAgentRequested, this, [this](const QString &jobDir, const QString &agentId) {
         runDepartmentCommand({QStringLiteral("rerun"), jobDir, agentId}, jobDir, QStringLiteral("Rerunning %1").arg(agentId));
     });
+    connect(m_agentCentre, &AgentControlCentre::providerSettingsRequested, this, &BangOnProIntegration::openExternalProviderSettings);
     connect(m_agentCentre, &AgentControlCentre::reviseDraftRequested, this, [this](const QString &jobDir, const QString &instruction, bool selectionOnly) {
         QStringList args{QStringLiteral("revise"), jobDir, instruction};
         auto *mw = pCore ? pCore->window() : nullptr;
@@ -1117,7 +1118,7 @@ void BangOnProIntegration::setupMenu()
     QAction *profileEditorAct = menu->addAction(QStringLiteral("Custom Show Profile Editor…"));
     connect(profileEditorAct, &QAction::triggered, this, &BangOnProIntegration::openShowProfileEditor);
 
-    QAction *providerConsentAct = menu->addAction(QStringLiteral("AI Providers & Privacy Consent…"));
+    QAction *providerConsentAct = menu->addAction(QStringLiteral("AI Providers & Subscriptions…"));
     connect(providerConsentAct, &QAction::triggered, this, &BangOnProIntegration::openExternalProviderSettings);
 
     QAction *modelManagerAct = menu->addAction(QStringLiteral("Manage Local AI Models (Whisper / SAM)…"));
@@ -1196,13 +1197,11 @@ void BangOnProIntegration::openShowProfileEditor()
 
 void BangOnProIntegration::openExternalProviderSettings()
 {
-    ExternalProviderConsentDialog dlg(m_mainWindow);
-    connect(&dlg, &ExternalProviderConsentDialog::settingsSaved, this, [this](const ExternalProviderSettings &settings) {
+    ExternalProviderConsentDialog dlg(m_mainWindow, [this](const QStringList &args) { return startPython(args); });
+    connect(&dlg, &ExternalProviderConsentDialog::settingsSaved, this, [this](bool connected) {
         if (m_aiWidget) {
-            const QString modeText = settings.isExternalTransmissionAllowed()
-                                         ? QStringLiteral("External AI (%1, consent granted)").arg(settings.providerName)
-                                         : QStringLiteral("Local Only (Free & Offline)");
-            m_aiWidget->appendActivityLog(QStringLiteral("privacy"), QStringLiteral("AI provider configuration updated: %1").arg(modeText));
+            m_aiWidget->appendActivityLog(QStringLiteral("privacy"),
+                                          connected ? tr("Connected Subscriptions enabled") : tr("Local Only enabled"));
         }
     });
     dlg.exec();
@@ -1440,14 +1439,6 @@ void BangOnProIntegration::startProposal(const QString &instruction, const QStri
          << QStringLiteral("--output-dir") << m_aiOutputDir << QStringLiteral("--json");
     if (!m_lastProfile.isEmpty()) {
         args << QStringLiteral("--profile") << m_lastProfile;
-    }
-    // The AI Assistant's privacy setting governs whether an instruction the local rules cannot interpret may
-    // go to the shared reasoning router (the providers authorised for Bang On Pro), and with what context.
-    const ExternalProviderSettings privacy = ExternalProviderConsentDialog::loadSettings();
-    if (!privacy.isExternalTransmissionAllowed()) {
-        args << QStringLiteral("--local-only");
-    } else if (!privacy.sendProjectMetadata) {
-        args << QStringLiteral("--no-provider-context");
     }
     QProcess *proc = startPython(args);
     if (!proc) {

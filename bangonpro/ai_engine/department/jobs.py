@@ -76,7 +76,7 @@ from bangonpro.ai_engine.department.registry import (
 )
 from bangonpro.ai_engine.orchestrator import CancellationToken, PipelineCancelledError
 from bangonpro.ai_engine.pipeline import map_inputs_to_profile_cameras
-from bangonpro.ai_engine.planner import ingest_project_context, interpret_instruction
+from bangonpro.ai_engine.planner import ingest_project_context, interpret_instruction, shared_reasoning_interpreter
 from bangonpro.ai_engine.project_builder import (
     compile_command_batches,
     emit_kdenlive_xml,
@@ -174,6 +174,7 @@ class ProductionJob:
             export_override=True if opts.export_video else None,
             allow_default_empty=mode in AUTONOMOUS_MODES,
             provider_config=opts.provider_config,
+            llm_interpreter=shared_reasoning_interpreter() if opts.provider_config is None else None,
         )
         profile = load_show_profile(profile_ref or interp.intent.profile_hint or context.profile_id or "podcast_multicam", custom_dirs=user_profile_dirs())
         cams: dict[str, str] = {}
@@ -865,9 +866,11 @@ class ProductionJob:
         revs = self.doc.setdefault("revisions", [])
         rec: dict[str, Any] = {"revision": len(revs) + 1, "ts_utc": _utc(), "instruction": instruction, "plan": plan, "status": None}
         if plan["not_understood"] or plan["needs_selection"]:
+            if sel is not None:
+                rec["selection_limited"] = True
             rec["status"] = "needs_selection" if plan["needs_selection"] else "not_understood"
             rec["message"] = ("Select the section on the timeline, then send the revision again" if plan["needs_selection"]
-                              else "No editing change recognised. Try e.g. 'tighten the opening', 'more reaction shots', 'preserve the suspense before reveals', 'five vertical clips'")
+                              else "The full instruction could not be interpreted. Try e.g. 'tighten the opening', 'more reaction shots', 'preserve the suspense before reveals', 'five vertical clips'")
             self._event("executive", "revision_" + rec["status"], {"instruction": instruction})
             self.doc["last_revision"] = rec
             self._save(force=True)

@@ -63,16 +63,19 @@ def test_unavailable_or_invalid_router_answer_keeps_the_local_interpretation(ans
 def test_ai_assistant_uses_the_shared_router_configuration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("BANGONPRO_CONFIG_DIR", str(tmp_path / "cfg"))
     assert shared_reasoning_interpreter() is None  # nothing authorised: the rules stay the only interpreter
+    reasoning.configure({"privacy": {"mode": "connected_subscriptions", "consent": True, "metadata": False}})
     reasoning.authorise("claude")
-    bindir = tmp_path / "bin"
-    bindir.mkdir()
-    fake = bindir / "claude"
-    fake.write_text("#!/bin/sh\necho '{\"result\": \"{\\\"add_captions\\\": true, \\\"unexpected\\\": 1}\", \"is_error\": false}'\n", encoding="utf-8")
-    fake.chmod(0o755)
-    monkeypatch.setenv("PATH", f"{bindir}:{Path('/usr/bin')}:{Path('/bin')}")
+    monkeypatch.setattr(reasoning.subscriptions, "BLOCKED", {})
+    monkeypatch.setattr(reasoning.subscriptions, "client_path", lambda p: "/usr/bin/true")
+
+    def call(self: Any, prompt: str, **_: Any) -> Any:
+        assert "PRIVATE PROJECT" not in prompt
+        return '{"add_captions": true, "unexpected": 1}', {}
+
+    monkeypatch.setattr(reasoning.ClaudeAdapter, "call", call)
     interp = shared_reasoning_interpreter()
     assert interp is not None
-    assert interp("Put words on screen", {}) == {"add_captions": True}  # unknown keys never reach the planner
+    assert interp("Put words on screen", {"title": "PRIVATE PROJECT"}) == {"add_captions": True}  # unknown keys never reach the planner
     rows = [json.loads(x) for x in reasoning.ledger_path().read_text(encoding="utf-8").splitlines()]
     assert rows[-1]["provider"] == "claude" and rows[-1]["purpose"] == "interpret" and rows[-1]["ok"] is True  # one shared ledger/budget
 
@@ -101,7 +104,7 @@ def test_live_socket_matches_qt_runtime_location(tmp_path: Path, monkeypatch: py
     monkeypatch.setattr(os, "uname", lambda: os.uname_result(("Darwin",) + tuple(real)[1:]))
     # macOS: QStandardPaths::RuntimeLocation is ~/Library/Application Support (no app sub-folder)
     assert live.default_socket_path() == tmp_path / "Library" / "Application Support" / "bangonpro-timeline-v1.sock"
-    monkeypatch.setattr(os, "uname", lambda: real)
+    monkeypatch.setattr(os, "uname", lambda: os.uname_result(("Linux",) + tuple(real)[1:]))
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run"))
     assert live.default_socket_path() == tmp_path / "run" / "bangonpro-timeline-v1.sock"
     monkeypatch.delenv("XDG_RUNTIME_DIR")
@@ -208,13 +211,38 @@ def test_ai_assistant_command_honours_its_privacy_setting(tmp_path: Path) -> Non
                        "media_bin": [], "tracks": [{"track_id": "V1", "sequence_id": "s", "name": "V1", "kind": "video", "index": 0}],
                        "clips": [], "captions": [], "markers": []}}
     (tmp_path / "state.json").write_text(json.dumps(state), encoding="utf-8")
-    bindir = tmp_path / "bin"
-    bindir.mkdir()
-    fake = bindir / "claude"
-    fake.write_text("#!/bin/sh\necho '{\"result\": \"{\\\"add_captions\\\": true}\", \"is_error\": false}'\n", encoding="utf-8")
+    bindir = tmp_path / ".local/bin"
+    bindir.mkdir(parents=True)
+    fake = bindir / "codex"
+    fake.write_text("""
+import json, pathlib, sys
+if sys.argv[1] == "app-server":
+    for line in sys.stdin:
+        request = json.loads(line)
+        if "id" not in request:
+            continue
+        result = {
+            "initialize": {},
+            "account/read": {"account": {"type": "chatgpt", "planType": "plus"}},
+            "account/rateLimits/read": {"ordinaryUsageAllowed": True,
+                "rateLimits": {"credits": {"hasCredits": False, "unlimited": False, "balance": "0"}}}
+        }[request["method"]]
+        print(json.dumps({"id": request["id"], "result": result}), flush=True)
+elif sys.argv[1] == "exec":
+    prompt = sys.stdin.read()
+    assert "Project: {}" in prompt
+    pathlib.Path(sys.argv[sys.argv.index("--output-last-message") + 1]).write_text('{"add_captions": true}')
+""", encoding="utf-8")
+    fake.replace(bindir / "codex.py")
+    import shlex
+
+    fake.write_text("#!/bin/sh\nexec " + shlex.quote(sys.executable) + " " + shlex.quote(str(bindir / "codex.py")) + ' "$@"\n', encoding="utf-8")
     fake.chmod(0o755)
-    env = dict(os.environ, BANGONPRO_CONFIG_DIR=str(tmp_path / "cfg"), PATH=f"{bindir}:{os.environ.get('PATH', '')}")
-    subprocess.run([sys.executable, "-m", "bangonpro.ai_engine.mcp", "authorise", "--client", "claude"], cwd=str(repo), env=env, check=True, capture_output=True)
+    env = dict(os.environ, HOME=str(tmp_path), BANGONPRO_CONFIG_DIR=str(tmp_path / "cfg"), PATH="/usr/bin:/bin")
+    def settings(*args: str) -> None:
+        subprocess.run([sys.executable, "-m", "bangonpro.ai_engine.mcp", *args], cwd=str(repo), env=env, check=True, capture_output=True)
+
+    settings("authorise", "--client", "codex")
     ledger = tmp_path / "cfg" / "reasoning_ledger.jsonl"
 
     def run(*extra: str) -> dict[str, Any]:
@@ -224,9 +252,10 @@ def test_ai_assistant_command_honours_its_privacy_setting(tmp_path: Path) -> Non
         assert proc.returncode == 0, proc.stderr[-1500:]
         return json.loads(proc.stdout)
 
-    local = run("--local-only")
+    local = run()
     assert local["needs_clarification"] is True and not ledger.exists()
+    settings("providers", "--configure", json.dumps({"privacy": {"mode": "connected_subscriptions", "consent": True}}))
     shared = run()
     assert shared["needs_clarification"] is False and "add_captions" in shared["parsed_actions"]
     rows = [json.loads(x) for x in ledger.read_text(encoding="utf-8").splitlines()]
-    assert [(r["provider"], r["purpose"], r["ok"]) for r in rows] == [("claude", "interpret", True)]
+    assert [(r["provider"], r["purpose"], r["ok"]) for r in rows] == [("codex", "interpret", True)]

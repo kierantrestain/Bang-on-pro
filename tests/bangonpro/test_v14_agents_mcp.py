@@ -443,6 +443,7 @@ def test_reasoning_authorisation_and_client_configuration(tmp_path: Path, monkey
     monkeypatch.setenv("HOME", str(tmp_path))
     with pytest.raises(reasoning.ReasonerError):
         reasoning.CliReasoner("claude")  # not authorised
+    reasoning.configure({"privacy": {"mode": "connected_subscriptions", "consent": True}})
     reasoning.authorise("claude", max_calls_per_task=2)
     assert reasoning.load_config()["authorised"] is True
     reasoning.revoke()
@@ -454,7 +455,7 @@ def test_reasoning_authorisation_and_client_configuration(tmp_path: Path, monkey
     cfg_file.write_text('model = "x"\n\n[mcp_servers.other]\ncommand = "o"\n\n[mcp_servers.bangonpro]\ncommand = "old"\n')
     apply_config(client_config("codex", str(tmp_path / "job"), []))
     text = cfg_file.read_text()
-    assert text.count("[mcp_servers.bangonpro]") == 1 and '[mcp_servers.other]\ncommand = "o"' in text and 'model = "x"' in text and "old" not in text
+    assert text.count("[mcp_servers.bangonpro]") == 1 and '[mcp_servers.other]\ncommand = "o"' in text and 'model = "x"' in text and 'command = "old"' not in text
     assert reasoning.extract_json('Sure:\n```json\n{"steps": []}\n```') == {"steps": []}
 
 

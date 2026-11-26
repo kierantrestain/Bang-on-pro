@@ -6,28 +6,12 @@ Two ways in:
    Bang On Pro MCP server and does the reasoning itself while it calls the tools. That client owns its
    own session and limits; nothing here is involved and Bang On Pro never switches it.
 2. **App-driven**: Bang On Pro asks an installed, already signed-in CLI for a short structured plan
-   through its documented headless mode. Up to four providers can be authorised at the same time:
+   through its documented headless mode. The subscription guard verifies the official account
+   and included usage before sending the plan. Providers with unverified billing stay unavailable.
 
-   ============  ==================================================================
-   claude        ``claude -p PROMPT --output-format json --max-turns 1``
-   codex         ``codex exec --skip-git-repo-check --sandbox read-only --output-last-message F PROMPT``
-   grok          ``grok --no-auto-update -p PROMPT --output-format json --max-turns 1`` (tools denied)
-   agy           ``agy -p PROMPT --output-format json``
-   ============  ==================================================================
-
-   One provider is used at a time, in the editor's priority order. :class:`ProviderRouter` classifies
-   every failure (usage exhausted, rate limited, temporarily unavailable, authentication, not
-   entitled, incompatible CLI, invalid request, unusable output), applies cooldowns that respect the
-   reported reset time, and fails over only for availability problems. The caller checkpoints before
-   a switch; the next provider receives the same compact, state-derived prompt. The preferred
-   provider is tried again only at a task boundary (:meth:`ProviderRouter.begin_task`), never by
-   polling. One :class:`ReasoningBudget` is shared by every provider, agent and purpose (planning,
-   reflection, optimisation) and counts failed attempts too.
-
-No API keys are read or stored and no credentials are touched. API-key variables are removed from the
-CLI's environment unless the editor explicitly allowed API billing for that provider, so a
-subscription login is never silently replaced by paid API usage. Nothing runs unless ``authorise``
-was called for that provider. Without authorisation the department works offline as before.
+The router shares consent, authorisation, failover, cooldowns and usage across both application
+entry points. Every external attempt reserves a ledger entry before execution. Account login and
+project-specific MCP connections remain independent of app-driven reasoning.
 
 SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
 """
@@ -38,15 +22,17 @@ import contextlib
 import json
 import os
 import re
-import shutil
 import subprocess
 import tempfile
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
+
+from . import subscriptions
 
 PROVIDERS = ("claude", "codex", "grok", "agy")
 CLIENTS = PROVIDERS  # V1.4 name
@@ -59,6 +45,7 @@ PROVIDER_INFO: dict[str, dict[str, Any]] = {
 # Failure kinds. Only availability problems fail over; the others need the editor or a better request.
 FAILOVER_KINDS = frozenset({"usage_exhausted", "rate_limited", "unavailable", "auth", "not_entitled", "incompatible"})
 NEEDS_EDITOR = frozenset({"auth", "not_entitled", "incompatible"})  # parked until re-authorised, never retried on a timer
+DEFAULT_PRIVACY = {"mode": "local_only", "consent": False, "metadata": True, "transcript": True}
 DEFAULT_COOLDOWN = {"usage_exhausted": 3600.0, "rate_limited": 60.0, "unavailable": 30.0}
 MAX_COOLDOWN = 7 * 86400.0
 
@@ -86,9 +73,68 @@ def _now_iso(ts: float | None = None) -> str:
 
 def _write_json(p: Path, doc: dict[str, Any]) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(p.suffix + ".tmp")
-    tmp.write_text(json.dumps(doc, indent=1), encoding="utf-8")
-    os.replace(tmp, p)
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=p.parent, delete=False) as tmp:
+        name = tmp.name
+        try:
+            json.dump(doc, tmp, indent=1)
+            tmp.close()
+            os.replace(name, p)
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(name)
+
+
+@contextlib.contextmanager
+def _storage_lock(name: str = "settings"):
+    config_dir().mkdir(parents=True, exist_ok=True)
+    with (config_dir() / f".{name}.lock").open("a") as lock:
+        try:
+            import fcntl
+        except ImportError:
+            import msvcrt
+
+            lock.seek(0)
+            msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+def privacy(cfg: dict[str, Any]) -> dict[str, Any]:
+    saved = cfg.get("privacy")
+    return {**DEFAULT_PRIVACY, **saved} if isinstance(saved, dict) else DEFAULT_PRIVACY.copy()
+
+
+def enabled(cfg: dict[str, Any]) -> bool:
+    policy = privacy(cfg)
+    return policy["mode"] == "connected_subscriptions" and policy["consent"] is True
+
+
+def configure(settings: dict[str, Any]) -> dict[str, Any]:
+    """Update only routing and privacy settings in the router's existing authorisation file."""
+    with _storage_lock():
+        cfg = load_config()
+        if "priority" in settings:
+            set_priority(settings["priority"], cfg=cfg, save=False)
+        for key in ("max_calls_per_task", "max_calls_per_day"):
+            if key in settings:
+                value = settings[key]
+                if (value is not None or key == "max_calls_per_task") and (type(value) is not int or value < 1):
+                    raise ValueError("Reasoning budgets must be positive whole numbers.")
+                cfg[key] = value
+        if "auto_failover" in settings:
+            cfg["auto_failover"] = settings["auto_failover"] is True
+        if "privacy" in settings:
+            policy = settings["privacy"]
+            if not isinstance(policy, dict):
+                raise ValueError("Privacy settings must be an object.")
+            cfg["privacy"] = {
+                "mode": "connected_subscriptions" if enabled(settings) else "local_only",
+                "consent": enabled(settings),
+                "metadata": policy.get("metadata") is True,
+                "transcript": policy.get("transcript") is True,
+            }
+        return _save_config(cfg)
 
 
 def load_config() -> dict[str, Any]:
@@ -102,19 +148,21 @@ def load_config() -> dict[str, Any]:
     if "providers" not in cfg and cfg.get("client") in PROVIDERS:  # V1.4
         cfg = {"version": 2, "providers": {cfg["client"]: {"authorised": bool(cfg.get("authorised")), "authorised_at": cfg.get("authorised_at"), "model": cfg.get("model")}},
                "priority": [cfg["client"]], "max_calls_per_task": int(cfg.get("max_calls_per_task", 3))}
-    provs = {k: v for k, v in (cfg.get("providers") or {}).items() if k in PROVIDERS and isinstance(v, dict)}
+    entries = cfg.get("providers")
+    provs = {k: v for k, v in entries.items() if k in PROVIDERS and isinstance(v, dict)} if isinstance(entries, dict) else {}
     cfg["providers"] = provs
-    order = [p for p in cfg.get("priority") or [] if p in provs]
-    cfg["priority"] = order + [p for p in PROVIDERS if p in provs and p not in order]
-    auth = [p for p in cfg["priority"] if provs[p].get("authorised")]
+    saved_priority = cfg.get("priority")
+    order = list(dict.fromkeys(p for p in saved_priority if p in PROVIDERS)) if isinstance(saved_priority, list) else []
+    cfg["priority"] = order + [p for p in PROVIDERS if p not in order]
+    auth = [p for p in cfg["priority"] if provs.get(p, {}).get("authorised")]
     cfg["authorised"] = bool(auth)
     cfg["client"] = auth[0] if auth else None
     return cfg
 
 
 def _save_config(cfg: dict[str, Any]) -> dict[str, Any]:
-    doc = {k: cfg[k] for k in ("version", "providers", "priority", "max_calls_per_task", "max_calls_per_day") if k in cfg}
-    doc["version"] = 2
+    doc = {k: cfg[k] for k in ("version", "providers", "priority", "max_calls_per_task", "max_calls_per_day", "privacy", "auto_failover") if k in cfg}
+    doc["version"] = 3
     _write_json(config_path(), doc)
     return load_config()
 
@@ -124,45 +172,49 @@ def authorise(client: str, *, model: str | None = None, max_calls_per_task: int 
     """Allow Bang On Pro to ask ``client`` for plans. Other authorised providers stay authorised."""
     if client not in PROVIDERS:
         raise ValueError(f"client must be one of {PROVIDERS}")
-    cfg = load_config() or {"providers": {}, "priority": []}
-    entry = {"authorised": True, "authorised_at": _now_iso(), "allow_api_billing": bool(allow_api_billing)}
-    if model:
-        entry["model"] = model
-    cfg["providers"][client] = entry
-    if client not in cfg["priority"]:
-        cfg["priority"].append(client)
-    if priority:
-        set_priority(priority, cfg=cfg, save=False)
-    cfg["max_calls_per_task"] = int(max_calls_per_task if max_calls_per_task is not None else cfg.get("max_calls_per_task", 3))
-    if max_calls_per_day is not None:
-        cfg["max_calls_per_day"] = int(max_calls_per_day)
-    out = _save_config(cfg)
-    st = _load_state()
-    st.get("providers", {}).pop(client, None)  # a fresh authorisation clears 'needs login' and similar
-    _save_state(st)
+    if allow_api_billing:
+        raise ValueError("Bang On Pro only routes included subscription usage.")
+    with _storage_lock():
+        cfg = load_config() or {"providers": {}, "priority": list(PROVIDERS)}
+        entry = {"authorised": True, "authorised_at": _now_iso()}
+        if model:
+            entry["model"] = model
+        cfg["providers"][client] = entry
+        if priority:
+            set_priority(priority, cfg=cfg, save=False)
+        if max_calls_per_task is not None:
+            cfg["max_calls_per_task"] = max(1, int(max_calls_per_task))
+        if max_calls_per_day is not None:
+            cfg["max_calls_per_day"] = max(1, int(max_calls_per_day))
+        out = _save_config(cfg)
+        st = _load_state()
+        status = st.get("providers", {}).get(client, {})
+        if status.get("kind") in NEEDS_EDITOR:
+            status.pop("kind", None)
+        _save_state(st)
     return out
 
 
 def set_priority(order: list[str], *, cfg: dict[str, Any] | None = None, save: bool = True) -> dict[str, Any]:
+    if save:
+        return configure({"priority": order})
     bad = [p for p in order if p not in PROVIDERS]
     if bad:
         raise ValueError(f"unknown providers {bad}; use {PROVIDERS}")
     cfg = cfg if cfg is not None else load_config()
     rest = [p for p in cfg.get("priority") or [] if p not in order]
     cfg["priority"] = list(dict.fromkeys(order)) + rest
-    return _save_config(cfg) if save else cfg
+    return cfg
 
 
 def revoke(client: str | None = None) -> None:
     """Withdraw one provider's authorisation, or all of them."""
-    if client is None:
-        with contextlib.suppress(OSError):
-            config_path().unlink()
-        return
-    cfg = load_config()
-    if client in cfg.get("providers", {}):
-        cfg["providers"].pop(client)
-        cfg["priority"] = [p for p in cfg["priority"] if p != client]
+    with _storage_lock():
+        cfg = load_config() or {"providers": {}, "priority": list(PROVIDERS)}
+        providers = cfg["providers"]
+        for p in (PROVIDERS if client is None else (client,)):
+            if p in providers:
+                providers[p] = {"authorised": False, "revoked_at": _now_iso()}
         _save_config(cfg)
 
 
@@ -188,7 +240,7 @@ def _ledger_rows(since: float) -> list[dict[str, Any]]:
             for line in fh:
                 with contextlib.suppress(ValueError):
                     r = json.loads(line)
-                    if float(r.get("ts", 0)) >= since:
+                    if isinstance(r, dict) and isinstance(r.get("ts"), (int, float)) and r["ts"] >= since:
                         rows.append(r)
     except OSError:
         pass
@@ -233,7 +285,7 @@ class ReasoningBudget:
     max_calls_per_day: int | None = None
     used: int = 0
     attempts: list[dict[str, Any]] = field(default_factory=list)
-    _today: int | None = None
+
 
     @classmethod
     def from_config(cls, cfg: dict[str, Any] | None = None) -> ReasoningBudget:
@@ -241,10 +293,8 @@ class ReasoningBudget:
         return cls(max_calls=int(cfg.get("max_calls_per_task", 3)), max_calls_per_day=cfg.get("max_calls_per_day"))
 
     def used_today(self) -> int:
-        if self._today is None:
-            day0 = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
-            self._today = len(_ledger_rows(day0))
-        return self._today
+        day0 = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+        return len(_ledger_rows(day0))
 
     def remaining(self) -> int:
         left = self.max_calls - self.used
@@ -252,26 +302,46 @@ class ReasoningBudget:
             left = min(left, int(self.max_calls_per_day) - self.used_today())
         return max(0, left)
 
-    def charge(self, provider: str, purpose: str) -> None:
-        if self.used >= self.max_calls:
-            raise BudgetExhausted(f"Reasoning budget of {self.max_calls} calls for this task is used up")
-        if self.max_calls_per_day is not None and self.used_today() >= int(self.max_calls_per_day):
-            raise BudgetExhausted(f"Daily reasoning budget of {self.max_calls_per_day} calls is used up")
-        self.used += 1
-        if self._today is not None:
-            self._today += 1
+    def charge(self, row: dict[str, Any]) -> None:
+        # Reserve a durable attempt before requesting reasoning. Concurrent app processes use the same ledger.
+        with _storage_lock("ledger"):
+            budget_id = row.get("budget_id")
+            if budget_id:
+                self.used = sum(entry.get("budget_id") == budget_id for entry in _ledger_rows(0))
+            if self.used >= self.max_calls:
+                raise BudgetExhausted(f"Reasoning budget of {self.max_calls} calls for this task is used up")
+            if self.max_calls_per_day is not None and self.used_today() >= int(self.max_calls_per_day):
+                raise BudgetExhausted(f"Daily reasoning budget of {self.max_calls_per_day} calls is used up")
+            fd = os.open(ledger_path(), os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
+            with os.fdopen(fd, "a", encoding="utf-8") as ledger:
+                ledger.write(json.dumps(row | {"kind": "started"}) + "\n")
+                ledger.flush()
+                os.fsync(ledger.fileno())
+            self.used += 1
 
     def record(self, row: dict[str, Any]) -> None:
         self.attempts.append(row)
-        with contextlib.suppress(OSError):
-            ledger_path().parent.mkdir(parents=True, exist_ok=True)
-            with ledger_path().open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(row, separators=(",", ":"), default=str) + "\n")
+        with _storage_lock("ledger"):
+            path = ledger_path()
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as tmp:
+                try:
+                    with path.open(encoding="utf-8") as ledger:
+                        for line in ledger:
+                            try:
+                                matches = json.loads(line).get("attempt_id") == row["attempt_id"]
+                            except (ValueError, AttributeError):
+                                matches = False
+                            tmp.write(json.dumps(row, default=str) + "\n" if matches else line)
+                    tmp.close()
+                    os.replace(tmp.name, path)
+                finally:
+                    with contextlib.suppress(FileNotFoundError):
+                        os.unlink(tmp.name)
 
     def summary(self) -> dict[str, Any]:
-        cost = [a["cost_usd"] for a in self.attempts if isinstance(a.get("cost_usd"), (int, float))]
+        cost = [a["estimated_cost_usd"] for a in self.attempts if isinstance(a.get("estimated_cost_usd"), (int, float))]
         return {"calls": self.used, "max_calls": self.max_calls, "failed": sum(1 for a in self.attempts if not a.get("ok")),
-                "providers": sorted({a["provider"] for a in self.attempts}), "cost_usd": round(sum(cost), 4) if cost and len(cost) == len(self.attempts) else "unknown"}
+                "providers": sorted({a["provider"] for a in self.attempts}), "estimated_cost_usd": round(sum(cost), 4) if cost and len(cost) == len(self.attempts) else "unknown"}
 
 
 # ---------------------------------------------------------------------- failure classification
@@ -356,23 +426,17 @@ def extract_json(text: str) -> dict[str, Any]:
 
 # ---------------------------------------------------------------------- adapters
 def _clean_env(provider: str, allow_api_billing: bool) -> dict[str, str]:
-    env = os.environ.copy()
-    for p, info in PROVIDER_INFO.items():  # other providers' keys are never passed on; this one's only on explicit opt-in
-        if p != provider or not allow_api_billing:
-            for k in info["api_key_env"]:
-                env.pop(k, None)
-    env.setdefault("NO_COLOR", "1")
-    return env
+    return subscriptions.client_env(subscriptions.client_path(provider))
 
 
-def _run(argv: list[str], *, cwd: str, env: dict[str, str], timeout: float, cancel: threading.Event | None, use_pty: bool = False) -> tuple[int, str, str]:
+def _run(argv: list[str], *, cwd: str, env: dict[str, str], timeout: float, cancel: threading.Event | None, use_pty: bool = False, input_text: str | None = None) -> tuple[int, str, str]:
     """Run one headless call; stops on cancel or timeout (the process is killed, nothing is retried)."""
     master = slave = None
     if use_pty:  # Antigravity print mode may write nothing to a non-TTY stdout (upstream issue); give it a terminal
         import pty
 
         master, slave = pty.openpty()
-    proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=slave if use_pty else subprocess.PIPE, stderr=subprocess.PIPE, text=not use_pty)  # noqa: S603
+    proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL, stdout=slave if use_pty else subprocess.PIPE, stderr=subprocess.PIPE, text=not use_pty)  # noqa: S603
     out_chunks: list[bytes] = []
     if use_pty:
         os.close(slave)  # type: ignore[arg-type]
@@ -391,9 +455,10 @@ def _run(argv: list[str], *, cwd: str, env: dict[str, str], timeout: float, canc
     t_end = time.monotonic() + timeout
     while True:
         try:
-            out, err = proc.communicate(timeout=0.25)
+            out, err = proc.communicate(input=input_text, timeout=0.25)
             break
         except subprocess.TimeoutExpired:
+            input_text = None
             if (cancel is not None and cancel.is_set()) or time.monotonic() > t_end:
                 proc.kill()
                 proc.communicate()
@@ -444,12 +509,13 @@ class Adapter:
 
     def call(self, prompt: str, *, model: str | None, timeout: float, cancel: threading.Event | None, allow_api_billing: bool) -> tuple[str, dict[str, Any]]:
         with tempfile.TemporaryDirectory(prefix=f"bop_{self.name}_") as td:
-            rc, out, err = _run(self.argv(prompt, model, td), cwd=td, env=_clean_env(self.name, allow_api_billing), timeout=timeout, cancel=cancel)
+            argv = self.argv(prompt, model, td)
+            argv[0] = subscriptions.client_path(self.name) or argv[0]
+            rc, out, err = _run(argv, cwd=td, env=_clean_env(self.name, allow_api_billing), timeout=timeout, cancel=cancel)
             return self.parse(rc, out, err, td)
 
     def fail(self, text: str, rc: int | None) -> ProviderFailure:
-        f = classify_failure(self.name, text, returncode=rc)
-        return f
+        return classify_failure(self.name, text, returncode=rc)
 
 
 class ClaudeAdapter(Adapter):
@@ -471,7 +537,38 @@ class CodexAdapter(Adapter):
     name = "codex"
 
     def argv(self, prompt: str, model: str | None, workdir: str) -> list[str]:
-        return ["codex", "exec", "--skip-git-repo-check", "--sandbox", "read-only", "--output-last-message", str(Path(workdir) / "last.txt"), *(["--model", model] if model else []), prompt]
+        return ["codex", "exec", "--ignore-user-config", "--ignore-rules", "--ephemeral",
+                "--skip-git-repo-check", "--sandbox", "read-only", *subscriptions.CODEX_OPTIONS,
+                "-c", 'forced_login_method="chatgpt"', "--output-last-message", str(Path(workdir) / "last.txt"), "-"]
+
+    def run_verified(self, prompt: str, *, binary: str, access: dict[str, Any], timeout: float,
+                     cancel: threading.Event | None) -> tuple[str, dict[str, Any]]:
+        with tempfile.TemporaryDirectory(prefix="bop_codex_") as td:
+            argv = self.argv(prompt, None, td)
+            argv[0] = binary
+            argv[-1:-1] = access["auth_config"]
+            rc, out, err = _run(argv, cwd=td, env=subscriptions.client_env(binary), timeout=timeout, cancel=cancel, input_text=prompt)
+            return self.parse(rc, out, err, td)
+
+    def call(self, prompt: str, *, model: str | None, timeout: float, cancel: threading.Event | None, allow_api_billing: bool) -> tuple[str, dict[str, Any]]:
+        binary = subscriptions.client_path(self.name)
+        access = subscriptions.subscription_access(self.name, binary) if binary else {"ready": False, "message": "Codex is missing"}
+        if not access["ready"]:
+            raise ProviderFailure("not_entitled", access["message"], access.get("retry_at"), self.name)
+        return self.run_verified(prompt, binary=binary, access=access, timeout=timeout, cancel=cancel)
+
+    def fail(self, text: str, rc: int | None) -> ProviderFailure:
+        failure = super().fail(text, rc)
+        # CLI diagnostics can echo the editor's request. Persist only the classification and reset time.
+        failure.message = {
+            "auth": "The Codex account session needs attention.",
+            "not_entitled": "Codex denied access for this account.",
+            "incompatible": "Update the official Codex client.",
+            "usage_exhausted": "Codex reported an included usage limit.",
+            "rate_limited": "Codex reported a rate limit.",
+            "unavailable": "Codex is temporarily unavailable.",
+        }.get(failure.kind, "Codex could not complete the reasoning request.")
+        return failure
 
     def parse(self, rc: int, out: str, err: str, workdir: str) -> tuple[str, dict[str, Any]]:
         last = Path(workdir) / "last.txt"
@@ -547,13 +644,15 @@ class ProviderRouter:
     kind = "authenticated_cli"
 
     def __init__(self, *, only: list[str] | None = None, budget: ReasoningBudget | None = None, timeout: float = 240.0, adapters: dict[str, Adapter] | None = None,
-                 installed: Any = None, clock: Any = None, on_switch: Any = None, cancel: threading.Event | None = None) -> None:
+                 installed: Any = None, clock: Any = None, on_switch: Any = None, cancel: threading.Event | None = None, test: bool = False) -> None:
         self.cfg = load_config()
         self.adapters = adapters or {p: ADAPTERS[p]() for p in PROVIDERS}
-        self._installed = installed or (lambda p: bool(shutil.which(PROVIDER_INFO[p]["binary"])))
+        self._installed = installed or (lambda p: bool(subscriptions.client_path(p)))
+        self.test = test
         self.clock = clock or time.time
         self.only = only
         self.budget = budget or ReasoningBudget.from_config(self.cfg)
+        self._task_cap = budget.max_calls if budget else None
         self.timeout = timeout
         self.on_switch = on_switch  # called with the event before the next provider is asked (checkpoint hook)
         self.cancel = cancel
@@ -562,6 +661,7 @@ class ProviderRouter:
         self.last_usage: dict[str, Any] = {}
         self.events: list[dict[str, Any]] = []
         self.task_id: str | None = None
+        self.budget_id: str | None = None
 
     # compatibility with V1.4's CliReasoner
     @property
@@ -580,31 +680,42 @@ class ProviderRouter:
     def availability(self, p: str, st: dict[str, Any] | None = None) -> tuple[bool, str]:
         st = _load_state() if st is None else st
         if not self._installed(p):
-            return False, "not installed"
+            return False, "Not installed"
+        entry = (self.cfg.get("providers") or {}).get(p, {})
+        if entry.get("allow_api_billing"):
+            return False, "Reconnect to remove the legacy billing configuration"
+        if p in subscriptions.BLOCKED:
+            return False, subscriptions.BLOCKED[p]
         ps = (st.get("providers") or {}).get(p) or {}
-        if ps.get("kind") in NEEDS_EDITOR:
+        if not self.test and ps.get("kind") in NEEDS_EDITOR:
             return False, f"{ps['kind']}: {ps.get('message', '')[:120]}"
         if float(ps.get("until") or 0) > self.clock():
             return False, f"{ps.get('kind')} until {_now_iso(float(ps['until']))}"
-        return True, "available"
+        return True, "Available"
 
     def candidates(self) -> list[str]:
         st = _load_state()
         order = self.authorised()
         if self.active in order:  # stay on the provider that is working until a task boundary
             order = [self.active] + [p for p in order if p != self.active]
+        if self.cfg.get("auto_failover") is False:
+            order = order[:1]
         return [p for p in order if self.availability(p, st)[0]]
 
-    def begin_task(self, task_id: str | None = None) -> None:
+    def begin_task(self, task_id: str | None = None, *, budget_id: str | None = None) -> None:
         """Safe task boundary: forget the sticky choice so the preferred provider is used again once its cooldown has passed."""
         self.active = None
         self.task_id = task_id
+        self.budget_id = budget_id
+        if budget_id:
+            self.budget.used = sum(row.get("budget_id") == budget_id for row in _ledger_rows(0))
 
-    def plan(self, prompt: str, *, purpose: str = "plan", agent: str = "executive") -> dict[str, Any]:
+    def plan(self, prompt: str | Callable[[dict[str, Any]], str], *, purpose: str = "plan", agent: str = "executive") -> dict[str, Any]:
         tried: list[dict[str, Any]] = []
-        if not self.authorised():
-            raise ReasonerError("No reasoning provider is authorised (python -m bangonpro.ai_engine.mcp authorise --client claude|codex|grok|agy)")
         while True:
+            self.cfg = load_config()
+            if not enabled(self.cfg):
+                raise AllProvidersUnavailable("External reasoning requires Connected Subscriptions consent", retry_at=None, attempts=tried)
             cands = [p for p in self.candidates() if p not in {t["provider"] for t in tried}]
             if not cands:
                 st = (_load_state().get("providers") or {})
@@ -612,17 +723,54 @@ class ProviderRouter:
                 raise AllProvidersUnavailable("No authorised reasoning provider is available" + (f"; the earliest is back at {_now_iso(min(waits))}" if waits else ""),
                                               retry_at=min(waits) if waits else None, attempts=tried)
             p = cands[0]
-            self.budget.charge(p, purpose)  # raises BudgetExhausted; failed attempts count too
-            pcfg = (self.cfg.get("providers") or {}).get(p) or {}
+            pcfg = self.cfg["providers"][p]
             t0 = time.perf_counter()
-            row: dict[str, Any] = {"ts": self.clock(), "at": _now_iso(self.clock()), "provider": p, "purpose": purpose, "agent": agent, "task_id": self.task_id}
+            row: dict[str, Any] = {"ts": time.time(), "at": _now_iso(), "provider": p, "purpose": purpose, "agent": agent,
+                                   "task_id": self.task_id, "budget_id": self.budget_id, "attempt_id": uuid.uuid4().hex}
+            reserved = False
             try:
-                text, usage = self.adapters[p].call(prompt, model=pcfg.get("model"), timeout=self.timeout, cancel=self.cancel, allow_api_billing=bool(pcfg.get("allow_api_billing")))
+                adapter = self.adapters[p]
+                verified = isinstance(adapter, CodexAdapter)
+                if verified:
+                    binary = subscriptions.client_path(p)
+                    if not binary:
+                        raise ProviderFailure("unavailable", "Codex is missing")
+                    access = subscriptions.subscription_access(p, binary)
+                    if not access["ready"]:
+                        self._remember_access(p, access)
+                        reset = access.get("retry_at")
+                        raise ProviderFailure("usage_exhausted" if reset else "not_entitled", access["message"], reset)
+                with _storage_lock():
+                    current = load_config()
+                    if current != self.cfg:
+                        continue  # sign-in, consent or routing changed during the preflight
+                    if self.cancel is not None and self.cancel.is_set():
+                        raise ProviderFailure("cancelled", "the call was stopped")
+                    self.budget.max_calls_per_day = current.get("max_calls_per_day")
+                    max_calls = int(current.get("max_calls_per_task", 3))
+                    self.budget.max_calls = min(max_calls, self._task_cap) if self._task_cap is not None else max_calls
+                    text_prompt = prompt(privacy(current)) if callable(prompt) else prompt
+                    self.budget.charge(row)
+                    reserved = True
+                if verified:
+                    self._remember_access(p, access)
+                    text, usage = adapter.run_verified(text_prompt, binary=binary, access=access, timeout=self.timeout, cancel=self.cancel)
+                else:
+                    text, usage = adapter.call(text_prompt, model=pcfg.get("model"), timeout=self.timeout, cancel=self.cancel, allow_api_billing=False)
                 plan = extract_json(text)
+                if self.test and plan.get("ok") is not True:
+                    raise ReasonerError("The provider did not return the connection-test response")
+            except BudgetExhausted:
+                raise
+            except OSError as exc:
+                if reserved:
+                    self.budget.record(row | {"ok": False, "kind": "io_error", "usage": "unknown"})
+                raise ReasonerError("The reasoning client or its usage ledger could not be accessed") from exc
             except ProviderFailure as f:
                 f.provider = p
                 row.update(ok=False, kind=f.kind, duration_ms=round((time.perf_counter() - t0) * 1000), usage="unknown")
-                self.budget.record(row)
+                if reserved:
+                    self.budget.record(row)
                 tried.append({"provider": p, "kind": f.kind, "message": f.message[:200]})
                 if f.kind == "cancelled":
                     raise ReasonerError("Reasoning was cancelled") from f
@@ -632,46 +780,65 @@ class ProviderRouter:
                 nxt = next((c for c in self.candidates() if c not in {t["provider"] for t in tried}), None)
                 ev = {"at": _now_iso(self.clock()), "from": p, "to": nxt, "kind": f.kind, "reason": f.message[:160], "retry_at": _now_iso(f.retry_at) if f.retry_at else None,
                       "task_id": self.task_id, "mode": "app_driven"}
-                self.events.append(ev)
-                st = _load_state()
-                st.setdefault("events", []).append(ev)
-                _save_state(st)
-                if nxt is not None and self.on_switch is not None:
-                    self.on_switch(ev)
+                if not self.test and self.cfg.get("auto_failover") is not False:
+                    self.events.append(ev)
+                    with _storage_lock():
+                        st = _load_state()
+                        st.setdefault("events", []).append(ev)
+                        _save_state(st)
+                    if nxt is not None and self.on_switch is not None:
+                        self.on_switch(ev)
                 self.active = None
                 continue
             except ReasonerError as exc:  # the answer had no usable plan: a reasoning problem, not an availability one
                 row.update(ok=False, kind="invalid_output", duration_ms=round((time.perf_counter() - t0) * 1000), usage="unknown")
-                self.budget.record(row)
+                if reserved:
+                    self.budget.record(row)
                 raise ReasonerError(f"{p}: {exc}") from exc
             row.update(ok=True, kind="ok", duration_ms=round((time.perf_counter() - t0) * 1000), usage=usage or "unknown",
-                       cost_usd=usage.get("total_cost_usd") if isinstance(usage, dict) else None)
+                       estimated_cost_usd=usage.get("total_cost_usd") if isinstance(usage, dict) else None)
             self.budget.record(row)
             self._mark_ok(p)
             self.active = self.provider = p
             self.last_usage = {"provider": p, **(usage or {})}
             return plan
 
+    def _remember_access(self, p: str, access: dict[str, Any]) -> None:
+        with _storage_lock():
+            st = _load_state()
+            ps = st.setdefault("providers", {}).setdefault(p, {})
+            ps["subscription"] = access["message"]
+            ps["subscription_ready"] = access["ready"]
+            reset = access.get("reset_at")
+            ps["reset_at"] = _now_iso(reset) if reset else None
+            _save_state(st)
+
     def _park(self, p: str, f: ProviderFailure) -> None:
-        st = _load_state()
-        ps = st.setdefault("providers", {}).setdefault(p, {})
-        ps["failures"] = int(ps.get("failures", 0)) + 1
-        now = self.clock()
-        if f.kind in NEEDS_EDITOR:
-            until = None
-        elif f.retry_at:
-            until = min(max(f.retry_at, now + 30.0), now + MAX_COOLDOWN)
-        else:
-            base = DEFAULT_COOLDOWN.get(f.kind, 60.0)
-            until = now + min(base * (2 ** max(0, ps["failures"] - 1)) if f.kind == "unavailable" else base, 900.0 if f.kind == "unavailable" else MAX_COOLDOWN)
-        ps.update({"kind": f.kind, "message": f.message[:300], "since": _now_iso(now), "until": until, "reported_reset": bool(f.retry_at)})
-        _save_state(st)
+        with _storage_lock():
+            st = _load_state()
+            ps = st.setdefault("providers", {}).setdefault(p, {})
+            ps["failures"] = int(ps.get("failures", 0)) + 1
+            now = self.clock()
+            if f.kind in NEEDS_EDITOR:
+                until = None
+            elif f.retry_at:
+                until = min(max(f.retry_at, now + 30.0), now + MAX_COOLDOWN)
+            else:
+                base = DEFAULT_COOLDOWN.get(f.kind, 60.0)
+                until = now + min(base * (2 ** max(0, ps["failures"] - 1)) if f.kind == "unavailable" else base, 900.0 if f.kind == "unavailable" else MAX_COOLDOWN)
+            ps.update({"kind": f.kind, "message": f.message[:300], "since": _now_iso(now), "until": until, "reported_reset": bool(f.retry_at)})
+            _save_state(st)
 
     def _mark_ok(self, p: str) -> None:
-        st = _load_state()
-        st.setdefault("providers", {})[p] = {"kind": "ok", "last_ok": _now_iso(self.clock()), "failures": 0}
-        st["active"] = p
-        _save_state(st)
+        with _storage_lock():
+            st = _load_state()
+            status = st.setdefault("providers", {}).setdefault(p, {})
+            status.update(kind="ok", last_ok=_now_iso(self.clock()), failures=0, until=None, reported_reset=False)
+            if self.test:
+                status["last_test"] = status["last_ok"]
+            else:
+                st["active"] = p
+            _save_state(st)
 
 
 class CliReasoner(ProviderRouter):
@@ -681,10 +848,12 @@ class CliReasoner(ProviderRouter):
         super().__init__(only=[client] if client else None, timeout=timeout, **kw)
         if client and client not in PROVIDERS:
             raise ReasonerError(f"Unknown provider '{client}'")
+        if not enabled(self.cfg):
+            raise ReasonerError("External reasoning is off in AI Providers & Subscriptions")
         auth = self.authorised()
         if not auth:
             raise ReasonerError(f"{client} is not authorised for app-driven reasoning" if client else
-                                "No reasoning client is authorised (python -m bangonpro.ai_engine.mcp authorise --client claude|codex|grok|agy)")
+                                "No reasoning client is authorised in AI Providers & Subscriptions")
         if not any(self._installed(p) for p in auth):
             raise ReasonerError(f"{'/'.join(auth)} is not installed or not on PATH")
         if model and client:
@@ -692,39 +861,82 @@ class CliReasoner(ProviderRouter):
         self.client = auth[0]
 
 
-def reasoning_status() -> dict[str, Any]:
+def provider_connection(provider: str, *, launch: bool = True) -> str:
+    binary = subscriptions.client_path(provider)
+    if not binary:
+        return "Install the official client before connecting."
+    auth = subscriptions.local_auth(provider, binary)
+    if launch and (auth in ("signed_out", "other") or (auth == "unverified" and provider in ("grok", "agy"))):
+        subscriptions.launch_login(provider, binary)
+        return "Complete sign-in in the official client, then choose Check sign-in."
+    if auth != "account":
+        return "The official client did not verify subscription-account sign-in."
+    access = subscriptions.subscription_access(provider, binary)
+    authorise(provider)
+    ProviderRouter()._remember_access(provider, access)
+    return access["message"]
+
+
+def reasoning_status(*, check_auth: bool = False) -> dict[str, Any]:
     cfg = load_config()
     st = _load_state()
     probe = ProviderRouter()
-    found = {p: probe._installed(p) for p in PROVIDERS}
     provs: dict[str, Any] = {}
     for p in PROVIDERS:
-        c = (cfg.get("providers") or {}).get(p) or {}
-        ok, why = probe.availability(p, st) if c.get("authorised") else (False, "not authorised")
-        provs[p] = {"title": PROVIDER_INFO[p]["title"], "installed": found[p], "authorised": bool(c.get("authorised")), "available": ok, "state": why,
-                    "api_billing": bool(c.get("allow_api_billing"))}
-    out: dict[str, Any] = {"installed_clients": [p for p in PROVIDERS if found[p]], "app_driven": "off", "providers": provs, "priority": cfg.get("priority") or [],
-                           "active": st.get("active"), "failover_events": (st.get("events") or [])[-5:],
-                           "budget": {"max_calls_per_task": int(cfg.get("max_calls_per_task", 3)), "max_calls_per_day": cfg.get("max_calls_per_day"),
-                                      "used_today": ReasoningBudget().used_today()}}
-    auth = [p for p in out["priority"] if provs[p]["authorised"]]
-    if auth:
-        out["app_driven"] = "authorised" if any(found[p] for p in auth) else "authorised_but_not_installed"
+        entry = (cfg.get("providers") or {}).get(p) or {}
+        saved = st.get("providers", {}).get(p, {})
+        binary = subscriptions.client_path(p)
+        authorised = entry.get("authorised") is True
+        auth = subscriptions.local_auth(p, binary) if binary and check_auth else "unverified"
+        available, state = probe.availability(p, st) if authorised else (False, "Bang On Pro authorisation required")
+        if p in subscriptions.BLOCKED:
+            available, state = False, subscriptions.BLOCKED[p]
+        if not binary:
+            available, state = False, "Official client missing"
+        elif auth in ("signed_out", "other") or (check_auth and auth == "unverified" and p not in subscriptions.BLOCKED):
+            available, state = False, "Subscription-account sign-in required"
+        elif not enabled(cfg) and available:
+            available, state = False, "Local Only"
+        elif available and not saved.get("subscription_ready", bool(saved.get("last_ok"))):
+            available, state = False, saved.get("subscription") or "Pending subscription check"
+        until = saved.get("until")
+        provs[p] = {"test_supported": p not in subscriptions.BLOCKED, "title": PROVIDER_INFO[p]["title"], "installed": bool(binary), "authorised": authorised, "auth": auth,
+                    "available": available, "state": state, "install_url": subscriptions.INSTALL_URLS[p],
+                    "last_test": saved.get("last_test"), "last_ok": saved.get("last_ok"),
+                    "cooldown_until": _now_iso(until) if until and until > time.time() else None,
+                    "reported_reset": _now_iso(until) if until and saved.get("reported_reset") else saved.get("reset_at"),
+                    "subscription": "Unverified" if p in subscriptions.BLOCKED else saved.get("subscription", "Not checked")}
+    order = cfg.get("priority") or list(PROVIDERS)
+    auth = [p for p in order if provs[p]["authorised"]]
+    active = st.get("active")
+    out: dict[str, Any] = {
+        "installed_clients": [p for p in PROVIDERS if provs[p]["installed"]],
+        "app_driven": "off", "providers": provs, "priority": order, "auto_failover": cfg.get("auto_failover", True),
+        "privacy": cfg.get("privacy"), "active": active if provs.get(active, {}).get("available") else None,
+        "failover_events": (st.get("events") or [])[-5:],
+        "budget": {"max_calls_per_task": int(cfg.get("max_calls_per_task", 3)), "max_calls_per_day": cfg.get("max_calls_per_day"),
+                   "used_today": ReasoningBudget().used_today()},
+    }
+    if enabled(cfg) and auth:
+        out["app_driven"] = "authorised" if any(provs[p]["installed"] for p in auth) else "authorised_but_not_installed"
         out["client"] = next((p for p in auth if provs[p]["available"]), auth[0])
     return out
 
 
 def provider_self_test(providers: list[str] | None = None, *, timeout: float = 120.0) -> list[dict[str, Any]]:
-    """One minimal authenticated call per authorised, installed provider (counts against the daily budget)."""
+    """One minimal authenticated call through the same guard and daily budget."""
     out = []
-    for p in providers or [p for p in load_config().get("priority") or []]:
-        r = ProviderRouter(only=[p], budget=ReasoningBudget(max_calls=1, max_calls_per_day=load_config().get("max_calls_per_day")), timeout=timeout)
-        t0 = time.perf_counter()
+    for p in providers if providers is not None else load_config().get("priority", []):
+        r = ProviderRouter(only=[p], budget=ReasoningBudget(max_calls=1), timeout=timeout, test=True)
         try:
-            ans = r.plan('Reply with exactly this JSON and nothing else: {"ok": true}', purpose="self_test")
-            out.append({"provider": p, "ok": ans.get("ok") is True, "seconds": round(time.perf_counter() - t0, 1), "usage": r.last_usage})
+            r.plan('Reply with exactly this JSON and nothing else: {"ok": true}', purpose="self_test")
+            out.append({"provider": p, "ok": True})
         except ReasonerError as exc:
-            out.append({"provider": p, "ok": False, "error": str(exc)[:300], "attempts": getattr(exc, "attempts", None) or r.budget.attempts[-1:]})
+            attempts = getattr(exc, "attempts", [])
+            reason = attempts[-1]["message"] if attempts else str(exc)
+            if not attempts and (r.cfg.get("providers") or {}).get(p, {}).get("authorised") and enabled(r.cfg):
+                reason = r.availability(p)[1] if not r.availability(p)[0] else reason
+            out.append({"provider": p, "ok": False, "error": reason[:300]})
     return out
 
 
@@ -744,7 +956,9 @@ class ScriptedReasoner:
 
     def plan(self, prompt: str, *, purpose: str = "plan", agent: str = "executive") -> dict[str, Any]:
         self.prompts.append(prompt)
-        self.budget.charge("scripted", purpose)
+        if self.budget.used >= self.budget.max_calls:
+            raise BudgetExhausted("Scripted reasoning budget exhausted")
+        self.budget.used += 1
         if not self.plans:
             raise ReasonerError("No scripted plan left")
         nxt = self.plans.pop(0)

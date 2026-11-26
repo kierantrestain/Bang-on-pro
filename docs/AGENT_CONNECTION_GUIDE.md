@@ -1,10 +1,25 @@
-# Connecting Claude Code, Codex, Grok Build or Antigravity to the production agents (V1.5)
+# AI Providers & Subscriptions in Bang On Pro V1.5.2
 
-Bang On Pro's 14 production agents use the reasoning of the AI client **you already have and are signed in to**.
-Nothing is bundled, downloaded or billed by Bang On Pro: no model, no API key, no extra account.
-Without a client the department works exactly as in V1.3 (offline, deterministic).
+Open **AI Providers & Subscriptions** from the AI Assistant, the Agent Control Centre or the Bang On Pro menu. The subscription connection, privacy choices and usage limits apply to every production on this computer.
 
-## 1. Connect a client to a production job
+1. Use **Install instructions** on a missing client row. Bang On Pro detects official executables in common user-local, Homebrew and macOS app locations.
+2. Choose **Connect**. Complete any sign-in in the official client or browser. **Check sign-in** checks for an account session and records Bang On Pro authorisation when the client can report one.
+3. Select **Connected Subscriptions**, choose the project context you permit and save. Instructions are sent as text only when external reasoning is needed. Project metadata can include edit times, camera and speaker labels, graphics and verified editing lessons. Transcript excerpts require both data options. Media processing and full-resolution footage stay local.
+4. Reopen the dialog and choose **Test** for an eligible provider. The test sends a small synthetic prompt and uses one call from the shared daily budget. Installation, account sign-in, app authorisation, subscription eligibility and the last successful test each have their own status.
+5. Choose **Disconnect** to withdraw Bang On Pro authorisation while keeping the client's own account session. Choose **Local Only** and save to stop subsequent in-app external reasoning across all providers.
+
+When upgrading from V1.5.1, the dialog retains your project metadata and transcript choices. The subscription workflow requires fresh consent because earlier consent referred to a configured endpoint. Unsupported audio and image consent controls have been removed.
+
+| Client | Account and eligibility |
+|---|---|
+| Claude Code | The official client handles sign-in. App-driven routing is held until the integration can establish permitted usage and exclude usage-credit fallback. [Anthropic authentication](https://code.claude.com/docs/en/authentication) · [Usage and integration terms](https://code.claude.com/docs/en/legal-and-compliance) |
+| OpenAI Codex | Supported where the official client reports a qualifying personal ChatGPT plan, available included usage, and zero additional credits. Bang On Pro verifies these before each request. [Codex authentication](https://learn.chatgpt.com/docs/auth) · [Account and rate limits](https://learn.chatgpt.com/docs/app-server) |
+| Grok Build | Official sign-in is available. Account entitlement and top-up state remain unverified for app-driven routing. [Grok Build](https://docs.x.ai/build/overview) · [Additional usage](https://docs.x.ai/x-subscription/extra-usage) |
+| Google Antigravity | Official sign-in is available. Subscription entitlement and the effective billing route remain unverified for app-driven routing. [CLI sign-in](https://antigravity.google/docs/cli-install) · [Plan overages](https://antigravity.google/docs/plans) |
+
+## 1. Optional MCP connections for a client you control
+
+This section applies when you deliberately open an external AI client and have it connect to a specific production. The in-app AI Assistant and production agents use the subscription settings above directly.
 
 Every department job has a draft. The MCP server edits that draft (never your source media and never a promoted project).
 
@@ -41,66 +56,15 @@ Then ask the client in plain words. For example: *"In the guest's longest answer
 The client inspects the timeline, looks at frames when it needs to, and edits as the agent that owns each change.
 It asks Quality Control to verify the actual draft, and reports back. Read-only tools are marked as read-only, so your client can allow them without asking you.
 
-## 2. Instructions typed in Bang On Pro, with automatic provider failover (optional)
+## 2. Reasoning, failover and usage
 
-The **Revise** field in the Agent Control Centre still uses the V1.3 rules first. Next, a **learned skill** that matches the instruction is tried. It runs without any reasoning call, Quality Control verifies it, and it is undone if it fails.
-Only after that does the Executive ask an **authorised** CLI for a short plan, which the agents carry out and Quality Control verifies. You can authorise up to four providers, and all of them can be authorised at once:
+The AI Assistant and Agent Control Centre try fully understood local editing instructions first. The department also tries matching learned skills locally and checks their edits before asking an authorised provider. Creative instructions with unsupported requirements go to reasoning or are reported for clarification. The agents retain responsibility for applying and verifying the plan.
 
-```bash
-python3 -m bangonpro.ai_engine.mcp authorise --client claude
-```
+The default priority is **Claude Code → OpenAI Codex → Grok Build → Google Antigravity**. Move rows up or down and save to change it. With automatic failover disabled, only the first authorised provider is considered. With failover enabled, the router considers available providers in priority order and switches on availability failures. A malformed plan or a rejected editing request stops the attempt. Provider cooldowns use reported reset times when available.
 
-```bash
-python3 -m bangonpro.ai_engine.mcp authorise --client codex
-```
+Per-task and daily call limits use the same ledger across both app entry points. The daily limit resets at midnight UTC. Once a reasoning attempt begins it counts, even if the client fails. Account status and quota checks consume no reasoning calls. Dollar figures received from a provider are estimated usage. Bang On Pro uses the supported client and its account store, excludes inherited API credentials and blocks ambiguous billing configurations.
 
-```bash
-python3 -m bangonpro.ai_engine.mcp authorise --client grok
-```
-
-```bash
-python3 -m bangonpro.ai_engine.mcp authorise --client agy --priority claude codex grok agy
-```
-
-| Provider | Headless call Bang On Pro makes (your existing sign-in) |
-|---|---|
-| Claude Code | `claude -p … --output-format json --max-turns 1` |
-| OpenAI Codex | `codex exec --skip-git-repo-check --sandbox read-only --output-last-message …` |
-| Grok Build | `grok --no-auto-update -p … --output-format json --max-turns 1` (shell, edits, writes, web and subagents denied) |
-| Google Antigravity | `agy -p … --output-format json` (falls back to a pseudo-terminal if the CLI prints nothing to a pipe) |
-
-- **One provider at a time**, in your order. Show the providers, or change their order:
-
-  ```bash
-  python3 -m bangonpro.ai_engine.mcp providers --priority codex claude
-  ```
-
-- **Failover only for availability.** Exhausted usage, rate limits and temporary outages switch to the next provider. Authentication problems, a plan without access, and an incompatible CLI also switch, but that provider is then parked until you authorise it again. A bad request or an unusable answer does not switch.
-- **Cooldowns follow the reported reset time.** Bang On Pro uses the reset time a provider reports (for example *"usage limit reached|…"*, *"try again in 2 hours"* or *Retry-After*), or a default otherwise. It never polls. The preferred provider is used again at the next task once its reset has passed.
-- **Nothing is lost or repeated.** The task's plan, the steps already applied and the outstanding checks are saved before every switch and after every step. The next provider gets a compact hand-over of the project, what is already done and verified, and what failed. It never gets a conversation history.
-- **When every provider is unavailable**, the task is saved as *blocked* and nothing is half-done. Continue it later, in any process:
-
-  ```bash
-  python3 -m bangonpro.ai_engine.mcp resume --job DIR --task ID
-  ```
-
-  An interrupted or crashed task resumes the same way. A step whose edit had already been written is recognised and never applied twice.
-- **One shared budget.** `--max-calls` sets calls per task and `--max-calls-per-day` sets calls per day across all providers, agents and learning. Failed attempts count too. Every attempt is written to `~/.config/bangonpro/reasoning_ledger.jsonl` with the usage the CLI reported, or `unknown`.
-- **No silent API billing.** API-key variables (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, `GEMINI_API_KEY`, …) are removed from the CLI's environment. They are kept only for a provider you authorised with `--allow-api-billing`. Bang On Pro never reads or stores credentials.
-
-To check each provider with one minimal call (this counts against the daily budget):
-
-```bash
-python3 -m bangonpro.ai_engine.mcp providers --test
-```
-
-To withdraw one provider:
-
-```bash
-python3 -m bangonpro.ai_engine.mcp revoke --client grok
-```
-
-Leave out `--client` to withdraw them all.
+A blocked task keeps its verified edits and saved progress. The same provider preferences and remaining task budget apply when it resumes.
 
 ## 3. What the agents can do
 
@@ -139,7 +103,7 @@ python3 -m bangonpro.ai_engine.mcp learn --job DIR status
 
 The available actions are `status`, `lessons`, `skills`, `strategies`, `performance`, `history`, `optimise`, `approve`, `reject`, `disable`, `enable`, `rollback`, `settings`, `export` and `forget`.
 Options are `--kind knowledge|skill|strategy`, `--agent`, `--id`, `--version`, `--setting enabled|apply_strategies|auto_promote_procedural|trial_candidate_skills|retention_days|scopes --value JSON` and `--series`.
-The Agent Control Centre header shows the provider order, the active provider, the last switch and a learning summary in its tooltip. Strategies waiting for your approval appear under the Learning Agent in Review.
+The Agent Control Centre opens the shared subscription dialog. Job activity shows the provider and learning summary when available. Strategies waiting for your approval appear under the Learning Agent in Review.
 
 ## 4. What is protected
 

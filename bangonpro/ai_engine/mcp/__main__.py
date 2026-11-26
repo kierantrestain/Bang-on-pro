@@ -117,6 +117,13 @@ def reasoning_fallback(job: str, instruction: str, rec: dict[str, Any], *, allow
         job_obj.doc["last_revision"] = {"revision": rec["revision"], "instruction": instruction, "status": out["status"], "message": msg, "path": path}
         job_obj._save(force=True)
 
+    if rec.get("selection_limited"):
+        rec["message"] = "This instruction needs clarification within the selected range. No edit was made."
+        job_obj = ProductionJob(job)
+        job_obj.doc["last_revision"] = rec
+        job_obj._save(force=True)
+        return {"path": "rules", "revision": rec}
+
     _, bt = make_server(job, allow)
     try:
         rsn = reasoner or CliReasoner()
@@ -152,12 +159,18 @@ def main(argv: list[str] | None = None) -> int:
     au.add_argument("--max-calls", type=int, default=None)
     au.add_argument("--max-calls-per-day", type=int, default=None)
     au.add_argument("--priority", nargs="+")
-    au.add_argument("--allow-api-billing", action="store_true", help="let the CLI use an API key from the environment (paid API usage); off by default")
     rv = sub.add_parser("revoke")
     rv.add_argument("--client", choices=("claude", "codex", "grok", "agy"))
     pv = sub.add_parser("providers")
     pv.add_argument("--priority", nargs="+")
     pv.add_argument("--test", action="store_true")
+    pv.add_argument("--check-auth", action="store_true")
+    pv.add_argument("--client", choices=("claude", "codex", "grok", "agy"))
+    action = pv.add_mutually_exclusive_group()
+    action.add_argument("--configure")
+    action.add_argument("--connect", action="store_true")
+    action.add_argument("--check-sign-in", action="store_true")
+    action.add_argument("--disconnect", action="store_true")
     rs = sub.add_parser("resume")
     rs.add_argument("--job", required=True)
     rs.add_argument("--task", required=True)
@@ -207,8 +220,7 @@ def main(argv: list[str] | None = None) -> int:
     if a.cmd == "authorise":
         from bangonpro.ai_engine.mcp.reasoning import authorise
 
-        print(json.dumps(authorise(a.client, model=a.model, max_calls_per_task=a.max_calls, max_calls_per_day=a.max_calls_per_day, priority=a.priority,
-                                   allow_api_billing=a.allow_api_billing), indent=1))
+        print(json.dumps(authorise(a.client, model=a.model, max_calls_per_task=a.max_calls, max_calls_per_day=a.max_calls_per_day, priority=a.priority), indent=1))
         return 0
     if a.cmd == "revoke":
         from bangonpro.ai_engine.mcp.reasoning import revoke
@@ -217,15 +229,34 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"revoked": a.client or "all"}))
         return 0
     if a.cmd == "providers":
-        from bangonpro.ai_engine.mcp.reasoning import provider_self_test, reasoning_status, set_priority
+        from bangonpro.ai_engine.mcp.reasoning import configure, provider_connection, provider_self_test, reasoning_status, revoke, set_priority
 
-        if a.priority:
-            set_priority(a.priority)
-        out: dict[str, Any] = reasoning_status()
-        if a.test:
-            out["self_test"] = provider_self_test()
-        print(json.dumps(out, indent=1, default=str))
-        return 0
+        if (a.connect or a.check_sign_in or a.disconnect) and not a.client:
+            pv.error("This operation requires --client")
+        message = None
+        try:
+            if a.priority:
+                set_priority(a.priority)
+            if a.configure:
+                configure(json.loads(a.configure))
+            if a.connect or a.check_sign_in:
+                message = provider_connection(a.client, launch=a.connect)
+            if a.disconnect:
+                revoke(a.client)
+                message = "Bang On Pro authorisation withdrawn. The official client keeps its sign-in."
+            out = reasoning_status(check_auth=a.check_auth)
+            if a.test:
+                out["self_test"] = provider_self_test([a.client] if a.client else None)
+                status = reasoning_status(check_auth=a.check_auth)
+                status["self_test"] = out["self_test"]
+                out = status
+            if message:
+                out["message"] = message
+            print(json.dumps(out, indent=1))
+            return 0
+        except (OSError, ValueError, RuntimeError) as exc:
+            print(json.dumps({"error": str(exc)}))
+            return 2
     if a.cmd == "resume":
         from bangonpro.ai_engine.mcp.execution import resume_cycle
         from bangonpro.ai_engine.mcp.reasoning import CliReasoner, ReasonerError

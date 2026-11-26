@@ -164,9 +164,9 @@ void AiAssistantDock::buildUi()
     m_editProfileButton->setObjectName(QStringLiteral("editProfileButton"));
     m_editProfileButton->setToolTip(tr("Create or customize a Show Profile (pacing, cameras, audio, graphics)"));
 
-    m_providerSettingsButton = new QPushButton(tr("AI providers…"), this);
+    m_providerSettingsButton = new QPushButton(tr("AI Providers & Subscriptions…"), this);
     m_providerSettingsButton->setObjectName(QStringLiteral("providerSettingsButton"));
-    m_providerSettingsButton->setToolTip(tr("Configure local AI models or consent-gated external AI providers"));
+    m_providerSettingsButton->setToolTip(tr("Manage subscription sign-in, routing and privacy"));
 
     profileControlRow->addWidget(m_profileCombo, 1);
     profileControlRow->addWidget(m_loadProfileButton);

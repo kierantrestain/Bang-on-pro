@@ -111,6 +111,7 @@ public:
     void setActivityHeartbeatSec(int seconds);
 
 Q_SIGNALS:
+    void providerSettingsRequested();
     void startJobRequested(const QStringList &runArguments);
     void queueJobRequested(const QStringList &runArguments);
     void historyJobActivated(const QString &jobDir);

@@ -25,7 +25,7 @@ CRAFT_ROOT="${CRAFT_ROOT:-${HOME}/CraftRoot}"
 CRAFT_PREFIX=""
 APP_NAME="Bang On Pro"
 DMG_BASENAME="BangOnPro"
-APP_VERSION="${BANGONPRO_VERSION:-1.5.1}"
+APP_VERSION="${BANGONPRO_VERSION:-1.5.2}"
 MIN_MACOS="${MACOSX_DEPLOYMENT_TARGET:-13.0}"
 SIGN_IDENTITY="${APPLE_SIGNING_IDENTITY:-${MACOS_SIGNING_IDENTITY:-}}"
 NOTARY_PROFILE="${MACOS_NOTARY_PROFILE:-}"
@@ -73,7 +73,7 @@ Options:
   --output-dir <path>           Output directory for .app/.dmg/logs (default: ./dist/macos-arm64)
   --craft-root <path>           KDE Craft root or CraftMaster target prefix
                                 (auto-detects <root>/macos-arm-clang if present)
-  --version <ver>               Release version string (default: 1.5.1)
+  --version <ver>               Release version string (default: 1.5.2)
   --min-macos <ver>             MACOSX_DEPLOYMENT_TARGET (default: 13.0)
   --sign-identity <id>          Developer ID Application signing identity
                                 (omit to fall back cleanly to ad-hoc signing)
@@ -1314,6 +1314,24 @@ verify_bundle_launch() {
             "${bundled_py}" -s -c "import sqlite3, bangonpro.ai_engine, bangonpro.ai_engine.department.cli, bangonpro.ai_engine.department.intelligence, bangonpro.ai_engine.mcp.__main__, bangonpro.ai_engine.mcp.reasoning, bangonpro.show_profiles.loader, bangonpro.macos, bangonpro.premiere_compat, bangonpro.roto_studio; sqlite3.connect(':memory:').execute('PRAGMA journal_mode=WAL'); print('PASS: All Bang On Pro Python packages (department, MCP agents, shared reasoning router, learning store) importable offline')" 2>&1)" || rc=$?
         append_verify_log "${log_file}" "${out}"
         [[ "${rc}" -eq 0 ]] || die "[${context_label}] Bundled Python module import smoke check failed (rc=${rc})"
+
+        # Exercise the precise provider status command used by both dialogs with a Finder-like environment.
+        out="$(env -i \
+            HOME="${clean_home}" \
+            TMPDIR="${clean_tmp}" \
+            USER="${clean_user}" \
+            PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
+            PYTHONNOUSERSITE=1 \
+            PYTHONPATH="${abs_bundle}/Contents/Resources" \
+            "${bundled_py}" -s -m bangonpro.ai_engine.mcp providers)" || die "[${context_label}] Bundled subscription status failed"
+        printf '%s\n' "${out}" | "${bundled_py}" -s -c '
+import json, sys
+status = json.load(sys.stdin)
+assert status["priority"] == ["claude", "codex", "grok", "agy"]
+assert status["app_driven"] == "off" and status["budget"]["used_today"] == 0
+assert len(status["providers"]) == 4
+'
+        append_verify_log "${log_file}" "PASS: Subscription status from bundled runtime with no configured account"
     else
         append_verify_log "${log_file}" "SKIPPED: bundled python-env disabled (--skip-python-venv)."
     fi

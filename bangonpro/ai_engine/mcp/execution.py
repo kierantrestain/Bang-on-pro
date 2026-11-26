@@ -118,11 +118,11 @@ def split_checks(expect: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]
     return ok, bad
 
 
-def context_pack(bt: Any, agents: list[str], *, max_rows: int = 60, text: str = "") -> dict[str, Any]:
+def context_pack(bt: Any, agents: list[str], *, max_rows: int = 60, text: str = "", transcript: bool = True) -> dict[str, Any]:
     """What a reasoning agent needs to plan, compactly: no histories, no full transcripts."""
     v = bt.ws.view()
     shots = [{"start": v.s(s.start), "end": v.s(s.end), "camera": s.camera_id, "clip_id": s.clip_id} for s in v.program_shots()][:max_rows]
-    speech = [{k: s[k] for k in ("speaker_id", "start", "end", "overlap")} | ({"text": s["text"][:120]} if s.get("text") else {}) for s in v.speech()][:max_rows]
+    speech = [{k: s[k] for k in ("speaker_id", "start", "end", "overlap")} | ({"text": s["text"][:120]} if transcript and s.get("text") else {}) for s in v.speech()][:max_rows]
     summ = v.summary()
     briefs = {a: {"brief": role(a)["brief"], "ops": list(role(a)["ops"]), "tracks": list(role(a)["tracks"])} for a in agents}
     return {"revision": bt.ws.revision, "duration_sec": summ["duration_sec"], "size": [summ["width"], summ["height"]],
@@ -377,7 +377,7 @@ def run_cycle(bt: Any, instruction: str, reasoner: Any, *, ctx: CallContext | No
     Every plan, applied step and failover is checkpointed in the task, so a provider switch, a
     cancellation or a restart resumes exactly where it stopped without repeating an edit.
     """
-    from bangonpro.ai_engine.mcp.reasoning import AllProvidersUnavailable, BudgetExhausted, ReasonerError
+    from bangonpro.ai_engine.mcp.reasoning import AllProvidersUnavailable, BudgetExhausted, ProviderRouter, ReasonerError
     from bangonpro.ai_engine.mcp.tools import OP_GUIDE
 
     ctx = ctx or CallContext(request_id="cycle", client_name=f"{getattr(reasoner, 'kind', 'planner')}")
@@ -408,8 +408,11 @@ def run_cycle(bt: Any, instruction: str, reasoner: Any, *, ctx: CallContext | No
                 skill_note = {"skill": out.get("skill_id"), "status": out["status"], "why": out.get("why")}
                 trace.append({"phase": "skill", **skill_note})
     params = _strategy_params(bt, cyc.get("learning", learning))
-    if hasattr(reasoner, "begin_task"):
-        reasoner.begin_task(tid)  # safe boundary: the preferred provider is used again if it is available
+    if isinstance(reasoner, ProviderRouter):
+        cyc.setdefault("budget_id", uuid.uuid4().hex)
+        reasoner.begin_task(tid, budget_id=cyc["budget_id"])
+    elif hasattr(reasoner, "begin_task"):
+        reasoner.begin_task(tid)
     if hasattr(reasoner, "cancel") and cancel is not None:
         reasoner.cancel = cancel
 
@@ -426,9 +429,21 @@ def run_cycle(bt: Any, instruction: str, reasoner: Any, *, ctx: CallContext | No
     while True:
         if cyc["phase"] == "plan":
             agents_hint = (cyc.get("plan") or {}).get("agents") or ["multicam_director", "rough_cut", "graphics", "audio_engineer", "colourist", "captions", "vfx"]
-            prompt = build_prompt(instruction, context_pack(bt, agents_hint, text=instruction), OP_GUIDE, cyc.get("feedback"), cyc.get("progress"))
+            def prompt(policy: dict[str, Any]) -> str:
+                if policy.get("metadata") is not True:
+                    return build_prompt(instruction, {}, OP_GUIDE)
+                transcript = policy.get("transcript") is True
+                pack = context_pack(bt, agents_hint, text=instruction, transcript=transcript)
+                # Prior tool feedback and learned text can contain excerpts. Include them only
+                # when both transcript and project metadata have been authorised.
+                if not transcript:
+                    for key in ("lessons", "series_preferences"):
+                        pack.pop(key, None)
+                    return build_prompt(instruction, pack, OP_GUIDE)
+                return build_prompt(instruction, pack, OP_GUIDE, cyc.get("feedback"), cyc.get("progress"))
+
             try:
-                plan = reasoner.plan(prompt)
+                plan = reasoner.plan(prompt if isinstance(reasoner, ProviderRouter) else prompt({"metadata": True, "transcript": True}))
             except (AllProvidersUnavailable, BudgetExhausted) as exc:
                 # Nothing can reason right now: keep the verified state and stop safely; resume_cycle continues later.
                 if tid is None:

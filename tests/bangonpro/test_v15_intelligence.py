@@ -93,6 +93,16 @@ def fake_clis(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespac
     monkeypatch.setenv("FAKE_CLI_STATE", str(state))
     monkeypatch.setenv("BANGONPRO_CONFIG_DIR", str(tmp_path / "cfg"))
 
+    # Exercise real adapter process invocation with simulated clients and billing evidence.
+    subscriptions = reasoning.subscriptions
+    monkeypatch.setattr(subscriptions, "client_path", lambda provider: str(bindir / provider))
+    monkeypatch.setattr(subscriptions, "BLOCKED", {})
+    monkeypatch.setattr(subscriptions, "subscription_access",
+                        lambda *_: {"ready": True, "message": "Mock included usage", "auth_config": []})
+    original_env = subscriptions.client_env
+    monkeypatch.setattr(subscriptions, "client_env", lambda binary=None: original_env(binary) | {"FAKE_CLI_STATE": str(state)})
+    reasoning.configure({"privacy": {"mode": "connected_subscriptions", "consent": True, "metadata": True, "transcript": True}})
+
     def plan(**modes: list[str]) -> None:
         state.write_text(json.dumps(modes))
         Path(str(state) + ".log").unlink(missing_ok=True)
@@ -114,12 +124,12 @@ def test_four_adapters_build_documented_commands_and_classify_failures(fake_clis
         assert r.extract_json(text) == {"ok": True, "by": p}
     log = {x["cli"]: x for x in fake_clis.log()}
     assert log["claude"]["argv"][:1] == ["-p"] and "--output-format" in log["claude"]["argv"] and "--max-turns" in log["claude"]["argv"]
-    assert log["codex"]["argv"][:2] == ["exec", "--skip-git-repo-check"] and "read-only" in log["codex"]["argv"] and log["codex"]["argv"][-1] == "plan please"
+    assert log["codex"]["argv"][:2] == ["exec", "--ignore-user-config"] and "read-only" in log["codex"]["argv"] and log["codex"]["argv"][-1] == "-"
     assert log["grok"]["argv"][:3] == ["--no-auto-update", "-p", "plan please"] and "json" in log["grok"]["argv"] and "Bash" in log["grok"]["argv"]
     assert log["agy"]["argv"][:2] == ["-p", "plan please"] and "json" in log["agy"]["argv"]
     assert not any(x["api_key_seen"] for x in log.values())  # subscription logins only: no silent API billing
     adapters["grok"].call("x", model=None, timeout=30, cancel=None, allow_api_billing=True)
-    assert fake_clis.log()[-1]["api_key_seen"]  # only with the editor's explicit opt-in
+    assert not fake_clis.log()[-1]["api_key_seen"]  # old opt-in no longer forwards credentials
     cases = {("claude", "usage"): "usage_exhausted", ("claude", "auth"): "auth", ("codex", "usage"): "usage_exhausted", ("codex", "rate"): "rate_limited",
              ("codex", "badflag"): "incompatible", ("grok", "rate"): "rate_limited", ("grok", "entitle"): "not_entitled", ("agy", "usage"): "usage_exhausted",
              ("agy", "overload"): "unavailable"}
@@ -208,7 +218,7 @@ def test_router_failover_cooldowns_shared_budget_and_return_to_preferred(fake_cl
     ledger = [json.loads(x) for x in r.ledger_path().read_text().splitlines()]
     assert {x["provider"] for x in ledger} == set(r.PROVIDERS) and all("usage" in x for x in ledger)
     r.revoke("grok")
-    assert "grok" not in r.load_config()["providers"] and r.load_config()["authorised"]
+    assert not r.load_config()["providers"]["grok"]["authorised"] and r.load_config()["authorised"]
     _evidence("provider_failover_mocked", {"evidence": "mocked provider responses (fake CLIs speaking each documented headless format)", "events": router.events + r2.events,
                                            "ledger_rows": len(ledger), "status": r.reasoning_status()})
 
@@ -352,10 +362,12 @@ def _titles(bt: Any, text: str) -> list[float]:
 
 
 @needs_media
-def test_failover_mid_task_hands_over_progress_without_repeating_edits(studio: SimpleNamespace) -> None:
+def test_failover_mid_task_hands_over_progress_without_repeating_edits(studio: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
     from bangonpro.ai_engine.mcp import reasoning as r
     from bangonpro.ai_engine.mcp.execution import run_cycle
 
+    r.configure({"privacy": {"mode": "connected_subscriptions", "consent": True, "metadata": True, "transcript": True}})
+    monkeypatch.setattr(r.subscriptions, "BLOCKED", {})
     for p in ("claude", "codex"):
         r.authorise(p, max_calls_per_task=5)
     _, bt = studio.production("ep_failover")
@@ -397,6 +409,8 @@ def test_total_exhaustion_cancellation_and_restart_recovery(studio: SimpleNamesp
     from bangonpro.ai_engine.mcp import reasoning as r
     from bangonpro.ai_engine.mcp.__main__ import make_server
 
+    r.configure({"privacy": {"mode": "connected_subscriptions", "consent": True}})
+    monkeypatch.setattr(r.subscriptions, "BLOCKED", {})
     for p in r.PROVIDERS:
         r.authorise(p, max_calls_per_task=5)
 
