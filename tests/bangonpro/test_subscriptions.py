@@ -136,8 +136,23 @@ def test_policy_reload_failover_and_shared_budget(monkeypatch: pytest.MonkeyPatc
 
 
 def test_unknown_part_defers_the_entire_instruction() -> None:
-    for instruction in ("Add captions and put a city montage over the guest", "Add captions with a slow fade"):
+    for instruction in ("Add captions and put a city montage over the guest", "Add captions with a slow fade", "Add captions for the guest in Spanish"):
         assert parse_production_instruction(instruction).needs_clarification
         assert interpret_revision(instruction, {})["not_understood"]
     assert parse_production_instruction("Add captions").add_captions
     assert not interpret_revision("Tighten the opening but keep the natural conversation", {})["not_understood"]
+
+
+def test_withdrawal_during_quota_check_prevents_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    reasoning.configure({"privacy": CONNECTED})
+    reasoning.authorise("codex")
+    monkeypatch.setattr(subscriptions, "client_path", lambda _: "/usr/bin/false")
+
+    def quota_check(*_):
+        reasoning.configure({"privacy": {"mode": "local_only", "consent": False}})
+        return {"ready": True, "message": "Mock included usage", "auth_config": []}
+
+    monkeypatch.setattr(subscriptions, "subscription_access", quota_check)
+    with pytest.raises(reasoning.AllProvidersUnavailable, match="consent"):
+        reasoning.ProviderRouter().plan("Must stay local")
+    assert not reasoning.ledger_path().exists()

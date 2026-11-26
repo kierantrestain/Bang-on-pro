@@ -161,12 +161,21 @@ def build_executive_plan(
     neural_asr_model: str | None,
     export: bool,
     intent_confidence: float,
+    review_brief: bool = False,
 ) -> dict[str, Any]:
     from bangonpro.ai_engine.department.registry import AGENT_ORDER, AGENTS_BY_ID
 
     n_video = sum(1 for p in inputs.values() if not str(p).lower().endswith((".wav", ".mp3", ".flac", ".aac", ".m4a")))
     neural = bool(neural_asr_model)
     brief_doc = interpret_brief(brief, export=export, n_video=n_video, neural_asr=neural)
+    if review_brief:
+        brief_doc["conflicts"].append({
+            "code": "BRIEF_CLARIFICATION",
+            "message": "Some details in the production brief could not be interpreted.",
+            "resolution": "Review the draft against the full brief before approval.",
+            "severity": "warning",
+            "needs_human_review": True,
+        })
     spk_map = profile.get("speaker_camera_map") or {}
     mapped = [c for c in spk_map.values() if c in inputs]
     priors: dict[str, tuple[float, list[str]]] = {

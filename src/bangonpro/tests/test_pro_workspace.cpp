@@ -243,6 +243,12 @@ private Q_SLOTS:
         QVERIFY(profDlg.saveProfileToFile(outPath));
 
         ExternalProviderConsentDialog consentDlg(nullptr, {}, QStringLiteral("BangOnProTest"), QStringLiteral("ConsentUnitTest"));
+        QCOMPARE(consentDlg.windowTitle(), QStringLiteral("AI Providers & Subscriptions"));
+        for (const QString &provider : {QStringLiteral("claude"), QStringLiteral("codex"), QStringLiteral("grok"), QStringLiteral("agy")}) {
+            QVERIFY(consentDlg.findChild<QWidget *>(QStringLiteral("subscriptionProvider_") + provider));
+        }
+        QVERIFY(!consentDlg.findChild<QWidget *>(QStringLiteral("externalEndpointUrlEdit")));
+        QVERIFY(!consentDlg.findChild<QWidget *>(QStringLiteral("externalModelNameEdit")));
         // Default must be LocalOnly (free & offline, zero external transmission)
         QCOMPARE(consentDlg.currentSettings().mode, AiBackendMode::LocalOnly);
         QVERIFY(!consentDlg.currentSettings().isExternalTransmissionAllowed());

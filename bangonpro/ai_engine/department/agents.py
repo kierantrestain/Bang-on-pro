@@ -285,6 +285,7 @@ def run_executive_plan(ctx: AgentContext) -> AgentOutcome:
         neural_asr_model=st.metadata.get("asr_model_id"),
         export=bool(st.intent.export_video),
         intent_confidence=float(st.intent.intent_confidence if st.intent.intent_confidence is not None else 1.0),
+        review_brief=bool(ctx.plan.get("review_brief")),
     )
     st.metadata["executive_plan"] = eplan
     path = write_json_atomic(Path(st.output_dir) / "executive_plan.json", eplan)

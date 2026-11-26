@@ -329,7 +329,7 @@ PLAN_FORMAT = (
 def build_prompt(instruction: str, pack: dict[str, Any], tools_guide: dict[str, Any], feedback: dict[str, Any] | None = None, progress: list[dict[str, Any]] | None = None) -> str:
     parts = [
         "You are the Executive Editing Agent of Bang On Pro's production department (YouTube podcasts, gameshows, sports, news, interviews, Shorts).",
-        "Turn the editor's instruction into a short plan of editing tool calls for the specialist agents. Times are timeline seconds.",
+        "Turn the editor's instruction into a short plan of editing tool calls for the specialist agents. Times are timeline seconds. Cover every requirement in the instruction or return questions with no steps.",
         f"INSTRUCTION: {instruction}",
         "PROJECT: " + json.dumps(pack, separators=(",", ":"), default=str),
         "TOOLS: " + json.dumps({"bop_switch_camera": "{agent, start, end, camera, reason}", "bop_remove_range": "{agent, start, end}",

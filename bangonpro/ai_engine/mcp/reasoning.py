@@ -30,7 +30,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, ContextManager, Protocol
 
 from . import subscriptions
 
@@ -429,14 +429,15 @@ def _clean_env(provider: str, allow_api_billing: bool) -> dict[str, str]:
     return subscriptions.client_env(subscriptions.client_path(provider))
 
 
-def _run(argv: list[str], *, cwd: str, env: dict[str, str], timeout: float, cancel: threading.Event | None, use_pty: bool = False, input_text: str | None = None) -> tuple[int, str, str]:
+def _run(argv: list[str], *, cwd: str, env: dict[str, str], timeout: float, cancel: threading.Event | None, use_pty: bool = False, input_text: str | None = None, start: ContextManager[None] | None = None) -> tuple[int, str, str]:
     """Run one headless call; stops on cancel or timeout (the process is killed, nothing is retried)."""
     master = slave = None
     if use_pty:  # Antigravity print mode may write nothing to a non-TTY stdout (upstream issue); give it a terminal
         import pty
 
         master, slave = pty.openpty()
-    proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL, stdout=slave if use_pty else subprocess.PIPE, stderr=subprocess.PIPE, text=not use_pty)  # noqa: S603
+    with start if start is not None else contextlib.nullcontext():
+        proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL, stdout=slave if use_pty else subprocess.PIPE, stderr=subprocess.PIPE, text=not use_pty)  # noqa: S603
     out_chunks: list[bytes] = []
     if use_pty:
         os.close(slave)  # type: ignore[arg-type]
@@ -542,12 +543,12 @@ class CodexAdapter(Adapter):
                 "-c", 'forced_login_method="chatgpt"', "--output-last-message", str(Path(workdir) / "last.txt"), "-"]
 
     def run_verified(self, prompt: str, *, binary: str, access: dict[str, Any], timeout: float,
-                     cancel: threading.Event | None) -> tuple[str, dict[str, Any]]:
+                     cancel: threading.Event | None, start: ContextManager[None] | None = None) -> tuple[str, dict[str, Any]]:
         with tempfile.TemporaryDirectory(prefix="bop_codex_") as td:
             argv = self.argv(prompt, None, td)
             argv[0] = binary
             argv[-1:-1] = access["auth_config"]
-            rc, out, err = _run(argv, cwd=td, env=subscriptions.client_env(binary), timeout=timeout, cancel=cancel, input_text=prompt)
+            rc, out, err = _run(argv, cwd=td, env=subscriptions.client_env(binary), timeout=timeout, cancel=cancel, input_text=prompt, start=start)
             return self.parse(rc, out, err, td)
 
     def call(self, prompt: str, *, model: str | None, timeout: float, cancel: threading.Event | None, allow_api_billing: bool) -> tuple[str, dict[str, Any]]:
@@ -731,32 +732,43 @@ class ProviderRouter:
             try:
                 adapter = self.adapters[p]
                 verified = isinstance(adapter, CodexAdapter)
-                if verified:
-                    binary = subscriptions.client_path(p)
-                    if not binary:
-                        raise ProviderFailure("unavailable", "Codex is missing")
-                    access = subscriptions.subscription_access(p, binary)
-                    if not access["ready"]:
+                # Only one app request can consume a verified quota snapshot at a time.
+                with _storage_lock("codex-execution") if verified else contextlib.nullcontext():
+                    if verified:
+                        binary = subscriptions.client_path(p)
+                        if not binary:
+                            raise ProviderFailure("unavailable", "Codex is missing")
+                        access = subscriptions.subscription_access(p, binary)
+                        if not access["ready"]:
+                            self._remember_access(p, access)
+                            reset = access.get("retry_at")
+                            raise ProviderFailure("usage_exhausted" if reset else "not_entitled", access["message"], reset)
+                    @contextlib.contextmanager
+                    def authorise_attempt():
+                        nonlocal reserved
+                        with _storage_lock():
+                            current = load_config()
+                            if current != self.cfg:
+                                raise ProviderFailure("policy_changed", "Subscription settings changed")
+                            if self.cancel is not None and self.cancel.is_set():
+                                raise ProviderFailure("cancelled", "the call was stopped")
+                            self.budget.max_calls_per_day = current.get("max_calls_per_day")
+                            max_calls = int(current.get("max_calls_per_task", 3))
+                            self.budget.max_calls = min(max_calls, self._task_cap) if self._task_cap is not None else max_calls
+                            row.update(ts=time.time(), at=_now_iso())
+                            self.budget.charge(row)
+                            reserved = True
+                            yield
+
+                    text_prompt = prompt(privacy(self.cfg)) if callable(prompt) else prompt
+                    if verified:
                         self._remember_access(p, access)
-                        reset = access.get("retry_at")
-                        raise ProviderFailure("usage_exhausted" if reset else "not_entitled", access["message"], reset)
-                with _storage_lock():
-                    current = load_config()
-                    if current != self.cfg:
-                        continue  # sign-in, consent or routing changed during the preflight
-                    if self.cancel is not None and self.cancel.is_set():
-                        raise ProviderFailure("cancelled", "the call was stopped")
-                    self.budget.max_calls_per_day = current.get("max_calls_per_day")
-                    max_calls = int(current.get("max_calls_per_task", 3))
-                    self.budget.max_calls = min(max_calls, self._task_cap) if self._task_cap is not None else max_calls
-                    text_prompt = prompt(privacy(current)) if callable(prompt) else prompt
-                    self.budget.charge(row)
-                    reserved = True
-                if verified:
-                    self._remember_access(p, access)
-                    text, usage = adapter.run_verified(text_prompt, binary=binary, access=access, timeout=self.timeout, cancel=self.cancel)
-                else:
-                    text, usage = adapter.call(text_prompt, model=pcfg.get("model"), timeout=self.timeout, cancel=self.cancel, allow_api_billing=False)
+                        text, usage = adapter.run_verified(text_prompt, binary=binary, access=access, timeout=self.timeout,
+                                                           cancel=self.cancel, start=authorise_attempt())
+                    else:
+                        with authorise_attempt():
+                            pass
+                        text, usage = adapter.call(text_prompt, model=pcfg.get("model"), timeout=self.timeout, cancel=self.cancel, allow_api_billing=False)
                 plan = extract_json(text)
                 if self.test and plan.get("ok") is not True:
                     raise ReasonerError("The provider did not return the connection-test response")
@@ -767,6 +779,8 @@ class ProviderRouter:
                     self.budget.record(row | {"ok": False, "kind": "io_error", "usage": "unknown"})
                 raise ReasonerError("The reasoning client or its usage ledger could not be accessed") from exc
             except ProviderFailure as f:
+                if f.kind == "policy_changed":
+                    continue
                 f.provider = p
                 row.update(ok=False, kind=f.kind, duration_ms=round((time.perf_counter() - t0) * 1000), usage="unknown")
                 if reserved:
@@ -900,7 +914,7 @@ def reasoning_status(*, check_auth: bool = False) -> dict[str, Any]:
         elif available and not saved.get("subscription_ready", bool(saved.get("last_ok"))):
             available, state = False, saved.get("subscription") or "Pending subscription check"
         until = saved.get("until")
-        provs[p] = {"test_supported": p not in subscriptions.BLOCKED, "title": PROVIDER_INFO[p]["title"], "installed": bool(binary), "authorised": authorised, "auth": auth,
+        provs[p] = {"auth_check_supported": p in ("claude", "codex"), "test_supported": p not in subscriptions.BLOCKED, "title": PROVIDER_INFO[p]["title"], "installed": bool(binary), "authorised": authorised, "auth": auth,
                     "available": available, "state": state, "install_url": subscriptions.INSTALL_URLS[p],
                     "last_test": saved.get("last_test"), "last_ok": saved.get("last_ok"),
                     "cooldown_until": _now_iso(until) if until and until > time.time() else None,

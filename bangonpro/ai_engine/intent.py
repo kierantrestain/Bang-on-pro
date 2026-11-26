@@ -443,14 +443,15 @@ def parse_production_instruction(
             generic_graphics_or_captions = re.fullmatch(
                 r"(?:please )?(?:(?:add|use|enable|include|keep|skip|omit|disable|no) )?(?:the |our )?"
                 r"(?:existing |standard )?(?:graphics?|lower[ -]thirds?|captions?|subtitles?|srt|ass)"
-                r"(?: for (?:all )?speakers)?(?: only)?(?: please)?", fragment
+                r"(?: (?:for|on) (?:all speakers|speakers|the (?:host|guest)|speaker [a-z0-9]+|[av][0-9]+|"
+                r"(?:audio|video) track [0-9]+|clip[ _]+[a-z0-9_-]+))?"
+                rf"(?: (?:from|between) {_TIME_TOKEN_RE} (?:to|through|until|and) {_TIME_TOKEN_RE})?"
+                r"(?: only)?(?: please)?", fragment
             )
             requires_more_detail = bool(re.match(
                 r"(?:(?:add|use|enable|include|keep) )?(?:the |our )?(?:existing |standard )?"
                 r"(?:captions?|subtitles?|graphics?|lower[ -]thirds?)\b", fragment
-            )) and not generic_graphics_or_captions and not (
-                targets.time_range_sec or targets.target_tracks or targets.target_speakers or targets.target_clips
-            )
+            )) and not generic_graphics_or_captions
             if (not recognised and not loudness_or_scope) or requires_more_detail:
                 partial = True
                 break

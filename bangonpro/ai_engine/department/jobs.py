@@ -234,6 +234,7 @@ class ProductionJob:
             "asr_model_id": state.metadata.get("asr_model_id"),
             "needs_clarification": bool(intent.needs_clarification),
             "clarification_question": intent.clarification_question,
+            "review_brief": bool(interp.intent.needs_clarification and not intent.needs_clarification and brief.strip()),
             "plan_path": str(job.plan_path),
         }
         write_json_atomic(job.plan_path, plan)

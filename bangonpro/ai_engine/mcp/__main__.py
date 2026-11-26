@@ -244,12 +244,10 @@ def main(argv: list[str] | None = None) -> int:
             if a.disconnect:
                 revoke(a.client)
                 message = "Bang On Pro authorisation withdrawn. The official client keeps its sign-in."
+            tests = provider_self_test([a.client] if a.client else None) if a.test else None
             out = reasoning_status(check_auth=a.check_auth)
-            if a.test:
-                out["self_test"] = provider_self_test([a.client] if a.client else None)
-                status = reasoning_status(check_auth=a.check_auth)
-                status["self_test"] = out["self_test"]
-                out = status
+            if tests is not None:
+                out["self_test"] = tests
             if message:
                 out["message"] = message
             print(json.dumps(out, indent=1))

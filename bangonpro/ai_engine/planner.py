@@ -346,7 +346,7 @@ def shared_reasoning_interpreter() -> LlmInterpreterFn | None:
                 "Allowed keys (omit any you do not need): booleans sync_cameras, transcribe, remove_setup_delay, remove_silence, build_rough_cut, "
                 "multicam_switch, restore_audio, add_captions, add_lower_thirds, run_qc, export_video, needs_clarification; strings "
                 "clarification_question, profile_hint; lists of strings target_clips, target_tracks, target_speakers; time_range_sec [start, end] "
-                "in seconds; numbers loudness_target_lufs, silence_threshold_db, min_pause_sec. If the instruction cannot be expressed with these, "
+                "in seconds; numbers loudness_target_lufs, silence_threshold_db, min_pause_sec. If any requested detail cannot be expressed with these fields, "
                 'set needs_clarification true and ask one short question.\n'
                 f"Project: {json.dumps({k: v for k, v in ctx_summary.items() if k != 'source_path'} if policy.get('metadata') is True else {}, default=str)[:1500]}\nInstruction: {instruction}"
             )

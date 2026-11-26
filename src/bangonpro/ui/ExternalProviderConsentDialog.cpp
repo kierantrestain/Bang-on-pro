@@ -228,6 +228,7 @@ void ExternalProviderConsentDialog::syncControls()
         const bool authorised = state.value(QStringLiteral("authorised")).toBool();
         const bool account = state.value(QStringLiteral("auth")).toString() == QStringLiteral("account");
         row.connect->setEnabled(ready && installed && (!authorised || !account));
+        row.check->setVisible(state.value(QStringLiteral("auth_check_supported")).toBool());
         row.check->setEnabled(ready && installed);
         row.test->setEnabled(ready && installed && authorised && testingAllowed && state.value(QStringLiteral("test_supported")).toBool());
         row.test->setToolTip(tr("Requires saved Connected Subscriptions consent and uses one reasoning call if eligible."));
@@ -250,12 +251,17 @@ void ExternalProviderConsentDialog::run(const QStringList &args, bool reloadSett
         m_feedback->setText(tr("The bundled reasoning runtime could not be found."));
         return;
     }
+    connect(process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), process, &QObject::deleteLater);
+    connect(process, &QProcess::errorOccurred, process, [process](QProcess::ProcessError error) {
+        if (error == QProcess::FailedToStart) {
+            process->deleteLater();
+        }
+    });
     m_busy = true;
     m_feedback->setText(tr("Checking subscription settings…"));
     syncControls();
-    connect(process, &QProcess::errorOccurred, this, [this, process](QProcess::ProcessError error) {
+    connect(process, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
         if (error == QProcess::FailedToStart) {
-            process->deleteLater();
             m_busy = false;
             m_feedback->setText(tr("The bundled reasoning runtime could not start."));
             syncControls();
@@ -264,7 +270,6 @@ void ExternalProviderConsentDialog::run(const QStringList &args, bool reloadSett
     connect(process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
             [this, process, reloadSettings, closeOnSuccess](int code, QProcess::ExitStatus status) {
                 const auto result = QJsonDocument::fromJson(process->readAllStandardOutput()).object();
-                process->deleteLater();
                 m_busy = false;
                 if (status != QProcess::NormalExit || code != 0 || !result.contains(QStringLiteral("providers"))) {
                     m_feedback->setText(
