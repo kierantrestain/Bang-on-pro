@@ -1418,16 +1418,49 @@ def run_distribution(ctx: AgentContext) -> AgentOutcome:
     want_social = flags.get("social") or (full and rules.get("social_versions"))
     want_hl = flags.get("highlights") or (full and rules.get("highlight_reel", False))
     highlights = st.metadata.get("highlights", [])
-    if (want_social or want_hl) and not (master and Path(master).is_file()):
-        review.append("Social/highlight renders planned but not rendered (master export not requested/approved)")
+    if want_hl and not (master and Path(master).is_file()):
+        review.append("Highlight reel planned but not rendered (master export not requested/approved)")
+    social_clips = st.metadata.get("social_clips") or []
+    if want_social and social_clips and st.rough_cut_shots:
+        # V1.3: subject-aware 9:16 clips as editable native projects; proxies are rendered and checked
+        from bangonpro.ai_engine.commands import validate_timeline_command_batch
+        from bangonpro.ai_engine.department import reframe
+
+        final = bool(master and Path(master).is_file())
+        imports = {op["media_ref"]: op for b in st.command_batches for op in b.get("operations", []) if op.get("type") == "import_media"}
+        vdir = Path(st.output_dir) / "vertical"
+        vdir.mkdir(parents=True, exist_ok=True)
+        n_max = int(rules.get("social_clip_count", len(social_clips)) or len(social_clips))
+        for i, clip in enumerate(social_clips[:n_max], start=1):
+            ctx.token.check("vertical clip")
+            ctx.progress(0.7 + 0.15 * i / max(1, n_max), f"Vertical clip {i}: reframing and {'rendering' if final else 'rendering a review proxy'}")
+            plan = reframe.plan_vertical_clip(st, clip)
+            if not plan["pieces"]:
+                review.append(f"Vertical clip {i} ({clip.get('title', '')}) falls outside the edit; not produced")
+                continue
+            vb = reframe.vertical_batch(st, plan, imports, i)
+            validate_timeline_command_batch(vb)
+            write_json_atomic(vdir / f"vertical_{i:02d}_commands.json", vb)
+            proj = reframe.emit_vertical_project(vb, vdir / f"vertical_{i:02d}.kdenlive")
+            rec: dict[str, Any] = {"kind": "vertical_clip", "index": i, "title": clip.get("title"), "platform": clip.get("platform"), "project": str(proj),
+                                   "window_master_sec": [clip["start_sec"], clip["end_sec"]], "duration_sec": plan["duration_sec"], "pieces": len(plan["pieces"]),
+                                   "framing": sorted({p["framing"] for p in plan["pieces"]}), "uncertain_framing_sec": plan["uncertain_sec"],
+                                   "close_up_swaps": sum(1 for p in plan["pieces"] if p["swapped_to_close_up"]), "status": "project"}
+            if shutil.which("melt"):
+                # Review proxy: the same plan emitted at 360x640 (compositing at full size is ~real time)
+                rproj = proj if final else reframe.emit_vertical_project(reframe.vertical_batch(st, plan, imports, i, size=(reframe.PROXY_W, reframe.PROXY_H)), vdir / "proxy" / f"vertical_{i:02d}_proxy.kdenlive")
+                r = reframe.render_and_check(rproj, vdir / f"vertical_{i:02d}{'' if final else '_proxy'}.mp4", plan, proxy=not final)
+                rec["render"] = r
+                rec["status"] = r["status"]
+                for issue in r.get("issues", []):
+                    review.append(f"Vertical clip {i}: {issue}")
+            if plan["uncertain_sec"] > 0.5:
+                review.append(f"Vertical clip {i}: no subject evidence for {plan['uncertain_sec']:.1f}s, so the crop is centred there; check the framing")
+            deliverables.append(rec)
+    elif want_social and not social_clips:
+        review.append("Vertical clips requested but no standalone moment was selected; ask for clips of a specific section")
     if master and Path(master).is_file():
         out = Path(st.output_dir)
-        if want_social:
-            ctx.token.check("social render")
-            ctx.progress(0.75, "Rendering 9:16 social version")
-            social = out / f"{st.sequence_id}_social_9x16.mp4"
-            ok = _ffmpeg(["-i", master, "-vf", "crop=ih*9/16:ih,scale=1080:1920:flags=lanczos,setsar=1", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-c:a", "aac", "-b:a", "160k", str(social)])
-            deliverables.append({"kind": "social_9x16", "path": str(social), "status": "rendered" if ok else "failed"})
         if want_hl and highlights:
             ctx.token.check("highlight render")
             ctx.progress(0.88, "Rendering highlight reel")

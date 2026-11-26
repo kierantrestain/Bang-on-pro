@@ -940,8 +940,13 @@ def render_kdenlive_project_with_melt(
     video_bitrate: str = "6M",
     audio_bitrate: str = "192k",
     preset: str = "ultrafast",
+    consumer_props: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Execute a real verified render of a ``.kdenlive`` project using ``melt`` + ``ffprobe``."""
+    """Execute a real verified render of a ``.kdenlive`` project using ``melt`` + ``ffprobe``.
+
+    ``consumer_props`` adds melt consumer properties, e.g. ``["width=360", "height=640"]`` for a
+    fast review proxy of the same project.
+    """
     src_xml = Path(kdenlive_path).resolve()
     out_mp4 = Path(output_mp4_path).resolve()
     out_mp4.parent.mkdir(parents=True, exist_ok=True)
@@ -964,6 +969,7 @@ def render_kdenlive_project_with_melt(
         f"ab={audio_bitrate}",
         "ar=48000",
         "ac=2",
+        *(consumer_props or []),
     ]
     proc = subprocess.run(cmd, env=env, capture_output=True, text=True, check=False)
     if proc.returncode != 0:

@@ -123,3 +123,44 @@ def test_unclear_revision_changes_nothing(job: ProductionJob) -> None:
     rec = job.revise("make it pop, you know")
     assert rec["status"] == "not_understood" and _spans(job) == before
     assert job.revise("Improve the pacing of this selected section")["status"] == "needs_selection"
+
+
+# ---------------------------------------------------------------- vertical clips
+def test_reframe_holds_stable_subject_tracks_moving_one_and_reports_missing_evidence() -> None:
+    from types import SimpleNamespace
+
+    from bangonpro.ai_engine.department.reframe import MAX_SPEED, plan_vertical_clip
+
+    shot = SimpleNamespace(shot_id="s1", camera_id="cam_wide", speaker_id="Host", master_sync_in_sec=0.0, master_sync_out_sec=10.0,
+                           audio_media_ref="media_cam_host", audio_source_in_sec=0.0)
+    assets = {c: SimpleNamespace(has_video=True, camera_role=r, width=1920, height=1080) for c, r in (("cam_wide", "wide"), ("cam_host", "host"))}
+    def st(samples):  # noqa: ANN001, ANN202
+        return SimpleNamespace(rough_cut_shots=[shot], media_assets=assets, profile={"speaker_camera_map": {"Host": "cam_host"}, "camera_roles": {"cam_wide": "wide", "cam_host": "host"}},
+                               metadata={"visual_analysis": {"cam_host": {"samples": samples}}})
+    stable = st({"t": [0, 2, 4, 6, 8], "box": [[0.30, 0.2, 0.40, 0.8]] * 5})
+    p = plan_vertical_clip(stable, {"start_sec": 0.0, "end_sec": 10.0})["pieces"][0]
+    assert p["camera_id"] == "cam_host" and p["swapped_to_close_up"]  # close-up instead of the wide
+    assert p["framing"] == "held on subject" and len(p["keyframes"]) == 1 and abs(p["keyframes"][0][1] - 0.35) < 1e-6
+    moving = st({"t": [0, 2, 4, 6, 8], "box": [[x, 0.2, x + 0.1, 0.8] for x in (0.1, 0.3, 0.5, 0.7, 0.8)]})
+    kf = plan_vertical_clip(moving, {"start_sec": 0.0, "end_sec": 10.0})["pieces"][0]["keyframes"]
+    assert len(kf) >= 3 and all(abs(b[1] - a[1]) <= MAX_SPEED * (b[0] - a[0]) + 1e-6 for a, b in zip(kf, kf[1:], strict=False))
+    none = plan_vertical_clip(st({"t": [], "box": []}), {"start_sec": 0.0, "end_sec": 10.0})
+    assert none["uncertain_sec"] == 10.0 and none["pieces"][0]["keyframes"] == [(0.0, 0.5)]
+
+
+@needs_media
+def test_vertical_clips_revision_emits_editable_projects_and_checked_renders(job: ProductionJob) -> None:
+    import json
+
+    rec = job.revise("Create three strong standalone vertical clips from this episode")
+    assert rec["status"] == "draft_ready" and rec["rerun_from"] == "editorial_intelligence", rec
+    manifest = json.loads(Path(job.doc["artifacts"]["delivery_manifest_json"]).read_text(encoding="utf-8"))
+    clips = [d for d in manifest["deliverables"] if d["kind"] == "vertical_clip"]
+    assert 1 <= len(clips) <= 3
+    for c in clips:
+        xml = Path(c["project"]).read_text(encoding="utf-8")
+        assert 'width="1080"' in xml and 'height="1920"' in xml and "qtblend" in xml  # editable native vertical timeline
+        r = c["render"]
+        assert (r["width"], r["height"]) == ((360, 640) if r["proxy"] else (1080, 1920)) and r["audio"] and abs(r["duration_sec"] - c["duration_sec"]) <= 0.5, r
+        assert r["black_sec"] <= 0.3
+    assert job.doc["source_integrity"]["verified"] is True
