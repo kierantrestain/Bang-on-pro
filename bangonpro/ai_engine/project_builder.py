@@ -1190,6 +1190,14 @@ def emit_otio_timeline(
     return out_path
 
 
+def melt_env() -> dict[str, str]:
+    """Environment for a melt subprocess: OpenCV's wheel (imported by scenedetect) points
+    QT_QPA_PLATFORM_PLUGIN_PATH at its own bundled Qt plugins, which MLT's Qt module cannot load."""
+    env = {k: v for k, v in os.environ.items() if k not in ("QT_QPA_PLATFORM_PLUGIN_PATH", "QT_QPA_FONTDIR", "QT_PLUGIN_PATH")}
+    env.setdefault("QT_QPA_PLATFORM", "offscreen")
+    return env
+
+
 def render_kdenlive_project_with_melt(
     kdenlive_path: str | Path,
     output_mp4_path: str | Path,
@@ -1210,8 +1218,7 @@ def render_kdenlive_project_with_melt(
     out_mp4 = Path(output_mp4_path).resolve()
     out_mp4.parent.mkdir(parents=True, exist_ok=True)
 
-    env = os.environ.copy()
-    env.setdefault("QT_QPA_PLATFORM", "offscreen")
+    env = melt_env()
     if os.name == "posix" and not env.get("DISPLAY") and not env.get("WAYLAND_DISPLAY"):
         env["DISPLAY"] = ":99"
 

@@ -56,6 +56,10 @@ T_NUM = {"type": "number", "minimum": 0}
 T_REV = {"type": "integer", "description": "The revision you inspected (bop_status/bop_project). Stale revisions are rejected."}
 T_AGENT = {"type": "string", "enum": list(AGENT_ORDER), "description": "The production agent making this change."}
 T_TASK = {"type": "string", "description": "Optional task id from bop_task begin."}
+EXPECT_ITEM = {"type": "object", "required": ["check"], "description": "A completion check evaluated on the actual draft.",
+               "properties": {"check": {"type": "string", "enum": ["camera_at", "camera_share", "has_clip", "title_at", "effect_at", "transition_at", "caption_contains", "duration", "no_defect"]},
+                              "time": {"type": "number"}, "start": {"type": "number"}, "end": {"type": "number"}, "camera": {"type": "string"}, "min": {"type": "number"}, "max": {"type": "number"},
+                              "track": {"type": "string"}, "media_ref": {"type": "string"}, "text": {"type": "string"}, "effect": {"type": "string"}, "code": {"type": "string"}}}
 
 OP_GUIDE = {
     "conventions": "Times are timeline seconds; source_in/source_out are seconds in the clip's media; end times are exclusive. Tracks: V1 program picture, V2 graphics/B-roll/titles, A1 dialogue, A2 music.",
@@ -215,7 +219,7 @@ class BopTools:
                  "video": m.has_video, "size": [m.width, m.height], "sync_offset_sec": (st.sync_result.offsets_sec.get(m.camera_id) if st.sync_result else None)} for m in st.media_assets.values()]
         assets = [{"media_ref": k, "file": Path(str(val.get("file_path", ""))).name, "image": bool(val.get("is_image"))} for k, val in reg.items() if k not in st.media_assets and all(k != m.media_ref for m in st.media_assets.values())]
         supplied = []
-        for root in self.ws.allowed_roots[:-1]:
+        for root in [r for r in self.ws.allowed_roots if r != self.ws.job_dir]:
             for p in sorted(root.rglob("*"))[:200]:
                 if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".mp4", ".mov", ".m4v", ".wav", ".mp3"):
                     supplied.append(str(p))
@@ -629,7 +633,8 @@ class BopTools:
             Tool("bop_edit", "Edit (native operations)", "Apply native timeline operations as one undoable edit (see bop_ops). All or nothing; verified in the written project.",
                  {"required": ["agent", "expected_revision", "ops"], "properties": {"agent": T_AGENT, "expected_revision": T_REV, "ops": {"type": "array", "items": op_item, "minItems": 1, "maxItems": 60},
                                                                                    "label": {"type": "string"}, "task_id": T_TASK, "dry_run": {"type": "boolean"}}}, self.edit),
-            Tool("bop_switch_camera", "Switch camera", "Show another camera over [start, end) at the same moment (reaction, wide, speaker). Dialogue is untouched.",
+            Tool("bop_switch_camera", "Switch camera", "Show another camera over [start, end) at the same moment (reaction, wide, speaker). Dialogue is untouched; the camera's grade comes with it. "
+                 "Put 'reaction' in reason for a deliberate listener cutaway so Quality Control treats it as intentional.",
                  {"required": ["expected_revision", "start", "end", "camera"], "properties": {"agent": T_AGENT, "expected_revision": T_REV, **rng, "camera": {"type": "string"},
                                                                                                "reason": {"type": "string"}, "task_id": T_TASK, "dry_run": {"type": "boolean"}}}, self.switch_camera),
             Tool("bop_remove_range", "Remove range", "Cut [start, end) out of every track and close the gap; captions after it move up.",
@@ -653,7 +658,7 @@ class BopTools:
                  "complete: checks 'expect' on the actual draft, QC regression check, automatic correction of high-confidence defects (budgeted), verified result.",
                  {"required": ["action"], "properties": {"action": {"type": "string", "enum": ["begin", "lease", "note", "complete", "status", "cancel"]}, "task_id": T_TASK, "instruction": {"type": "string"},
                                                          "agents": {"type": "array", "items": T_AGENT}, "agent": T_AGENT, "tracks": {"type": "array", "items": {"type": "string"}}, **rng,
-                                                         "finding": {"type": "object"}, "expect": {"type": "array", "items": {"type": "object"}}, "auto_correct": {"type": "boolean"}}}, self.task),
+                                                         "finding": {"type": "object"}, "expect": {"type": "array", "items": EXPECT_ITEM}, "auto_correct": {"type": "boolean"}}}, self.task),
             Tool("bop_preview", "Render preview", "Render a low-resolution preview of a range (default 30 s) and check it; returns a contact sheet of the rendered shots.",
                  {"properties": rng}, self.preview, read_only=True),
             Tool("bop_live", "Live app", "The running Bang On Pro editor: status, state (its real timeline incl. manual changes), propose native ops for the editor's per-operation approval, undo, redo.",

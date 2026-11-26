@@ -104,8 +104,9 @@ def render_range(project: Path, out: Path, start_frame: int, end_frame: int, *, 
     from bangonpro.ai_engine.agents.ingest_sync import probe_media_file
 
     out.parent.mkdir(parents=True, exist_ok=True)
-    env = os.environ.copy()
-    env.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from bangonpro.ai_engine.project_builder import melt_env
+
+    env = melt_env()
     tmp = out.with_name(out.stem + ".part" + out.suffix)
     cmd = ["melt", str(project), f"in={max(0, start_frame)}", f"out={max(start_frame, end_frame - 1)}", "-consumer", f"avformat:{tmp}", "vcodec=libx264", "preset=ultrafast",
            "vb=800k", "pix_fmt=yuv420p", "acodec=aac", "ab=96k", "ar=48000", "ac=2", "real_time=-2"]

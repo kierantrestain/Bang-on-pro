@@ -51,7 +51,7 @@ class AgentDefinition:
     consumes: tuple[str, ...] = ()
     produces: tuple[str, ...] = ()
     engine: str = ""
-    version: str = "1.3.0"
+    version: str = "1.4.0"
     implementation_notes: str = ""
     limitations: tuple[str, ...] = field(default_factory=tuple)
 
@@ -75,7 +75,8 @@ AGENT_DEFINITIONS: tuple[AgentDefinition, ...] = (
         consumes=("brief", "profile", "project_context"),
         produces=("production_plan", "production_summary"),
         engine="planner.interpret_instruction + department activation rules",
-        implementation_notes="Deterministic rule-based brief parsing by default; an LLM provider is used only when configured, consented and within budget.",
+        implementation_notes="Deterministic rule-based brief parsing by default. V1.4: instructions the rules do not cover are planned by the editor's own "
+                             "authorised Claude Code or Codex (MCP-connected, or headless when authorised) and verified on the actual draft.",
     ),
     AgentDefinition(
         agent_id="learning",

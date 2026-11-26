@@ -51,6 +51,11 @@ class Workspace:
         self._cache: dict[str, Any] = {}
         self.layer = EditLayer(self.job_dir / "draft")
         with self.lock:
+            # The folders the job's own footage lives in are approved project resources too.
+            for m in self.state().media_assets.values():
+                parent = Path(m.file_path).resolve().parent
+                if parent not in self.allowed_roots:
+                    self.allowed_roots.insert(0, parent)
             if not self.layer.exists:
                 job = self.job
                 st = job._latest_state()
@@ -199,6 +204,12 @@ class Workspace:
                 raise ToolError("OPERATION_FAILED", "; ".join(row["messages"][:6]), hint="Nothing was changed. Re-inspect the clips (bop_project) and retry")
             aspans = self._spans(after)
             changed = sorted({k for k in bspans if k not in aspans or aspans[k][3] != bspans[k][3]} | {k for k in aspans if k not in bspans})
+            for tid, lst in after.track_lists().items():  # one clip per place on a track, as in the timeline
+                lst = sorted(lst, key=lambda c: c.timeline_start)
+                for a_c, b_c in zip(lst, lst[1:], strict=False):
+                    if b_c.timeline_start <= a_c.timeline_end_inclusive and (a_c.clip_id in changed or b_c.clip_id in changed):
+                        raise ToolError("OPERATION_FAILED", f"'{b_c.clip_id}' would overlap '{a_c.clip_id}' on {tid} at {b_c.timeline_start / after.fps:.2f}s",
+                                        hint="Place it after the existing clip, shorten it, or move the other clip first. Nothing was changed.")
             touched = [bspans[k] for k in changed if k in bspans] + [aspans[k] for k in changed if k in aspans]
             v = DraftView(self.state(), before)
             fps = v.fps
@@ -225,6 +236,11 @@ class Workspace:
             self.layer.log(agent_id, "edit", batch["transaction_label"], entry_id=entry["entry_id"], revision=new_rev)
             self.layer.save()
             verification = self._rebuild_and_verify()
+            if not verification["ok"]:
+                # Never report an edit the written project does not show: take it back out.
+                self.undo("verification")
+                raise ToolError("VERIFICATION_FAILED", "The written project did not match the edit, so it was undone: " + "; ".join(verification["issues"][:3]),
+                                details={"revision": self.revision})
             return {"revision": new_rev, "previous_revision": rev, "entry_id": entry["entry_id"], "diff": diff, "messages": row["messages"], "verified": verification}
 
     def _rebuild_and_verify(self) -> dict[str, Any]:

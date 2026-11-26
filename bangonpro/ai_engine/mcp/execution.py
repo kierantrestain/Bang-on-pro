@@ -114,10 +114,15 @@ def task_action(bt: Any, args: dict[str, Any], ctx: CallContext | None) -> dict[
         tid = f"task_{uuid.uuid4().hex[:8]}"
         v = ws.view()
         baseline = check_draft(v)
+        started = ws.revision  # read before editing the in-memory layer (reading it reloads from disk)
         with ws.lock:
             ws.layer.reload()
+            # A retry of the same instruction supersedes the earlier attempt, so the editor sees one result.
+            for old in (ws.layer.doc.get("tasks") or {}).values():
+                if old.get("instruction") == args["instruction"] and old.get("status") in ("open", "needs_attention"):
+                    old.update({"status": "superseded", "superseded_by": tid, "superseded_unresolved": old.pop("unresolved", [])})
             ws.layer.doc.setdefault("tasks", {})[tid] = {"task_id": tid, "instruction": args["instruction"], "agents": agents, "expect": args.get("expect") or [], "status": "open",
-                                                         "started_revision": ws.revision, "baseline": [list(_key(d)) for d in baseline], "edits": 0, "corrections": 0,
+                                                         "started_revision": started, "baseline": [list(_key(d)) for d in baseline], "edits": 0, "corrections": 0,
                                                          "events": [{"at": _now(), "phase": "understand", "agent": "executive"}], "findings": [], "client": getattr(ctx, "client_name", None)}
             ws.layer.save()
         pack = context_pack(bt, agents[1:] or ["multicam_director", "rough_cut", "graphics"])

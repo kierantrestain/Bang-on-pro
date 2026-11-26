@@ -453,7 +453,7 @@ def test_error_explanations_cover_common_failures() -> None:
 # ------------------------------------------------------------------ readiness
 def test_readiness_report_is_structured_and_actionable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     rep = check_system(job_root=tmp_path / "jobs", cache_dir=tmp_path / "cache", model_dir=tmp_path / "models", probe_hardware=False)
-    assert rep["app_version"] == APP_VERSION == "1.3.0" and rep["overall"] in ("ready", "attention", "blocked")
+    assert rep["app_version"] == APP_VERSION == "1.4.0" and rep["overall"] in ("ready", "attention", "blocked")
     ids = {i["id"] for i in rep["items"]}
     assert {"hardware", "storage_jobs", "storage_cache", "tool_ffmpeg", "tool_ffprobe", "tool_melt", "python", "model_speech", "cache"} <= ids
     for item in rep["items"]:
@@ -516,7 +516,7 @@ def test_diagnostics_export_is_sanitised(env: dict, tmp_path: Path) -> None:
         blob2 = b"\n".join(zf.read(n) for n in names2)
     assert "jobs/diag/draft/transcript.json" in names2 and "jobs/diag/draft/copied_take.mp4" in names2
     assert not any("provider" in n for n in names2) and secret.encode() not in blob2
-    assert res["manifest"]["app_version"] == "1.3.0"
+    assert res["manifest"]["app_version"] == "1.4.0"
 
 
 # ------------------------------------------------------------------ measurement

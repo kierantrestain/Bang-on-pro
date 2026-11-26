@@ -1,0 +1,144 @@
+{
+ "evidence_class": "REAL authenticated AI client (Claude Code CLI headless mode, the account's own sign-in; no API key, no credential access)",
+ "date_utc": "2026-11-26",
+ "client": "Claude Code 2.1.332 (Claude Code)",
+ "invocation": "claude -p <instruction> --mcp-config mcp.json --strict-mcp-config --allowedTools mcp__bangonpro --max-turns 30 --output-format json (plus a --model choice to limit usage)",
+ "footage": "synthetic generated 3-camera podcast (38.6 s draft)",
+ "instruction": "Make the guest's longest answer feel more dynamic: cut to the host listening once in the middle of it, add the city B-roll near its end with a short fade, and put a Live from the studio title over the opening wide shot.",
+ "result": {
+  "subtype": "success",
+  "is_error": false,
+  "num_turns": 14,
+  "duration_ms": 23582,
+  "total_cost_usd": 0.18839000000000003
+ },
+ "tokens": {
+  "input_tokens": 24,
+  "cache_creation_input_tokens": 27400,
+  "cache_read_input_tokens": 507920,
+  "output_tokens": 2795
+ },
+ "tool_calls_seen_by_server": 12,
+ "client_final_report": "I made all three edits and the task now shows verified (task_f79ebc83). The first task (task_782b36ce) came back \"needs_attention\" because I wrote the `expect` checks with the wrong key name (`type` instead of `check`). I re-ran the same checks on a new task, and the camera and title checks passed with no QC corrections. The first task has not been closed, so it is probably still open.\n\n- **Reaction cut:** The guest's longest answer runs about 11.2\u201319.2s. As Multicam Director, I switched to cam_host (the host listening) from 13.5 to 15.5s. The guest's audio carries on underneath.\n- **City B-roll:** As Graphics, I placed `broll_city.mp4` full-frame on V2 from 17.24 to 19.44s, with a 10-frame (0.4s) fade at each end. It covers the answer's last couple of seconds, over the existing wide shot.\n- **Title:** As Graphics, I added \"Live from the studio\" from 0 to 2s over the opening cam_wide shot.\n\nI didn't check the frames visually, so the result is confirmed by the task checks only.",
+ "edits": [
+  {
+   "entry": "e10",
+   "agent": "multicam_director",
+   "label": "Show cam_host 13.5-15.5s (Host listening reaction mid-answer)",
+   "ops": [
+    "split_clip",
+    "split_clip",
+    "delete_clip",
+    "place_clip",
+    "add_effect"
+   ],
+   "replay": "applied"
+  },
+  {
+   "entry": "e11",
+   "agent": "graphics",
+   "label": "Place broll_city.mp4 at 17.24s",
+   "ops": [
+    "import_media",
+    "place_clip",
+    "add_transition",
+    "add_transition"
+   ],
+   "replay": "applied"
+  },
+  {
+   "entry": "e12",
+   "agent": "graphics",
+   "label": "Title 'Live from the studio' at 0s",
+   "ops": [
+    "add_lower_third"
+   ],
+   "replay": "applied"
+  }
+ ],
+ "tasks": {
+  "task_782b36ce": {
+   "status": "needs_attention",
+   "expect": [
+    {
+     "type": "camera_at",
+     "time": 14.5,
+     "camera": "cam_host"
+    },
+    {
+     "type": "camera_at",
+     "time": 12,
+     "camera": "cam_guest"
+    },
+    {
+     "type": "title_at",
+     "time": 1,
+     "text": "Live from the studio"
+    }
+   ]
+  },
+  "task_f79ebc83": {
+   "status": "verified",
+   "expect": [
+    {
+     "check": "camera_at",
+     "time": 14.5,
+     "camera": "cam_host"
+    },
+    {
+     "check": "camera_at",
+     "time": 12,
+     "camera": "cam_guest"
+    },
+    {
+     "check": "title_at",
+     "time": 1,
+     "text": "Live from the studio"
+    }
+   ]
+  }
+ },
+ "independent_verification_on_draft": {
+  "camera_at_12.0": "cam_guest",
+  "camera_at_14.5": "cam_host",
+  "camera_at_16.0": "cam_guest",
+  "v2": [
+   [
+    "title_0_0265",
+    0.0,
+    2.0,
+    "Live from the studio",
+    []
+   ],
+   [
+    "lt_01_host",
+    2.28,
+    6.76,
+    "Host",
+    []
+   ],
+   [
+    "lt_02_guest",
+    11.92,
+    16.4,
+    "Guest",
+    []
+   ],
+   [
+    "asset_asset_broll_city_431",
+    17.24,
+    19.44,
+    "asset_broll_city",
+    [
+     "fade_from_black",
+     "fade_to_black"
+    ]
+   ]
+  ],
+  "qc_defects": [],
+  "project_verified": true
+ },
+ "issues_found_by_this_run": [
+  "The client first wrote completion checks with key 'type' instead of 'check'; the task correctly failed them and the client retried. Fixed: checks are now schema-validated up front and a retried instruction supersedes the earlier task."
+ ]
+}

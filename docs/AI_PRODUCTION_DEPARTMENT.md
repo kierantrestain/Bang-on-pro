@@ -99,3 +99,12 @@ count, engine (deterministic / neural / fallback) and reason per agent; *Needs y
 notifications; Accept / Reject / Rerun Agent; Cancel / Resume; Review Draft in Timeline (one reviewable,
 undoable proposal with per-operation agent attribution); Open Draft Project; Promote (approval to replace).
 After a restart the most recent job is recovered; an interrupted job is shown as resumable.
+
+## V1.4: agents that edit
+
+The 14 agents can now be driven by the editor's own Claude Code or Codex through the MCP adapter
+(`python -m bangonpro.ai_engine.mcp`). They inspect footage (transcript, project index, contact
+sheets, rendered previews, loudness), edit the draft with native operations as the agent that owns
+each change, and finish a brief with `bop_task complete`, where Quality Control verifies the actual
+draft and corrects high-confidence defects. Without a client nothing changes. See
+[AGENT_CONNECTION_GUIDE.md](AGENT_CONNECTION_GUIDE.md) and [V1.4_RELEASE_REPORT.md](V1.4_RELEASE_REPORT.md).

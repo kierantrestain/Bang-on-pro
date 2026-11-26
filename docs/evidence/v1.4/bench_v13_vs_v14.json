@@ -1,0 +1,88 @@
+{
+ "evidence": "synthetic generated footage; scripted tool calls (mocked reasoning) for the agent pass",
+ "machine": "x86_64",
+ "cpus": 4,
+ "v1.3": {
+  "status": "draft_ready",
+  "processing_sec": 9.4,
+  "review_items": 6,
+  "project": "seq_main_draft.kdenlive",
+  "creative_instruction": "draft_ready",
+  "creative_message": null,
+  "creative_actions": [
+   "More dynamic camera switching",
+   "Graphics and lower thirds from the series templates"
+  ],
+  "creative_start_agent": "multicam_director",
+  "peak_rss_mb": 254.5,
+  "peak_child_rss_mb": 283.9
+ },
+ "v1.4": {
+  "status": "draft_ready",
+  "processing_sec": 9.24,
+  "review_items": 6,
+  "project": "seq_main_draft.kdenlive",
+  "creative_instruction": "draft_ready",
+  "creative_message": null,
+  "creative_actions": [
+   "More dynamic camera switching",
+   "Graphics and lower thirds from the series templates"
+  ],
+  "creative_start_agent": "multicam_director",
+  "peak_rss_mb": 254.5,
+  "peak_child_rss_mb": 283.9
+ },
+ "draft_identical": true,
+ "v1.4_agent_pass": {
+  "status": "verified",
+  "checks_passed": 3,
+  "checks": 3,
+  "edits": 3,
+  "corrections": [
+   {
+    "code": "GRAPHIC_TOO_SHORT",
+    "result": "accepted (verified by quality_control)"
+   }
+  ],
+  "unresolved_for_editor": 0,
+  "tool_calls": 9,
+  "tool_sec": {
+   "bop_task": 0.059,
+   "bop_transcript": 0.001,
+   "bop_frames": 0.095,
+   "bop_switch_camera": 0.124,
+   "bop_place_asset": 0.081,
+   "bop_add_title": 0.107
+  },
+  "total_tool_sec": 0.7,
+  "context_pack_bytes": 2580,
+  "frame_cache": {
+   "hits": 2,
+   "misses": 2
+  },
+  "native_ops_applied": 11,
+  "overlapping_placement_rejected": true
+ },
+ "v1.3_creative_result": {
+  "evidence": "same three completion checks evaluated on V1.3's revised draft",
+  "checks_passed": 0,
+  "checks": 3,
+  "details": [
+   {
+    "check": "camera_at",
+    "ok": false,
+    "detail": "on screen: cam_guest"
+   },
+   {
+    "check": "has_clip",
+    "ok": false,
+    "detail": "clips: []"
+   },
+   {
+    "check": "title_at",
+    "ok": false,
+    "detail": "titles: []"
+   }
+  ]
+ }
+}

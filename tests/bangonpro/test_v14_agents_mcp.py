@@ -248,6 +248,10 @@ def test_switch_camera_edit_is_real_verified_and_exactly_undoable(job: Any, foot
     assert _sha(proj) == before  # the draft is byte-identical to before the edit
     c("bop_history", action="redo")
     assert c.bt.ws.view().camera_at(v.f(a + 1.0)) == "cam_guest"
+    # Session recovery: a new server process for the same job resumes at the same revision and history
+    c2 = Client(job.dir, [footage["assets"]])
+    assert c2.rev == c.rev and [e["entry_id"] for e in c2("bop_history")["edits"]] == [e["entry_id"] for e in c("bop_history")["edits"]]
+    assert c2.bt.ws.view().camera_at(v.f(a + 1.0)) == "cam_guest"
 
 
 @needs_media
@@ -275,6 +279,13 @@ def test_rejections_stale_permission_locks_conflicts_and_manual_edits(job: Any, 
     assert out["error"]["code"] == "CONFLICT" and "graphics" in out["error"]["message"]
     c("bop_task", action="complete", task_id=t["task_id"])  # releases the lease
     assert c("bop_edit", agent="vfx", expected_revision=c.rev, ops=[{"type": "add_effect", "clip_id": card, "params": {"mlt_service": "avfilter.gblur", "kdenlive_id": "avfilter.gblur"}}])["verified"]["ok"]
+    # A completion check with a wrong key is refused up front (seen in the live Claude Code run), and a
+    # retried instruction supersedes the earlier attempt instead of leaving stale issues for the editor
+    errs = list(c.server._validators["bop_task"].iter_errors({"action": "begin", "instruction": "x", "expect": [{"type": "camera_at", "time": 1}]}))
+    assert errs
+    t1 = c("bop_task", action="begin", instruction="same brief")
+    c("bop_task", action="begin", instruction="same brief")
+    assert c.bt.ws.layer.doc["tasks"][t1["task_id"]]["status"] == "superseded"
     # Supplied files outside the approved folders are refused
     assert c("bop_place_asset", expected_revision=c.rev, file="/etc/hostname", start=1, duration=1, agent="graphics")["error"]["code"] in ("PATH_NOT_ALLOWED", "NOT_FOUND")
     # The editor changed the draft by hand: agents stop and say so; a later rebuild keeps the manual version
@@ -484,6 +495,16 @@ def test_live_app_connection_failure_and_simulated_native_server(tmp_path: Path)
     th.join(timeout=5)
     srv.close()
     assert seen[2]["actor"]["requires_approval"] is True  # agents propose; the editor approves in the app
+
+
+def test_server_refuses_a_missing_job_with_a_structured_error(tmp_path: Path) -> None:
+    from bangonpro.ai_engine.mcp.__main__ import main, make_server
+    from bangonpro.ai_engine.mcp.protocol import ToolError
+
+    with pytest.raises(ToolError) as exc:
+        make_server(str(tmp_path / "nope"))
+    assert exc.value.code == "NO_JOB" and exc.value.hint
+    assert main(["serve", "--job", str(tmp_path / "nope")]) == 2
 
 
 def test_live_tool_reports_app_not_connected(tmp_path: Path) -> None:
