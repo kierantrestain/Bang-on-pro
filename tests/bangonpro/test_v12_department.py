@@ -134,7 +134,10 @@ def test_full_production_draft_end_to_end(full_job: ProductionJob) -> None:
     manifest = json.loads(Path(d["artifacts"]["delivery_manifest_json"]).read_text(encoding="utf-8"))
     kinds = {x["kind"]: x for x in manifest["deliverables"]}
     assert kinds["master"]["loudness_ok"] is True, kinds["master"]
-    assert kinds["social_9x16"]["status"] == "rendered"
+    # V1.3: subject-aware vertical clips (editable projects) replace the centre-cropped social render
+    vclip = kinds["vertical_clip"]
+    assert vclip["status"] in ("rendered", "rendered_with_issues") and vclip["render"]["proxy"] is False
+    assert (vclip["render"]["width"], vclip["render"]["height"]) == (1080, 1920) and Path(vclip["project"]).is_file()
     assert manifest["publish_status"].startswith("not_published")
     assert (full_job.dir / "summary.md").read_text(encoding="utf-8").startswith("# Production summary")
     assert len(list((full_job.dir / "checkpoints").glob("*.json"))) == 15
