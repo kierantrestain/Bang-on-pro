@@ -329,8 +329,10 @@ def evaluate(job_dir: Path, gt: dict[str, Any], path_roles: dict[str, str], min_
 # ----------------------------------------------------------------------------- driver
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--baseline", required=True, help="checkout of v1.2.1")
-    ap.add_argument("--candidate", default=str(REPO), help="checkout of v1.2.2 (default: this repo)")
+    ap.add_argument("--baseline", required=True, help="baseline checkout (e.g. v1.2.1 or v1.2.2)")
+    ap.add_argument("--candidate", default=str(REPO), help="candidate checkout (default: this repo)")
+    ap.add_argument("--labels", nargs=2, default=["v1.2.1", "v1.2.2"], metavar=("BASELINE", "CANDIDATE"))
+    ap.add_argument("--candidate-only", action="store_true", help="skip the baseline runs (fast iteration)")
     ap.add_argument("--profiles-from", choices=("baseline", "own"), default="baseline",
                     help="baseline = both versions use V1.2.1 profile files (identical settings); own = each its shipped profiles")
     ap.add_argument("--profiles", nargs="*", default=list(PROFILE_CAMERAS))
@@ -340,7 +342,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out", default=str(REPO / "docs" / "evidence" / "v1.2.2" / "v121_vs_v122_benchmark.json"))
     a = ap.parse_args(argv)
 
-    versions = {"v1.2.1": Path(a.baseline).resolve(), "v1.2.2": Path(a.candidate).resolve()}
+    versions = {a.labels[0]: Path(a.baseline).resolve(), a.labels[1]: Path(a.candidate).resolve()}
+    profile_root = versions[a.labels[0]]
+    if a.candidate_only:
+        versions = {a.labels[1]: versions[a.labels[1]]}
     base = Path(tempfile.mkdtemp(prefix="bop_compare_"))
     media = {name: GENERATORS[name](base / "media") for name in a.scenarios}
     path_roles = {str(p.resolve()): role for cams in media.values() for role, p in cams.items()}
@@ -352,7 +357,7 @@ def main(argv: list[str] | None = None) -> int:
         scen0 = a.scenarios[0]
         w = base / "warmup" / ver
         run_job(checkout, {"cache": str(w / "cache"), "prefs": str(w / "prefs"), "job_root": str(w / "jobs"), "mode": a.mode, "export": False, "budget": 0.0,
-                           "profile": str(versions["v1.2.1"] / "bangonpro" / "show_profiles" / "podcast_multicam.json"), "brief": BRIEFS["podcast_multicam"],
+                           "profile": str(profile_root / "bangonpro" / "show_profiles" / "podcast_multicam.json"), "brief": BRIEFS["podcast_multicam"],
                            "inputs": [f"{PROFILE_CAMERAS['podcast_multicam'][r]}={p}" for r, p in media[scen0].items()], "job_id": "warmup"})
     combo = 0
     for profile in a.profiles:
@@ -362,7 +367,7 @@ def main(argv: list[str] | None = None) -> int:
             order = list(versions.items()) if combo % 2 == 0 else list(reversed(list(versions.items())))
             combo += 1
             for ver, checkout in order:
-                src = versions["v1.2.1"] if a.profiles_from == "baseline" else checkout
+                src = profile_root if a.profiles_from == "baseline" else checkout
                 prof_path = src / "bangonpro" / "show_profiles" / f"{profile}.json"
                 prof = json.loads(prof_path.read_text(encoding="utf-8"))
                 min_shot = float(prof.get("min_shot_duration_sec", 2.0))

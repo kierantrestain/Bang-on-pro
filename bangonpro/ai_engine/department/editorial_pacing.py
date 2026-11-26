@@ -40,12 +40,12 @@ from bangonpro.ai_engine.state import ProjectAnalysisState, TimeInterval
 # Show-specific pacing defaults (seconds). Daily news is tight; podcasts and interviews
 # keep conversational breath; gameshows protect suspense and long audience reactions.
 FORMAT_PACING_DEFAULTS: dict[str, dict[str, Any]] = {
-    "daily_news": {"natural_pause_sec": 0.35, "turn_pause_sec": 0.45, "protected_pause_max_sec": 0.8, "reaction_pause_max_sec": 2.0, "min_pause_saving_sec": 0.25, "remove_fillers": True},
-    "podcast": {"natural_pause_sec": 0.6, "turn_pause_sec": 0.7, "protected_pause_max_sec": 1.5, "reaction_pause_max_sec": 4.0, "min_pause_saving_sec": 0.4, "remove_fillers": False},
-    "interview": {"natural_pause_sec": 0.7, "turn_pause_sec": 0.8, "protected_pause_max_sec": 1.8, "reaction_pause_max_sec": 4.0, "min_pause_saving_sec": 0.4, "remove_fillers": False},
-    "gameshow": {"natural_pause_sec": 0.45, "turn_pause_sec": 0.5, "protected_pause_max_sec": 3.0, "reaction_pause_max_sec": 8.0, "min_pause_saving_sec": 0.3, "remove_fillers": False},
-    "sports_discussion": {"natural_pause_sec": 0.45, "turn_pause_sec": 0.5, "protected_pause_max_sec": 1.2, "reaction_pause_max_sec": 4.0, "min_pause_saving_sec": 0.3, "remove_fillers": False},
-    "social": {"natural_pause_sec": 0.25, "turn_pause_sec": 0.3, "protected_pause_max_sec": 0.6, "reaction_pause_max_sec": 1.5, "min_pause_saving_sec": 0.2, "remove_fillers": True},
+    "daily_news": {"beat_pause_sec": 0.5, "natural_pause_sec": 0.35, "turn_pause_sec": 0.45, "protected_pause_max_sec": 0.8, "reaction_pause_max_sec": 2.0, "min_pause_saving_sec": 0.25, "remove_fillers": True},
+    "podcast": {"beat_pause_sec": 0.85, "natural_pause_sec": 0.6, "turn_pause_sec": 0.7, "protected_pause_max_sec": 1.5, "reaction_pause_max_sec": 4.0, "min_pause_saving_sec": 0.4, "remove_fillers": False},
+    "interview": {"beat_pause_sec": 0.9, "natural_pause_sec": 0.7, "turn_pause_sec": 0.8, "protected_pause_max_sec": 1.8, "reaction_pause_max_sec": 4.0, "min_pause_saving_sec": 0.4, "remove_fillers": False},
+    "gameshow": {"beat_pause_sec": 0.75, "natural_pause_sec": 0.45, "turn_pause_sec": 0.5, "protected_pause_max_sec": 3.0, "reaction_pause_max_sec": 8.0, "min_pause_saving_sec": 0.3, "remove_fillers": False},
+    "sports_discussion": {"beat_pause_sec": 0.75, "natural_pause_sec": 0.45, "turn_pause_sec": 0.5, "protected_pause_max_sec": 1.2, "reaction_pause_max_sec": 4.0, "min_pause_saving_sec": 0.3, "remove_fillers": False},
+    "social": {"beat_pause_sec": 0.35, "natural_pause_sec": 0.25, "turn_pause_sec": 0.3, "protected_pause_max_sec": 0.6, "reaction_pause_max_sec": 1.5, "min_pause_saving_sec": 0.2, "remove_fillers": True},
 }
 _GENERIC_DEFAULTS: dict[str, Any] = {
     "pause_policy": "compress",
@@ -60,12 +60,14 @@ _GENERIC_DEFAULTS: dict[str, Any] = {
 # Safe ranges applied when reading (learned overlays are also clamped by the Learning Agent)
 _BOUNDS: dict[str, tuple[float, float]] = {
     "natural_pause_sec": (0.1, 3.0),
+    "beat_pause_sec": (0.1, 3.0),
     "turn_pause_sec": (0.1, 3.0),
     "protected_pause_max_sec": (0.2, 8.0),
     "reaction_pause_max_sec": (0.3, 15.0),
     "min_pause_saving_sec": (0.1, 3.0),
     "edge_guard_sec": (0.02, 0.3),
 }
+TURN_BEAT_MAX_SEC = 2.0  # V1.3: longer pauses inside a turn are dead air
 PROTECTED_KINDS: frozenset[str] = frozenset({"after_question", "before_punchline", "reaction_beat"})
 # Audible reactions only ("humour" spans the setup line itself, so it is not a reaction time)
 REACTION_MOMENTS: frozenset[str] = frozenset({"laughter", "applause", "reaction"})
@@ -262,6 +264,11 @@ def classify_gap(
     if prev is not None and nxt is not None and prev.speaker_id != nxt.speaker_id:
         reasons.append(f"turn change {prev.speaker_id} -> {nxt.speaker_id}")
         return "turn_gap", reasons
+    if prev is not None and nxt is not None and prev.speaker_id == nxt.speaker_id and (gap[1] - gap[0]) <= TURN_BEAT_MAX_SEC:
+        # V1.3: a short pause inside one speaker's turn is a thinking beat, not dead air. Without
+        # words it cannot be told apart from hesitation, so it keeps the format's beat length.
+        reasons.append("beat inside one speaker's turn")
+        return "turn_beat", reasons
     reasons.append("same-speaker pause" if prev is not None and nxt is not None else "pause")
     return "dead_air", reasons
 
@@ -277,6 +284,8 @@ def _target_keep(kind: str, rules: dict[str, Any], dur: float) -> float:
         return min(dur, max(float(rules["protected_pause_max_sec"]), float(rules["natural_pause_sec"])))
     if kind == "turn_gap":
         return min(dur, float(rules["turn_pause_sec"]))
+    if kind == "turn_beat":
+        return min(dur, max(float(rules["natural_pause_sec"]), float(rules.get("beat_pause_sec", rules["natural_pause_sec"]))))
     return min(dur, float(rules["natural_pause_sec"]))
 
 
@@ -580,6 +589,8 @@ def pacing_metrics(state: ProjectAnalysisState, kept: list[TimeInterval], *, dec
             if g[1] - g[0] < 0.15:
                 continue
             kind, _ = classify_gap(g, state, moments, _REF_RULES, index)
+            if kind == "turn_beat":
+                continue  # V1.3: kept at a bounded beat length (< 1 s); neither dead air nor protected
             row = {"start_sec": round(g[0], 3), "end_sec": round(g[1], 3), "kind": kind, "original_sec": round(g[1] - g[0], 3), "kept_sec": round(_overlap(g, kept), 3)}
             (protected if kind in PROTECTED_KINDS else unprot).append(row)
     retained = [p for p in protected if p["kept_sec"] >= min(p["original_sec"], floor) - 0.05]

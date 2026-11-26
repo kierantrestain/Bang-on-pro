@@ -157,13 +157,17 @@ def _resolve_camera_roles(state: ProjectAnalysisState) -> tuple[str, str, dict[s
     cam_prefs = state.profile.get("camera_preferences") or {}
     preferred_open_role = str(cam_prefs.get("default_opening_role", "wide"))
 
-    wide_cam = next(
+    opening_cam = next(
         (cid for cid in video_assets if _effective_role(cid) == preferred_open_role),
         next(
             (cid for cid in video_assets if _effective_role(cid) in ("wide", "desk")),
             ref_cam,
         ),
     )
+    # V1.3: the wide used for crosstalk, exchanges and topic changes is a real wide when one exists;
+    # the profile's opening role (e.g. the news desk) still opens and closes the programme.
+    wide_cam = next((cid for cid in video_assets if _effective_role(cid) == "wide"), opening_cam)
+    state.metadata["opening_camera_id"] = opening_cam
     reaction_cam = next(
         (cid for cid in video_assets if _effective_role(cid) in ("reaction", "broll")),
         wide_cam,
@@ -714,7 +718,7 @@ def plan_rough_cut_shots(
         planned.extend(iv_shots)
         if iv_shots:
             prev_cam = iv_shots[-1]["camera_id"]
-    planned = _apply_intro_outro_rules(planned, state=state, wide_cam=wide_cam)
+    planned = _apply_intro_outro_rules(planned, state=state, wide_cam=str(state.metadata.get("opening_camera_id") or wide_cam))
     if state.intent.multicam_switch:
         planned = ed.refine_shot_plan(planned, state=state, wide_cam=wide_cam, speaker_to_cam=speaker_to_cam, ctx=ctx)
     review_thresh = float(state.profile["editing_rules"].get("review_confidence_threshold", 0.72))

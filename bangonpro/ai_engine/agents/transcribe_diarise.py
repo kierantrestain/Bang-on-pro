@@ -808,6 +808,21 @@ def run_transcribe_diarise_agent(
             speaker_cams.append(cid)
             covered_speakers.add(asset.speaker_label)
 
+    # V1.3: a close-up camera the profile does not name (e.g. a news guest) is still a speaker's
+    # microphone. Without this its speech collapsed into the named presenter and stayed on their
+    # camera. The person role comes from Media Ingest (metadata/filename); wide/reaction/broll
+    # microphones hear everyone and are never used as a speaker's mic.
+    inv_roles = {i.get("camera_id"): i.get("role_label") for i in (state.metadata.get("media_inventory") or {}).get("inputs", [])}
+    person_roles = {"host", "guest", "panel", "desk", "presenter", "anchor", "contestant", "subject", "interviewer"}
+    for cid, asset in state.media_assets.items():
+        role = str(inv_roles.get(cid) or asset.camera_role or "")
+        if cid in speaker_cams or asset.speaker_label or not asset.has_audio or role not in person_roles:
+            continue
+        label = role.title() if role.title() not in covered_speakers else cid
+        asset.speaker_label = label
+        speaker_cams.append(cid)
+        covered_speakers.add(label)
+
     # 2. Compute frame-wise VAD across all audio-bearing assets
     report_progress(0.35, "Running energy & spectral-centroid VAD")
     min_len = min(features_by_cam[cid][1].size for cid in state.media_assets)
