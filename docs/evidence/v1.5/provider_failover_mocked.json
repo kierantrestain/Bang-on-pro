@@ -1,0 +1,183 @@
+{
+ "evidence": "mocked provider responses (fake CLIs speaking each documented headless format)",
+ "events": [
+  {
+   "at": "2026-11-26T06:05:36Z",
+   "from": "claude",
+   "to": "codex",
+   "kind": "usage_exhausted",
+   "reason": "Claude AI usage limit reached|1795680336 success",
+   "retry_at": "2026-11-26T08:05:36Z",
+   "task_id": null,
+   "mode": "app_driven"
+  },
+  {
+   "at": "2026-11-26T06:05:36Z",
+   "from": "codex",
+   "to": "grok",
+   "kind": "rate_limited",
+   "reason": "stream error: exceeded retry limit, last status: 429 Too Many Requests, Retry-After: 30",
+   "retry_at": "2026-11-26T06:06:06Z",
+   "task_id": null,
+   "mode": "app_driven"
+  },
+  {
+   "at": "2026-11-26T09:05:36Z",
+   "from": "claude",
+   "to": "codex",
+   "kind": "auth",
+   "reason": "Invalid API key \u00b7 Please run /login success",
+   "retry_at": null,
+   "task_id": "t4",
+   "mode": "app_driven"
+  },
+  {
+   "at": "2026-12-26T06:05:36Z",
+   "from": "claude",
+   "to": "codex",
+   "kind": "usage_exhausted",
+   "reason": "Claude AI usage limit reached|1795680336 success",
+   "retry_at": "2026-11-26T08:05:36Z",
+   "task_id": null,
+   "mode": "app_driven"
+  },
+  {
+   "at": "2026-12-26T06:05:36Z",
+   "from": "codex",
+   "to": "grok",
+   "kind": "usage_exhausted",
+   "reason": "ERROR: You've hit your usage limit. Upgrade to Pro or try again in 2 hours 5 minutes.",
+   "retry_at": "2026-11-26T08:10:36Z",
+   "task_id": null,
+   "mode": "app_driven"
+  },
+  {
+   "at": "2026-12-26T06:05:36Z",
+   "from": "grok",
+   "to": "agy",
+   "kind": "rate_limited",
+   "reason": "rate limit exceeded, try again in 45 seconds",
+   "retry_at": "2026-11-26T06:06:21Z",
+   "task_id": null,
+   "mode": "app_driven"
+  },
+  {
+   "at": "2026-12-26T06:05:36Z",
+   "from": "agy",
+   "to": null,
+   "kind": "usage_exhausted",
+   "reason": "{\"code\": 429, \"status\": \"RESOURCE_EXHAUSTED\", \"message\": \"Quota exceeded for this account. Please retry in 3h\"}",
+   "retry_at": "2026-11-26T09:05:36Z",
+   "task_id": null,
+   "mode": "app_driven"
+  }
+ ],
+ "ledger_rows": 15,
+ "status": {
+  "installed_clients": [
+   "claude",
+   "codex",
+   "grok",
+   "agy"
+  ],
+  "app_driven": "authorised",
+  "providers": {
+   "claude": {
+    "title": "Claude Code",
+    "installed": true,
+    "authorised": true,
+    "available": true,
+    "state": "available",
+    "api_billing": false
+   },
+   "codex": {
+    "title": "OpenAI Codex",
+    "installed": true,
+    "authorised": true,
+    "available": false,
+    "state": "usage_exhausted until 2026-12-26T06:06:06Z",
+    "api_billing": false
+   },
+   "grok": {
+    "title": "Grok Build",
+    "installed": true,
+    "authorised": false,
+    "available": false,
+    "state": "not authorised",
+    "api_billing": false
+   },
+   "agy": {
+    "title": "Google Antigravity",
+    "installed": true,
+    "authorised": true,
+    "available": false,
+    "state": "usage_exhausted until 2026-12-26T06:06:06Z",
+    "api_billing": false
+   }
+  },
+  "priority": [
+   "claude",
+   "codex",
+   "agy"
+  ],
+  "active": "claude",
+  "failover_events": [
+   {
+    "at": "2026-11-26T09:05:36Z",
+    "from": "claude",
+    "to": "codex",
+    "kind": "auth",
+    "reason": "Invalid API key \u00b7 Please run /login success",
+    "retry_at": null,
+    "task_id": "t4",
+    "mode": "app_driven"
+   },
+   {
+    "at": "2026-12-26T06:05:36Z",
+    "from": "claude",
+    "to": "codex",
+    "kind": "usage_exhausted",
+    "reason": "Claude AI usage limit reached|1795680336 success",
+    "retry_at": "2026-11-26T08:05:36Z",
+    "task_id": null,
+    "mode": "app_driven"
+   },
+   {
+    "at": "2026-12-26T06:05:36Z",
+    "from": "codex",
+    "to": "grok",
+    "kind": "usage_exhausted",
+    "reason": "ERROR: You've hit your usage limit. Upgrade to Pro or try again in 2 hours 5 minutes.",
+    "retry_at": "2026-11-26T08:10:36Z",
+    "task_id": null,
+    "mode": "app_driven"
+   },
+   {
+    "at": "2026-12-26T06:05:36Z",
+    "from": "grok",
+    "to": "agy",
+    "kind": "rate_limited",
+    "reason": "rate limit exceeded, try again in 45 seconds",
+    "retry_at": "2026-11-26T06:06:21Z",
+    "task_id": null,
+    "mode": "app_driven"
+   },
+   {
+    "at": "2026-12-26T06:05:36Z",
+    "from": "agy",
+    "to": null,
+    "kind": "usage_exhausted",
+    "reason": "{\"code\": 429, \"status\": \"RESOURCE_EXHAUSTED\", \"message\": \"Quota exceeded for this account. Please retry in 3h\"}",
+    "retry_at": "2026-11-26T09:05:36Z",
+    "task_id": null,
+    "mode": "app_driven"
+   }
+  ],
+  "budget": {
+   "max_calls_per_task": 10,
+   "max_calls_per_day": 1,
+   "used_today": 15
+  },
+  "client": "claude"
+ }
+}

@@ -1,0 +1,38 @@
+{
+ "evidence": "mocked reasoning for the first episode only; later episodes used no reasoning; real draft, synthetic footage",
+ "skill": {
+  "id": "sk_024b86e41aca",
+  "name": "host_listening_middle_guest's_longest",
+  "agent": "multicam_director",
+  "steps": [
+   {
+    "tool": "bop_switch_camera",
+    "args": {
+     "agent": "multicam_director",
+     "start": {
+      "$at": "turn",
+      "speaker_role": "guest",
+      "rank": "longest",
+      "point": "mid",
+      "offset": -0.75
+     },
+     "end": {
+      "$rel": "start",
+      "offset": 1.5
+     },
+     "camera": {
+      "$camera": {
+       "role": "host"
+      }
+     },
+     "reason": "reaction"
+    }
+   }
+  ]
+ },
+ "reasoning_calls": {
+  "episode_1": 1,
+  "episode_2": 0,
+  "episode_3": 0
+ }
+}

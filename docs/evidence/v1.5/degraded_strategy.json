@@ -1,0 +1,72 @@
+{
+ "evidence": "mocked reasoning, real draft, synthetic footage; the regressing promotion was forced on purpose",
+ "rejected_candidate": {
+  "agent": "graphics",
+  "version": 1,
+  "status": "rejected",
+  "reason": "no improvement on held-out scenarios (-1.50 vs -1.50)",
+  "evaluation": {
+   "baseline_version": 0,
+   "baseline": {},
+   "candidate": {
+    "title_duration_sec": 1.0
+   },
+   "splits": {
+    "learning": {
+     "n": 6,
+     "baseline_score": -1.333,
+     "baseline_corrections_needed": 0.667,
+     "baseline_ops": 0.667,
+     "baseline_seconds": 0.045,
+     "candidate_score": -1.333,
+     "candidate_corrections_needed": 0.667,
+     "candidate_ops": 0.667,
+     "candidate_seconds": 0.05
+    },
+    "validation": {
+     "n": 2,
+     "baseline_score": -1.0,
+     "baseline_corrections_needed": 1.0,
+     "baseline_ops": 1.0,
+     "baseline_seconds": 0.049,
+     "candidate_score": -1.0,
+     "candidate_corrections_needed": 1.0,
+     "candidate_ops": 1.0,
+     "candidate_seconds": 0.048
+    },
+    "held_out": {
+     "n": 4,
+     "baseline_score": -1.5,
+     "baseline_corrections_needed": 0.5,
+     "baseline_ops": 0.5,
+     "baseline_seconds": 0.047,
+     "candidate_score": -1.5,
+     "candidate_corrections_needed": 0.5,
+     "candidate_ops": 0.5,
+     "candidate_seconds": 0.048
+    }
+   },
+   "footage": "synthetic",
+   "decision": "no improvement on held-out scenarios (-1.50 vs -1.50)",
+   "scenarios": 12
+  }
+ },
+ "monitor": [
+  {
+   "agent": "graphics",
+   "version": 2,
+   "status": "reverted",
+   "to": 0,
+   "defects_per_task": 1.0,
+   "reference": 0.5
+  }
+ ],
+ "history": [
+  "proposed",
+  "rejected",
+  "proposed",
+  "promoted",
+  "rolled_back",
+  "rollback"
+ ]
+}

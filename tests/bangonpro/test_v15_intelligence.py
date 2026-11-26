@@ -595,3 +595,36 @@ def test_degraded_strategy_is_rejected_and_a_regressing_promotion_is_rolled_back
     assert c(action="approve", kind="strategy", agent="graphics", version=pos["version"]).get("error")  # not tested yet -> refused
     _evidence("degraded_strategy", {"evidence": "mocked reasoning, real draft, synthetic footage; the regressing promotion was forced on purpose",
                                     "rejected_candidate": dec, "monitor": outs[-1]["result"]["learning"]["reverted"], "history": hist})
+
+
+@needs_media
+def test_malformed_planner_checks_are_rejected_and_reported_not_counted_as_failures(studio: SimpleNamespace) -> None:
+    """Found in the live Claude Code run: a planner wrote {"check": "camera_at", "t": ...}. V1.4 kept it as a failed check."""
+    from bangonpro.ai_engine.mcp.execution import run_cycle
+    from bangonpro.ai_engine.mcp.protocol import CallContext
+    from bangonpro.ai_engine.mcp.reasoning import ScriptedReasoner
+
+    srv, bt = studio.production("ep_checks")
+    plan = _title_plan("Episode 12", 0.0, 2.0)
+    plan["expect"] += [{"check": "title_at", "t": 1.0, "text": "Episode 12"}, {"check": "duration", "value": 38.56}]
+    rs = ScriptedReasoner([plan])
+    out = run_cycle(bt, "Open with the Episode 12 card", rs)
+    assert out["status"] == "verified" and len(out["result"]["rejected_checks"]) == 2
+    assert "unknown ['t']" in out["result"]["rejected_checks"][0]["problem"] and '"check":"camera_at","time","camera"' in rs.prompts[0]
+    res = srv.call_tool(srv.tools["bop_task"], {"action": "begin", "instruction": "x", "expect": [{"check": "camera_at", "time": 1.0}]}, CallContext(request_id="t", client_name="pytest"))
+    assert res["isError"] and "missing ['camera']" in res["content"][0]["text"]
+
+
+@needs_media
+def test_a_requested_listening_cutaway_is_not_corrected_away_by_qc(studio: SimpleNamespace) -> None:
+    """Found in the second live Claude Code run: reason 'Listening cutaway ...' was not recognised as a reaction, so QC removed it."""
+    from bangonpro.ai_engine.department.draft_qc import check_draft
+
+    srv, bt = studio.production("ep_cutaway")
+    from bangonpro.ai_engine.mcp.protocol import CallContext
+
+    args = {"agent": "multicam_director", "start": 14.0, "end": 15.5, "camera": "cam_host", "reason": "Listening cutaway to the host in the middle of the guest's answer",
+            "expected_revision": bt.ws.revision}
+    res = srv.call_tool(srv.tools["bop_switch_camera"], args, CallContext(request_id="t", client_name="pytest"))
+    assert not res["isError"], res
+    assert not [d for d in check_draft(bt.ws.view()) if d["code"] == "WRONG_CAMERA" and d["start"] <= 14.0 <= d["end"]]

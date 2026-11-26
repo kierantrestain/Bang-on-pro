@@ -1,0 +1,27 @@
+{
+ "evidence": "mocked provider responses, real draft, synthetic footage",
+ "failover": [
+  {
+   "at": "2026-11-26T06:05:53Z",
+   "from": "claude",
+   "to": "codex",
+   "kind": "usage_exhausted",
+   "reason": "Claude AI usage limit reached",
+   "retry_at": "2026-11-26T08:05:53Z",
+   "task_id": null,
+   "mode": "app_driven"
+  }
+ ],
+ "budget": {
+  "calls": 3,
+  "max_calls": 5,
+  "failed": 1,
+  "providers": [
+   "claude",
+   "codex"
+  ],
+  "cost_usd": "unknown"
+ },
+ "edits": 2,
+ "status": "verified"
+}

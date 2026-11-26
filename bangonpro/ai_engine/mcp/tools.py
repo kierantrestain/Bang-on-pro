@@ -56,7 +56,7 @@ T_NUM = {"type": "number", "minimum": 0}
 T_REV = {"type": "integer", "description": "The revision you inspected (bop_status/bop_project). Stale revisions are rejected."}
 T_AGENT = {"type": "string", "enum": list(AGENT_ORDER), "description": "The production agent making this change."}
 T_TASK = {"type": "string", "description": "Optional task id from bop_task begin."}
-EXPECT_ITEM = {"type": "object", "required": ["check"], "description": "A completion check evaluated on the actual draft.",
+EXPECT_ITEM = {"type": "object", "required": ["check"], "additionalProperties": False, "description": "A completion check evaluated on the actual draft.",
                "properties": {"check": {"type": "string", "enum": ["camera_at", "camera_share", "has_clip", "title_at", "effect_at", "transition_at", "caption_contains", "duration", "no_defect"]},
                               "time": {"type": "number"}, "start": {"type": "number"}, "end": {"type": "number"}, "camera": {"type": "string"}, "min": {"type": "number"}, "max": {"type": "number"},
                               "track": {"type": "string"}, "media_ref": {"type": "string"}, "text": {"type": "string"}, "effect": {"type": "string"}, "code": {"type": "string"}}}

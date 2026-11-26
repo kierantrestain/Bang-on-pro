@@ -1,0 +1,203 @@
+{
+ "evidence": "authenticated Claude Code CLI (headless, the account's own sign-in, no API key), app-driven through the V1.5 provider router; synthetic footage; real draft; independent QC",
+ "instruction": "Give the guest's longest answer a listening cutaway: show the host for about a second and a half in the middle of it, and hold an Episode 12 card over the first two seconds of the show",
+ "path": "reasoning",
+ "status": "verified",
+ "wall_sec": 30.5,
+ "trace": [
+  {
+   "phase": "plan",
+   "provider": "claude",
+   "understanding": "The guest's longest answer runs from 11.68 to 19.24 s: 11.68\u201318.35 plus an overlapping continuation to 19.24, about 7.6 s. The other guest answer, 26.88\u201332.96 s, is about 6.1 s. The cutaway shows cam_host from 14.5 to 16.0 s. That is 1.5 s, centred on the answer's midpoint (about 15.0\u201315.5 s depending on whether the overlap is counted). It leaves the guest close-up on either side, 11.16\u201314.5 s (3.34 s) and 16.0\u201317.24 s (1.24 s), and then the existing wide shot. Audio is not touched. The guest's name strap, lt_02_guest, currently runs to 16.4 s and would sit over the host's face during the cutaway. It is shortened to end at 14.5 s, which still leaves 2.58 s to read it. An 'Episode 12' title card goes over 0\u20132 s, on the opening wide shot and before the host's lower third starts at 2.28 s. The running time stays at 38.56 s."
+  },
+  {
+   "phase": "execute",
+   "tool": "bop_switch_camera",
+   "agent": "multicam_director",
+   "ok": true
+  },
+  {
+   "phase": "execute",
+   "tool": "bop_edit",
+   "agent": "graphics",
+   "ok": true
+  },
+  {
+   "phase": "execute",
+   "tool": "bop_add_title",
+   "agent": "graphics",
+   "ok": true
+  },
+  {
+   "phase": "verify",
+   "status": "verified"
+  }
+ ],
+ "checks": [
+  {
+   "check": "camera_at",
+   "time": 15.25,
+   "camera": "cam_host",
+   "ok": true,
+   "detail": "on screen: cam_host"
+  },
+  {
+   "check": "camera_share",
+   "start": 14.5,
+   "end": 16.0,
+   "camera": "cam_host",
+   "min": 0.9,
+   "ok": true,
+   "detail": "share 1.00"
+  },
+  {
+   "check": "camera_at",
+   "time": 13.0,
+   "camera": "cam_guest",
+   "ok": true,
+   "detail": "on screen: cam_guest"
+  },
+  {
+   "check": "camera_at",
+   "time": 16.6,
+   "camera": "cam_guest",
+   "ok": true,
+   "detail": "on screen: cam_guest"
+  },
+  {
+   "check": "camera_at",
+   "time": 18.5,
+   "camera": "cam_wide",
+   "ok": true,
+   "detail": "on screen: cam_wide"
+  },
+  {
+   "check": "title_at",
+   "time": 1.0,
+   "text": "Episode 12",
+   "ok": true,
+   "detail": "titles: ['Episode 12']"
+  },
+  {
+   "check": "has_clip",
+   "start": 11.92,
+   "end": 14.5,
+   "track": "V2",
+   "ok": true,
+   "detail": "clips: ['lt_02_guest']"
+  },
+  {
+   "check": "duration",
+   "min": 38.5,
+   "max": 38.62,
+   "ok": true,
+   "detail": "duration 38.56s"
+  }
+ ],
+ "corrections": [],
+ "unresolved": [],
+ "usage": {
+  "provider": "claude",
+  "total_cost_usd": 0.1104796,
+  "duration_ms": 29139,
+  "num_turns": 1,
+  "usage": {
+   "input_tokens": 2,
+   "cache_creation_input_tokens": 8660,
+   "cache_read_input_tokens": 31658,
+   "output_tokens": 1743,
+   "output_tokens_details": {
+    "thinking_tokens": 868
+   },
+   "server_tool_use": {
+    "web_search_requests": 0,
+    "web_fetch_requests": 0
+   },
+   "service_tier": "standard",
+   "cache_creation": {
+    "ephemeral_1h_input_tokens": 8660,
+    "ephemeral_5m_input_tokens": 0
+   },
+   "inference_geo": "global",
+   "iterations": [
+    {
+     "input_tokens": 2,
+     "output_tokens": 1743,
+     "cache_read_input_tokens": 31658,
+     "cache_creation_input_tokens": 8660,
+     "cache_creation": {
+      "ephemeral_5m_input_tokens": 0,
+      "ephemeral_1h_input_tokens": 8660
+     },
+     "type": "message"
+    }
+   ],
+   "speed": "standard",
+   "fallback_credit": null
+  },
+  "modelUsage": {
+   "claude-opus-5-5": {
+    "inputTokens": 2,
+    "outputTokens": 1743,
+    "cacheReadInputTokens": 31658,
+    "cacheCreationInputTokens": 8660,
+    "webSearchRequests": 0,
+    "costUSD": 0.1104796,
+    "contextWindow": 1000000,
+    "maxOutputTokens": 128000,
+    "thinkingTokens": 868,
+    "cacheCreationEphemeral5mInputTokens": 0,
+    "cacheCreationEphemeral1hInputTokens": 8660,
+    "canonicalModel": "claude-opus-5-5",
+    "provider": "firstParty",
+    "costBasis": "list"
+   }
+  },
+  "budget": {
+   "calls": 1,
+   "max_calls": 2,
+   "failed": 0,
+   "providers": [
+    "claude"
+   ],
+   "cost_usd": 0.1105
+  }
+ },
+ "learning": {
+  "captured": 16,
+  "lessons": [],
+  "skill": null
+ },
+ "learning_summary": {
+  "enabled": true,
+  "evidence": 16,
+  "knowledge": {
+   "episodic:validated": 1,
+   "performance:active": 3
+  },
+  "skills": {
+   "candidate": 0,
+   "validated": 0,
+   "active": 0,
+   "retired": 0
+  },
+  "active_strategies": {},
+  "awaiting_approval": {
+   "strategies": [],
+   "knowledge": []
+  }
+ },
+ "skills": [],
+ "ledger": [
+  {
+   "at": "2026-11-26T06:08:50Z",
+   "provider": "claude",
+   "purpose": "plan",
+   "ok": true,
+   "kind": "ok",
+   "duration_ms": 29985,
+   "cost_usd": 0.1104796
+  }
+ ],
+ "note": "Run 3 (both fixes): verified in one planning call; no QC corrections, nothing unresolved. No skill was acquired because the plan included a low-level bop_edit (trim of the guest lower third), which is not generalised."
+}

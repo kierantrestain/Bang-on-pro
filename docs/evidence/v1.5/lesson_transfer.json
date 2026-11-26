@@ -1,0 +1,70 @@
+{
+ "evidence": "mocked reasoning (scripted plans repeating an agent's mistake), real draft and independent QC, synthetic footage",
+ "episode_1": {
+  "status": "verified",
+  "qc_corrections": 1
+ },
+ "lesson": {
+  "statement": "Titles and straps under 2 s are flagged by QC; hold them at least 2.3s (the verified correction).",
+  "confidence": 0.7,
+  "support": 1,
+  "status": "validated",
+  "value": 2.3
+ },
+ "evaluation": {
+  "baseline_version": 0,
+  "baseline": {},
+  "candidate": {
+   "title_duration_sec": 2.3
+  },
+  "splits": {
+   "learning": {
+    "n": 6,
+    "baseline_score": -1.333,
+    "baseline_corrections_needed": 0.667,
+    "baseline_ops": 0.667,
+    "baseline_seconds": 0.044,
+    "candidate_score": -0.667,
+    "candidate_corrections_needed": 0.0,
+    "candidate_ops": 0.667,
+    "candidate_seconds": 0.048
+   },
+   "validation": {
+    "n": 2,
+    "baseline_score": -1.0,
+    "baseline_corrections_needed": 1.0,
+    "baseline_ops": 1.0,
+    "baseline_seconds": 0.047,
+    "candidate_score": 0.0,
+    "candidate_corrections_needed": 0.0,
+    "candidate_ops": 1.0,
+    "candidate_seconds": 0.046
+   },
+   "held_out": {
+    "n": 4,
+    "baseline_score": -1.5,
+    "baseline_corrections_needed": 0.5,
+    "baseline_ops": 0.5,
+    "baseline_seconds": 0.046,
+    "candidate_score": -1.0,
+    "candidate_corrections_needed": 0.0,
+    "candidate_ops": 0.5,
+    "candidate_seconds": 0.046
+   }
+  },
+  "footage": "synthetic",
+  "decision": "held-out score -1.50 -> -1.00, corrections needed 0.50 -> 0.00",
+  "scenarios": 12
+ },
+ "episode_2_learning_on": {
+  "status": "verified",
+  "qc_corrections": 0,
+  "strategy_applied": [
+   "title held 2.24s (was 1.50s)"
+  ]
+ },
+ "episode_3_learning_off": {
+  "status": "verified",
+  "qc_corrections": 1
+ }
+}

@@ -91,6 +91,33 @@ def evaluate_expect(v: DraftView, e: dict[str, Any]) -> dict[str, Any]:
     return {**e, "ok": bool(ok), "detail": detail}
 
 
+CHECK_KEYS = {"camera_at": ({"time", "camera"}, set()), "camera_share": ({"start", "end", "camera"}, {"min"}), "has_clip": ({"start", "end"}, {"track", "media_ref"}),
+              "title_at": ({"time"}, {"text"}), "effect_at": ({"time", "effect"}, {"track"}), "transition_at": ({"time"}, set()), "caption_contains": ({"text"}, set()),
+              "duration": (set(), {"min", "max"}), "no_defect": ({"code"}, set())}
+
+
+def check_problem(e: Any) -> str | None:
+    """Why a completion check cannot be evaluated as written (None when it is well formed)."""
+    if not isinstance(e, dict) or e.get("check") not in CHECK_KEYS:
+        return f"unknown check {e.get('check') if isinstance(e, dict) else e!r}; use one of {sorted(CHECK_KEYS)}"
+    need, opt = CHECK_KEYS[e["check"]]
+    keys = set(e) - {"check"}
+    missing, extra = need - keys, keys - need - opt
+    if missing or extra or (e["check"] == "duration" and not keys & {"min", "max"}):
+        return f"{e['check']} takes {sorted(need)}" + (f" and optionally {sorted(opt)}" if opt else "") + (f"; missing {sorted(missing)}" if missing else "") + (f"; unknown {sorted(extra)}" if extra else "")
+    if any(isinstance(e.get(k), bool) or not isinstance(e.get(k), (int, float)) for k in keys & {"time", "start", "end", "min", "max"}):
+        return f"{e['check']}: times and bounds must be numbers"
+    return None
+
+
+def split_checks(expect: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    ok, bad = [], []
+    for e in expect if isinstance(expect, list) else []:
+        why = check_problem(e)
+        (bad if why else ok).append({"check": e, "problem": why} if why else e)
+    return ok, bad
+
+
 def context_pack(bt: Any, agents: list[str], *, max_rows: int = 60, text: str = "") -> dict[str, Any]:
     """What a reasoning agent needs to plan, compactly: no histories, no full transcripts."""
     v = bt.ws.view()
@@ -127,6 +154,9 @@ def task_action(bt: Any, args: dict[str, Any], ctx: CallContext | None) -> dict[
     if act == "begin":
         if not args.get("instruction"):
             raise ToolError("INVALID_ARGUMENT", "begin needs instruction")
+        _, bad = split_checks(args.get("expect") or [])
+        if bad:
+            raise ToolError("INVALID_ARGUMENT", "; ".join(b["problem"] for b in bad[:4]), hint="Fix the completion checks; nothing was started", details={"invalid_checks": bad[:8]})
         agents = list(dict.fromkeys(["executive", *(args.get("agents") or [])]))
         tid = f"task_{uuid.uuid4().hex[:8]}"
         v = ws.view()
@@ -288,7 +318,9 @@ def learning_line(intel: Any) -> str:
 # ---------------------------------------------------------------------- in-process cycle
 PLAN_FORMAT = (
     'Answer with JSON only: {"understanding": "...", "agents": [agent ids], "steps": [{"tool": "bop_switch_camera|bop_remove_range|bop_place_asset|bop_add_title|bop_edit|bop_lock",'
-    ' "args": {...without expected_revision}}], "expect": [{"check": "camera_at|camera_share|has_clip|title_at|effect_at|transition_at|caption_contains|duration|no_defect", ...}],'
+    ' "args": {...without expected_revision}}], "expect": [checks, each exactly one of: {"check":"camera_at","time","camera"} {"check":"camera_share","start","end","camera","min"?}'
+    ' {"check":"has_clip","start","end","track"?,"media_ref"?} {"check":"title_at","time","text"?} {"check":"effect_at","time","effect","track"?} {"check":"transition_at","time"}'
+    ' {"check":"caption_contains","text"} {"check":"duration","min"?,"max"?} {"check":"no_defect","code"}; other keys are rejected],'
     ' "questions": []}. Each step args must include "agent" (the production agent that owns the change). Use only cameras, clip ids and times from the context.'
     ' After feedback you may add "drop_checks": [indices of failed checks] with "drop_reason" when a check was wrong; dropped checks are reported to the editor.'
 )
@@ -416,11 +448,17 @@ def run_cycle(bt: Any, instruction: str, reasoner: Any, *, ctx: CallContext | No
                     return {"status": "interrupted", "task_id": tid, "result": result, "trace": trace, "reasoner": getattr(reasoner, "kind", "?"), "usage": _usage(reasoner)}
                 break
             cyc.pop("blocked", None)
-            trace.append({"phase": "plan", "round": cyc["round"], "understanding": plan.get("understanding"), "steps": len(plan.get("steps") or []), "provider": getattr(reasoner, "provider", None)})
+            plan["expect"], bad = split_checks(plan.get("expect") or [])
+            if bad:  # never evaluated as failures and never hidden: reported, and fed back to the planner
+                cyc.setdefault("rejected_checks", []).extend(bad)
+            trace.append({"phase": "plan", "round": cyc["round"], "understanding": plan.get("understanding"), "steps": len(plan.get("steps") or []), "provider": getattr(reasoner, "provider", None),
+                          **({"rejected_checks": bad} if bad else {})})
             if tid is None:
                 if plan.get("questions") and not plan.get("steps"):
                     return {"status": "needs_input", "questions": plan["questions"], "trace": trace}
                 tid = task_action(bt, {"action": "begin", "instruction": instruction, "agents": plan.get("agents") or [], "expect": plan.get("expect") or [], "source": _source(reasoner)}, ctx)["task_id"]
+                if hasattr(reasoner, "task_id"):
+                    reasoner.task_id = tid  # failover events and ledger rows name the task
             elif cyc["round"] > 0:
                 # Revised completion checks: passed ones are kept; a failed one is only dropped when the planner
                 # names it in drop_checks with a reason, and it is then reported as superseded (never hidden).
@@ -489,12 +527,15 @@ def run_cycle(bt: Any, instruction: str, reasoner: Any, *, ctx: CallContext | No
                 break
             # Correct: the planner sees exactly what failed on the actual draft, nothing else.
             cyc["feedback"] = {"failed_checks": [c for c in result["checks"] if not c["ok"]], "unresolved": result["unresolved"][:8], "errors": [t for t in trace if t.get("error")][-6:],
+                               "invalid_checks": (cyc.get("rejected_checks") or [])[-6:],
                                "qc_corrections": [{k: c.get(k) for k in ("defect", "result", "now")} for c in result["corrections"]]}
             cyc["last_checks"] = result["checks"]
             cyc["round"] += 1
             cyc["phase"] = "plan"
             _checkpoint(ws, tid, cyc)
     usage = _usage(reasoner)
+    if result and cyc.get("rejected_checks"):
+        result["rejected_checks"] = cyc["rejected_checks"]
     if tid and result:
         result["learning"] = learn_from_task(bt, tid, result, usage=usage, processing_sec=round(time.perf_counter() - t0, 3))
     out = {"status": result.get("status", "failed"), "task_id": tid, "result": result, "trace": trace, "reasoner": getattr(reasoner, "kind", "?"),

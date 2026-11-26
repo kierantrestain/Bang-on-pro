@@ -51,7 +51,7 @@ class AgentDefinition:
     consumes: tuple[str, ...] = ()
     produces: tuple[str, ...] = ()
     engine: str = ""
-    version: str = "1.4.0"
+    version: str = "1.5.0"
     implementation_notes: str = ""
     limitations: tuple[str, ...] = field(default_factory=tuple)
 

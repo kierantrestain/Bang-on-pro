@@ -17,6 +17,7 @@ SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -24,6 +25,7 @@ from bangonpro.ai_engine.department.agent_roles import COLOUR_EFFECTS
 from bangonpro.ai_engine.project_builder import CompiledClip, CompiledTimeline
 
 FLASH_SHOT_SEC = 0.5
+INTENTIONAL_CUTAWAY = re.compile(r"react|listen|cut[- ]?away|insert|response|noddy", re.IGNORECASE)
 HIGH_CONFIDENCE = 0.85
 
 
@@ -197,7 +199,8 @@ def check_draft(v: DraftView) -> list[dict[str, Any]]:
             out.append(_defect("AV_DESYNC", "error", "synchronisation", 0.92, v.s(sh.start), v.s(sh.end), f"Picture is {delta:+.2f}s from the dialogue", "sync map (master clock)",
                                {"kind": "slip", "clip_id": sh.clip_id, "frames": -round(delta * v.fps)}))
     # Camera choice vs who is speaking
-    reaction_ids = {c.clip_id for c in v.c.v1_clips + v.c.v1b_clips if "reaction" in str(c.params.get("reason", "")) or c.params.get("reaction")}
+    # Deliberate cutaways (an editor's or agent's stated reaction / listening shot) are not wrong-camera shots.
+    reaction_ids = {c.clip_id for c in v.c.v1_clips + v.c.v1b_clips if INTENTIONAL_CUTAWAY.search(str(c.params.get("reason", ""))) or c.params.get("reaction")}
     for seg in v.speech():
         if seg["overlap"] or seg["confidence"] < 0.6 or seg["end"] - seg["start"] < 2.0:
             continue
