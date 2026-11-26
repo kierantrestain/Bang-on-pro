@@ -164,3 +164,14 @@ def test_vertical_clips_revision_emits_editable_projects_and_checked_renders(job
         assert (r["width"], r["height"]) == ((360, 640) if r["proxy"] else (1080, 1920)) and r["audio"] and abs(r["duration_sec"] - c["duration_sec"]) <= 0.5, r
         assert r["black_sec"] <= 0.3
     assert job.doc["source_integrity"]["verified"] is True
+
+
+@needs_media
+def test_project_index_is_shared_timestamped_and_evidence_labelled(job: ProductionJob) -> None:
+    import json
+
+    idx = json.loads(Path(job.doc["artifacts"]["project_index_json"]).read_text(encoding="utf-8"))
+    assert idx["event_counts"].get("speech", 0) > 0 and set(idx["cameras"]) == set(job._latest_state().media_assets)
+    assert all(e["evidence"] for e in idx["events"]) and idx["events"] == sorted(idx["events"], key=lambda e: (e["start_sec"], e["type"]))
+    assert any("Whisper" in u for u in idx["unavailable"])  # no words here: stated, not invented
+    assert all(e.get("text") is None for e in idx["events"] if e["type"] == "speech")

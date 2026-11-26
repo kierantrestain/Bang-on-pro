@@ -750,6 +750,9 @@ class ProductionJob:
             if k in st.artifacts:
                 arts[k] = st.artifacts[k]
         write_json_atomic(self.draft_dir / "analysis_state.json", st.to_dict())
+        from bangonpro.ai_engine.department.project_index import build_project_index
+
+        arts["project_index_json"] = str(write_json_atomic(self.draft_dir / "project_index.json", build_project_index(st)))
         _, stale = self.excluded_agents()
         for a, r in self.doc["agents"].items():
             r["stale"] = a in stale
