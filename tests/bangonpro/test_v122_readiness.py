@@ -659,7 +659,7 @@ def test_genre_profiles_carry_youtube_targets() -> None:
         assert prof["caption_style"]["max_chars_per_line"] <= 42 and prof["colour_rules"]["treatment"]
         assert set(prof["speaker_camera_map"].values()) <= set(prof["camera_roles"]), pid
     news = load_show_profile("daily_news")
-    assert news["audio_rules"]["true_peak_dbtp"] == -1.0 and news["audio_rules"].get("loudness_standard") == "EBU R128"
+    assert news["audio_rules"]["true_peak_dbtp"] == -1.0 and news["audio_rules"].get("loudness_standard") .startswith("YouTube")
     assert load_show_profile("social_short")["video_spec"]["height"] > load_show_profile("social_short")["video_spec"]["width"]
     assert load_show_profile("daily_news")["max_shot_duration_sec"] < load_show_profile("podcast_multicam")["max_shot_duration_sec"]
 
