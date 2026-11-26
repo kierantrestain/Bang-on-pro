@@ -721,6 +721,9 @@ def plan_rough_cut_shots(
     planned = _apply_intro_outro_rules(planned, state=state, wide_cam=str(state.metadata.get("opening_camera_id") or wide_cam))
     if state.intent.multicam_switch:
         planned = ed.refine_shot_plan(planned, state=state, wide_cam=wide_cam, speaker_to_cam=speaker_to_cam, ctx=ctx)
+    from bangonpro.ai_engine.department.revisions import apply_revision_scope
+
+    planned = apply_revision_scope(state, planned)  # V1.3: keep the previous edit outside a revision range / locks
     review_thresh = float(state.profile["editing_rules"].get("review_confidence_threshold", 0.72))
     for sp in planned:
         sp["needs_review"] = bool(sp.get("needs_review")) or float(sp["confidence"]) < review_thresh

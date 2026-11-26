@@ -152,6 +152,19 @@ def build_parser() -> argparse.ArgumentParser:
     rr.add_argument("agent")
     rr.add_argument("--profile-overrides", default=None, help="JSON overlay to refine this rerun")
 
+    rv = sub.add_parser("revise", help="Apply a plain-language revision to a draft (whole project or a range)")
+    rv.add_argument("job_dir")
+    rv.add_argument("instruction")
+    rv.add_argument("--range", nargs=2, type=float, default=None, metavar=("START", "END"), help="master-clock seconds")
+    rv.add_argument("--range-timeline", nargs=2, type=float, default=None, metavar=("START", "END"), help="seconds on the draft timeline")
+    lk = sub.add_parser("lock", help="Lock a range so revisions keep it unchanged")
+    lk.add_argument("job_dir")
+    lk.add_argument("start", type=float)
+    lk.add_argument("end", type=float)
+    lk.add_argument("--timeline", action="store_true", help="range is on the draft timeline")
+    ur = sub.add_parser("undo-revision", help="Restore the draft from before the last revision")
+    ur.add_argument("job_dir")
+
     rb = sub.add_parser("rollback")
     rb.add_argument("job_dir")
     rb.add_argument("agent")
@@ -465,6 +478,12 @@ def _cmd_job(a: argparse.Namespace) -> int:
         job.rebuild_draft()
     elif a.cmd == "rerun":
         job.rerun(a.agent, profile_overrides=json.loads(a.profile_overrides) if a.profile_overrides else None)
+    elif a.cmd == "revise":
+        return _emit(job.revise(a.instruction, range_sec=tuple(a.range) if a.range else None, range_timeline=tuple(a.range_timeline) if a.range_timeline else None))
+    elif a.cmd == "lock":
+        return _emit({"locked_ranges": job.lock_range(a.start, a.end, timeline=a.timeline)})
+    elif a.cmd == "undo-revision":
+        return _emit({"undone": job.undo_revision()})
     elif a.cmd == "rollback":
         job.rollback(a.agent)
     elif a.cmd == "decide":

@@ -769,11 +769,14 @@ class ProductionJob:
         self._event("executive", "job_resumed", {})
         return self.run(progress_callback=progress_callback)
 
-    def rerun(self, agent_id: str, *, profile_overrides: dict[str, Any] | None = None, progress_callback: Any = None) -> dict[str, Any]:
+    def rerun(self, agent_id: str, *, profile_overrides: dict[str, Any] | None = None, progress_callback: Any = None, scope: dict[str, Any] | None = None) -> dict[str, Any]:
         """Re-execute one agent (and everything after it) from the checkpoint preceding it."""
         if agent_id == "executive":
             raise ValueError("Create a new job to re-plan; the executive plan is immutable per job")
         st = self._load_checkpoint_before(agent_id)
+        st.metadata.pop("revision_scope", None)  # a stale scope from an earlier revision never re-applies
+        if scope:
+            st.metadata["revision_scope"] = scope
         if profile_overrides:
             from bangonpro.ai_engine.department.learning import (
                 deep_merge,
@@ -801,6 +804,105 @@ class ProductionJob:
         self.state = st
         self._event(agent_id, "rerun_requested", {})
         return self.run(start_agent=agent_id, progress_callback=progress_callback)
+
+    # ------------------------------------------------------- conversational revisions
+    def _locks(self, exclude: tuple[float, float] | None = None) -> list[list[float]]:
+        out = [list(r) for r in self.doc.get("locked_ranges", [])]
+        for r in self.doc.get("revised_ranges", []):
+            if exclude is None or r[1] <= exclude[0] or r[0] >= exclude[1]:
+                out.append(list(r))
+        return out
+
+    def revise(self, instruction: str, *, range_sec: tuple[float, float] | None = None, range_timeline: tuple[float, float] | None = None, progress_callback: Any = None) -> dict[str, Any]:
+        """Apply a plain-language revision: interpret, snapshot, rerun only what it affects, keep the rest."""
+        from bangonpro.ai_engine.department.revisions import interpret_revision, previous_spans, timeline_to_master
+
+        st_now = self._latest_state()
+        if range_timeline is not None:
+            sel = timeline_to_master(st_now, float(range_timeline[0]), float(range_timeline[1]))
+            if sel is None:
+                raise ValueError("The timeline selection is outside the draft; select a range on the draft timeline")
+        else:
+            sel = (float(range_sec[0]), float(range_sec[1])) if range_sec else None
+        duration = max((a.duration_sec for a in st_now.media_assets.values()), default=0.0)
+        plan = interpret_revision(instruction, st_now.profile, duration_sec=duration, selected_range=sel)
+        revs = self.doc.setdefault("revisions", [])
+        rec: dict[str, Any] = {"revision": len(revs) + 1, "ts_utc": _utc(), "instruction": instruction, "plan": plan, "status": None}
+        if plan["not_understood"] or plan["needs_selection"]:
+            rec["status"] = "needs_selection" if plan["needs_selection"] else "not_understood"
+            rec["message"] = ("Select the section on the timeline, then send the revision again" if plan["needs_selection"]
+                              else "No editing change recognised. Try e.g. 'tighten the opening', 'more reaction shots', 'preserve the suspense before reveals', 'five vertical clips'")
+            self._event("executive", "revision_" + rec["status"], {"instruction": instruction})
+            return rec
+        snap = self.dir / "revisions" / f"rev_{rec['revision']:02d}"
+        snap.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(self.ckpt_dir, snap / "checkpoints", dirs_exist_ok=True)
+        shutil.copy2(self.job_path, snap / "job.json")
+        for f in self.draft_dir.glob("*.*"):
+            if f.suffix in (".kdenlive", ".otio", ".json", ".srt", ".ass"):
+                shutil.copy2(f, snap / f.name)
+        rng = tuple(plan["range_sec"]) if plan["range_sec"] else None
+        locks = self._locks(exclude=rng)
+        scope = {"range": list(rng) if rng else None, "locks": locks, "previous_spans": previous_spans(st_now)} if (rng or locks) else None
+        overlay = dict(plan["overlay"])
+        if rng is None and overlay:  # whole-project changes accumulate; range changes live in their range
+            from bangonpro.ai_engine.department.learning import deep_merge
+
+            self.doc["revision_overlay"] = deep_merge(self.doc.get("revision_overlay") or {}, overlay)
+            overlay = self.doc["revision_overlay"]
+        elif self.doc.get("revision_overlay"):
+            from bangonpro.ai_engine.department.learning import deep_merge
+
+            overlay = deep_merge(self.doc["revision_overlay"], overlay)
+        t0 = time.perf_counter()
+        self._event("executive", "revision_started", {"revision": rec["revision"], "instruction": instruction, "actions": plan["actions"], "range_sec": plan["range_sec"], "start_agent": plan["start_agent"]})
+        doc = self.rerun(plan["start_agent"], profile_overrides=overlay or None, progress_callback=progress_callback, scope=scope)
+        if rng:
+            self.doc.setdefault("revised_ranges", []).append([rng[0], rng[1]])
+        st = self.state or self._latest_state()
+        rec.update({"status": doc["status"], "processing_sec": round(time.perf_counter() - t0, 3), "snapshot": str(snap),
+                    "rerun_from": plan["start_agent"], "kept_from_previous": st.metadata.get("revision_scope_applied")})
+        self.doc["revisions"].append(rec)
+        self._event("executive", "revision_completed", {"revision": rec["revision"], "status": doc["status"]})
+        self._save(force=True)
+        return rec
+
+    def lock_range(self, start: float, end: float, *, timeline: bool = False) -> list[list[float]]:
+        """Lock a master-clock (or draft-timeline) range: later revisions keep it exactly as it is."""
+        from bangonpro.ai_engine.department.revisions import timeline_to_master
+
+        rng = timeline_to_master(self._latest_state(), start, end) if timeline else (float(min(start, end)), float(max(start, end)))
+        if rng is None:
+            raise ValueError("The selection is outside the draft timeline")
+        self.doc.setdefault("locked_ranges", []).append([round(rng[0], 3), round(rng[1], 3)])
+        self._event("executive", "range_locked", {"range_sec": list(rng)})
+        self._save(force=True)
+        return self.doc["locked_ranges"]
+
+    def undo_revision(self) -> dict[str, Any]:
+        """Restore the draft exactly as it was before the most recent revision."""
+        revs = [r for r in self.doc.get("revisions", []) if r.get("snapshot") and not r.get("undone")]
+        if not revs:
+            raise ValueError("No revision to undo")
+        last = revs[-1]
+        snap = Path(last["snapshot"])
+        saved = json.loads((snap / "job.json").read_text(encoding="utf-8"))
+        shutil.rmtree(self.ckpt_dir, ignore_errors=True)
+        shutil.copytree(snap / "checkpoints", self.ckpt_dir)
+        for f in snap.glob("*.*"):
+            if f.name != "job.json":
+                shutil.copy2(f, self.draft_dir / f.name)
+        history = self.doc.get("revisions", [])
+        for r in history:
+            if r["revision"] == last["revision"]:
+                r["undone"] = True
+        saved["revisions"] = history
+        self.doc = saved
+        self.state = self._latest_state()
+        self.rebuild_draft(self.state)
+        self._event("executive", "revision_undone", {"revision": last["revision"]})
+        self._save(force=True)
+        return last
 
     def rollback(self, agent_id: str) -> dict[str, Any]:
         """Discard every agent after ``agent_id`` and restore the draft to that checkpoint."""
