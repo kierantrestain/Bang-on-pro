@@ -131,7 +131,7 @@
     "audio_sample_rate": 48000,
     "audio_channels": 2,
     "target_lufs": -14.0,
-    "true_peak_dbtp": -1.5,
+    "true_peak_dbtp": -1.0,
     "video_bitrate": "12M",
     "audio_bitrate": "192k",
     "platform": "youtube"
