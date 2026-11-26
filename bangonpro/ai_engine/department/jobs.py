@@ -996,6 +996,8 @@ _REVIEW_ROOT_CAUSES: tuple[tuple[str, str, re.Pattern[str]], ...] = (
     ("no_spoken_transcript", "editorial_intelligence", re.compile(r"whisper|spoken transcript|speech regions only|captions (are|will be) withheld|vad placeholders", re.I)),
     ("social_not_rendered", "distribution", re.compile(r"SOCIAL_WITHOUT_EXPORT|(social|highlight)[^.]*not rendered", re.I)),
     ("speaker_names_missing", "graphics", re.compile(r"no names for|no speakers identified for lower thirds|speaker_names", re.I)),
+    ("colour_unmatched", "colourist", re.compile(r"hit the gain limit|differs from \S+ by delta e", re.I)),
+    ("uncertain_speaker", "rough_cut", re.compile(r"low-confidence transcript segment|shots? to check for pacing or angle", re.I)),
 )
 
 
@@ -1011,6 +1013,10 @@ def _consolidate_review_items(doc: dict[str, Any]) -> None:
         for a, i in hits:
             if (a, i) != keep:
                 drop.setdefault(a, set()).add(i)
+        # Details of the merged items are kept in the surviving item (nothing is hidden)
+        extra = [str(agents[a]["review_items"][i]) for a, i in hits if (a, i) != keep]
+        ka, ki = keep
+        agents[ka]["review_items"][ki] = f"{agents[ka]['review_items'][ki]} (also: {'; '.join(extra)})"
         for a, idx in drop.items():
             agents[a]["review_items"] = [x for j, x in enumerate(agents[a]["review_items"]) if j not in idx]
     doc["review_items_consolidated"] = True

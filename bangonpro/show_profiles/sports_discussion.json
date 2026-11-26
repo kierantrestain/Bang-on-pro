@@ -58,7 +58,7 @@
   "min_shot_duration_sec": 1.5,
   "max_shot_duration_sec": 8.0,
   "silence_threshold_db": -35.0,
-  "loudness_target_lufs": -23.0,
+  "loudness_target_lufs": -14.0,
   "intro_outro_rules": {
     "open_on_wide": true,
     "opening_wide_sec": 2.0,
@@ -87,8 +87,8 @@
     "review_confidence_threshold": 0.74
   },
   "audio_rules": {
-    "target_lufs": -23.0,
-    "loudness_target_lufs": -23.0,
+    "target_lufs": -14.0,
+    "loudness_target_lufs": -14.0,
     "true_peak_dbtp": -1.0,
     "highpass_hz": 80.0,
     "enable_denoise": true,
@@ -96,7 +96,7 @@
     "enable_mic_level_matching": true,
     "max_mic_trim_db": 24.0,
     "music_duck_db": -18.0,
-    "loudness_standard": "EBU R128 broadcast (-23 LUFS, max -1 dBTP)"
+    "loudness_standard": "YouTube loudness normalisation (-14 LUFS integrated, -1 dBTP)"
   },
   "graphics_rules": {
     "enable_captions": true,
@@ -138,10 +138,11 @@
     "color_space": "bt709",
     "audio_sample_rate": 48000,
     "audio_channels": 2,
-    "target_lufs": -23.0,
+    "target_lufs": -14.0,
     "true_peak_dbtp": -1.0,
     "video_bitrate": "15M",
-    "audio_bitrate": "192k"
+    "audio_bitrate": "192k",
+    "platform": "youtube"
   },
   "export_presets": [
     {

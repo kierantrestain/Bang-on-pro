@@ -142,7 +142,8 @@ def director_score(m: dict[str, Any]) -> tuple[float, list[Defect]]:
     rate_pen = 0.0
     if rate > ref and m.get("edited_sec", 0.0) >= 30.0:
         rate_pen = min(0.15, 0.3 * (rate - ref) / ref)
-        defects.append(Defect("CUT_RATE_HIGH", "warning", f"{rate:.1f} camera cuts/min (reference {ref:g}): choppy", None))
+        if rate > 1.15 * ref:  # V1.3: the reference is a soft guide; only a clear excess is worth an editor's look
+            defects.append(Defect("CUT_RATE_HIGH", "warning", f"{rate:.1f} camera cuts/min (reference {ref:g}): choppy", None))
     cov = m.get("speaker_coverage")
     cov_pen = 0.0
     if cov is not None and cov < 0.6:

@@ -213,6 +213,7 @@ def test_review_items_are_consolidated_by_root_cause() -> None:
     _consolidate_review_items(doc)
     flat = [(a, i) for a in AGENT_ORDER for i in doc["agents"][a]["review_items"]]
     assert sum("Whisper" in i or "spoken transcript" in i for _, i in flat) == 1
-    assert ("editorial_intelligence", "Speech regions only, no words. Install a Whisper model") in flat
+    kept = [i for a, i in flat if a == "editorial_intelligence" and i.startswith("Speech regions only")]
+    assert len(kept) == 1 and "Captions need a spoken transcript" in kept[0]  # merged detail is kept, not hidden
     assert sum("not rendered" in i for _, i in flat) == 1 and doc["agents"]["executive"]["review_items"] == []
     assert ("editorial_intelligence", "3 low-confidence transcript segments to check") in flat  # distinct items kept

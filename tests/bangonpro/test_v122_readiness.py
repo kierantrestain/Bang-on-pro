@@ -645,8 +645,8 @@ def test_learn_diff_from_job_and_final_project(env: dict, base_job: ProductionJo
 
 
 # ------------------------------------------------------------------ profiles
-def test_genre_profiles_carry_broadcast_targets() -> None:
-    expected_lufs = {"podcast_multicam": -16.0, "interview_two_camera": -16.0, "social_short": -14.0, "gameshow_multicam": -23.0, "sports_discussion": -23.0, "daily_news": -23.0}
+def test_genre_profiles_carry_youtube_targets() -> None:
+    expected_lufs = dict.fromkeys(("podcast_multicam", "interview_two_camera", "social_short", "gameshow_multicam", "sports_discussion", "daily_news"), -14.0)  # V1.3: YouTube delivery
     for pid, lufs in expected_lufs.items():
         prof = load_show_profile(pid)
         audio = prof["audio_rules"]

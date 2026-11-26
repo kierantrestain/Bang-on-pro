@@ -322,9 +322,8 @@ def test_all_four_show_profiles_conform_to_schema() -> None:
         assert prof["profile_id"] == profile_id
         assert prof["video_spec"]["width"] == 1920
         assert prof["video_spec"]["height"] == 1080
-        # V1.2.2: broadcast genres follow EBU R128 (-23 LUFS); the podcast stays at -16 LUFS (online)
-        broadcast = {"daily_news", "gameshow_multicam", "sports_discussion"}
-        assert prof["audio_rules"]["target_lufs"] == (-23.0 if profile_id in broadcast else -16.0)
+        # V1.3: every profile delivers to YouTube (-14 LUFS integrated, -1 dBTP); user overrides still apply
+        assert prof["audio_rules"]["target_lufs"] == -14.0
         assert len(prof["export_presets"]) >= 1
 
     assert len(load_show_profile("podcast_multicam")["cameras"]) == 4
@@ -600,7 +599,7 @@ def test_end_to_end_4cam_pipeline_and_melt_render(
     # excluded_effects.txt and were stripped when the generated project was opened for editing).
     assert {"avfilter.highpass", "avfilter.compand", "dynamic_loudness"}.issubset(mlt_services)
     assert not mlt_services & {"avfilter.afftdn", "avfilter.acompressor", "avfilter.loudnorm"}
-    assert "loudnorm=I=-16.0:TP=-1.5:LRA=7" in state.ffmpeg_audio_filtergraph
+    assert "loudnorm=I=-14.0:TP=-1.0:LRA=7" in state.ffmpeg_audio_filtergraph  # V1.3 YouTube target
 
     srt_path = Path(state.artifacts["captions_srt"])
     ass_path = Path(state.artifacts["captions_ass"])
