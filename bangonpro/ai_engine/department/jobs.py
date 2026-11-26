@@ -33,8 +33,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from bangonpro.ai_engine.agents.ingest_sync import compute_file_sha256, verify_source_integrity
+from bangonpro.ai_engine.agents.ingest_sync import (
+    compute_file_sha256,
+    verify_source_integrity,
+)
 from bangonpro.ai_engine.commands import validate_timeline_command_batch
+from bangonpro.ai_engine.department import quality_loop as ql
 from bangonpro.ai_engine.department.agents import (
     HANDLERS,
     AgentContext,
@@ -52,7 +56,6 @@ from bangonpro.ai_engine.department.checkpoint import (
     serialize_state,
     write_json_atomic,
 )
-from bangonpro.ai_engine.department import quality_loop as ql
 from bangonpro.ai_engine.department.errors import explain
 from bangonpro.ai_engine.department.learning import (
     ProfilePreferenceStore,
@@ -676,6 +679,7 @@ class ProductionJob:
         integrity = verify_source_integrity(st) if st.media_assets else {}
         self.doc["source_integrity"] = {"verified": all(integrity.values()) if integrity else None, "per_source": integrity}
         self.rebuild_draft(st)
+        _consolidate_review_items(self.doc)
         self.doc["final_verification"] = ql.run_final_verifiers(st, self.doc)
         self.doc["processing_elapsed_sec"] = round(elapsed + float(self.doc.get("processing_elapsed_sec", 0.0)), 3)
         self.doc["status"] = "completed_with_errors" if failed else ("awaiting_review" if self.doc["mode"] == MODE_ASSISTED else "draft_ready")
@@ -985,6 +989,31 @@ class ProductionJob:
             "quality_loop_processing_sec": float(self.doc.get("quality_loop_processing_sec", 0.0)),
             "quality_loop_cost_usd": float(self.doc.get("quality_loop_cost_usd", 0.0)),
         }
+
+
+# One review item per root cause, owned by the agent whose action fixes it (review workload).
+_REVIEW_ROOT_CAUSES: tuple[tuple[str, str, re.Pattern[str]], ...] = (
+    ("no_spoken_transcript", "editorial_intelligence", re.compile(r"whisper|spoken transcript|speech regions only|captions (are|will be) withheld|vad placeholders", re.I)),
+    ("social_not_rendered", "distribution", re.compile(r"SOCIAL_WITHOUT_EXPORT|(social|highlight)[^.]*not rendered", re.I)),
+    ("speaker_names_missing", "graphics", re.compile(r"no names for|no speakers identified for lower thirds|speaker_names", re.I)),
+)
+
+
+def _consolidate_review_items(doc: dict[str, Any]) -> None:
+    """Drop repeats of the same root cause raised by several agents; keep the owner's item."""
+    agents = doc.get("agents", {})
+    for _cause, owner, pat in _REVIEW_ROOT_CAUSES:
+        hits = [(a, i) for a in AGENT_ORDER for i, item in enumerate(agents[a].get("review_items") or []) if pat.search(str(item))]
+        if len(hits) < 2:
+            continue
+        keep = next((h for h in hits if h[0] == owner), hits[0])
+        drop: dict[str, set[int]] = {}
+        for a, i in hits:
+            if (a, i) != keep:
+                drop.setdefault(a, set()).add(i)
+        for a, idx in drop.items():
+            agents[a]["review_items"] = [x for j, x in enumerate(agents[a]["review_items"]) if j not in idx]
+    doc["review_items_consolidated"] = True
 
 
 def _relocate_attempt_outputs(attempt_dir: Path, draft_dir: Path, trial: ProjectAnalysisState, outcome: AgentOutcome) -> None:

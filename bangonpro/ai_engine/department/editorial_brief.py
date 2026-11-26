@@ -205,7 +205,7 @@ def build_executive_plan(
             "confidence_basis": "planning prior (inputs, installed models, profile), not a measurement",
             "risks": risks,
         }
-        if row["active"] and conf < LOW_CONFIDENCE:
+        if row["active"] and conf < LOW_CONFIDENCE and a != "executive":
             row["needs_human_review"] = True
             escalations.append(f"{a}: low planning confidence {conf:.2f} ({'; '.join(risks) or 'see plan'})")
         agents.append(row)

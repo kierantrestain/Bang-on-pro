@@ -199,3 +199,20 @@ def test_accepted_correction_is_bounded_and_audited(isolated_hooks: Path, media:
     events = (job.dir / "events.jsonl").read_text(encoding="utf-8")
     assert events.count("quality_correction_accepted") == ql.MAX_ATTEMPTS_PER_AGENT
     assert Path(doc["artifacts"]["kdenlive_project"]).is_file()
+
+
+def test_review_items_are_consolidated_by_root_cause() -> None:
+    from bangonpro.ai_engine.department.jobs import _consolidate_review_items
+    from bangonpro.ai_engine.department.registry import AGENT_ORDER
+
+    doc = {"agents": {a: {"review_items": []} for a in AGENT_ORDER}}
+    doc["agents"]["executive"]["review_items"] = ["captions: low planning confidence 0.10 (No spoken transcript: captions will be withheld)", "SOCIAL_WITHOUT_EXPORT: clips not rendered"]
+    doc["agents"]["editorial_intelligence"]["review_items"] = ["Speech regions only, no words. Install a Whisper model", "3 low-confidence transcript segments to check"]
+    doc["agents"]["captions"]["review_items"] = ["Captions need a spoken transcript. Install a Whisper model in Model Manager, then rerun Captions"]
+    doc["agents"]["distribution"]["review_items"] = ["Social/highlight renders planned but not rendered (master export not requested/approved)"]
+    _consolidate_review_items(doc)
+    flat = [(a, i) for a in AGENT_ORDER for i in doc["agents"][a]["review_items"]]
+    assert sum("Whisper" in i or "spoken transcript" in i for _, i in flat) == 1
+    assert ("editorial_intelligence", "Speech regions only, no words. Install a Whisper model") in flat
+    assert sum("not rendered" in i for _, i in flat) == 1 and doc["agents"]["executive"]["review_items"] == []
+    assert ("editorial_intelligence", "3 low-confidence transcript segments to check") in flat  # distinct items kept

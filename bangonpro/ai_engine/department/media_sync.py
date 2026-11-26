@@ -573,7 +573,7 @@ def fit_target(camera_id: str, meas: list[WindowMeasurement], ref_env: np.ndarra
     share = fit.n_inliers / max(1, fit.n_windows)
     res_q = math.exp(-fit.residual_rms_ms / 6.0)
     fit.confidence = round(float(np.clip(fit.mean_window_confidence * (0.5 + 0.5 * share) * (0.6 + 0.4 * res_q), 0.0, 0.999)), 4)
-    if fit.n_inliers < 3:
+    if fit.n_inliers < 3 and fit.n_windows >= 3:  # short recordings: drift is irrelevant, not a review item
         fit.review.append(f"{camera_id}: only {fit.n_inliers} window(s) aligned; drift not measurable, single offset used")
     if share < 0.6:
         fit.review.append(f"{camera_id}: {fit.n_rejected} of {fit.n_windows} sync windows rejected (silence, noise or different content); verify alignment")
