@@ -17,6 +17,7 @@
 #include "core.h"
 #include "doc/docundostack.hpp"
 #include "doc/kdenlivedoc.h"
+#include "effects/effectsrepository.hpp"
 #include "effects/effectstack/model/effectstackmodel.hpp"
 #include "project/projectmanager.h"
 #include "timeline2/model/timelinefunctions.hpp"
@@ -811,8 +812,14 @@ TimelineOperationResult KdenliveTimelineBridge::handlePlaceClip(const std::share
         return res;
     }
 
+    // Kdenlive inserts an audio+video clip on a video track as a grouped A/V pair unless the bin id carries its
+    // stream prefix. The agents place picture (V1) and dialogue (A1) separately, so honour "stream": an untrimmed
+    // audio twin would otherwise occupy the audio track and block the next shot.
+    const QString stream = op.params.value(QStringLiteral("stream")).toString();
+    const QString insertId =
+        stream == QLatin1String("video") ? QStringLiteral("V") + binId : (stream == QLatin1String("audio") ? QStringLiteral("A") + binId : binId);
     int createdClipId = -1;
-    if (!timeline->requestClipInsertion(binId, trackId, op.frameRange.timelineStart, createdClipId, false, true, false, m_txUndo, m_txRedo)) {
+    if (!timeline->requestClipInsertion(insertId, trackId, op.frameRange.timelineStart, createdClipId, false, true, false, m_txUndo, m_txRedo)) {
         res.message = QStringLiteral("TimelineItemModel::requestClipInsertion failed for bin '%1' on track %2").arg(binId).arg(trackId);
         return res;
     }
@@ -1041,12 +1048,27 @@ TimelineOperationResult KdenliveTimelineBridge::handleAddEffect(const std::share
     TimelineOperationResult res;
     res.opId = op.opId;
 
+    // The agents send an MLT service plus their own label (filter_id "flt_a1_highpass"). Use the first candidate that
+    // Kdenlive's effect repository knows: an unknown id makes Kdenlive throw (V1.5 aborted the whole app here).
     const QStringList idKeys =
-        asAudioFilter ? QStringList{QStringLiteral("filter_id"), QStringLiteral("filter"), QStringLiteral("effect_id"), QStringLiteral("mlt_service")}
-                      : QStringList{QStringLiteral("effect_id"), QStringLiteral("effect"), QStringLiteral("mlt_service")};
-    const QString effectId = firstNonEmptyString(op.params, idKeys);
+        asAudioFilter ? QStringList{QStringLiteral("mlt_service"), QStringLiteral("effect_id"), QStringLiteral("filter"), QStringLiteral("filter_id")}
+                      : QStringList{QStringLiteral("mlt_service"), QStringLiteral("effect_id"), QStringLiteral("effect")};
+    QString effectId;
+    QStringList tried;
+    for (const QString &key : idKeys) {
+        const QString candidate = op.params.value(key).toString().trimmed();
+        if (candidate.isEmpty()) {
+            continue;
+        }
+        tried << candidate;
+        if (EffectsRepository::get()->exists(candidate)) {
+            effectId = candidate;
+            break;
+        }
+    }
     if (effectId.isEmpty()) {
-        res.message = QStringLiteral("Missing effect_id / filter_id parameter");
+        res.message = tried.isEmpty() ? QStringLiteral("Missing effect_id / filter_id parameter")
+                                      : QStringLiteral("No installed Kdenlive effect matches %1").arg(tried.join(QStringLiteral(", ")));
         return res;
     }
 
@@ -1079,7 +1101,10 @@ TimelineOperationResult KdenliveTimelineBridge::handleAddEffect(const std::share
         return res;
     }
 
-    const QJsonObject initialParams = op.params.value(QStringLiteral("parameters")).toObject();
+    QJsonObject initialParams = op.params.value(QStringLiteral("parameters")).toObject();
+    if (initialParams.isEmpty()) {
+        initialParams = op.params.value(QStringLiteral("mlt_params")).toObject(); // the department's parameter key
+    }
     if (!initialParams.isEmpty()) {
         if (auto assetModel = stack->getAssetModelById(effectId)) {
             for (auto it = initialParams.constBegin(); it != initialParams.constEnd(); ++it) {
