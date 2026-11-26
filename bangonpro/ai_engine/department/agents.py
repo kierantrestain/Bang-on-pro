@@ -975,6 +975,9 @@ def run_graphics(ctx: AgentContext) -> AgentOutcome:
     st.metadata["graphics_report"] = {"graphics": report, "lower_third_plan": st.metadata.get("lower_third_plan", []), "template_known": lt_known, "lower_third_template": lt_name}
     write_json_atomic(Path(st.output_dir) / "graphics_report.json", st.metadata["graphics_report"])
     review = [] if st.lower_thirds or title_added else ["No speakers identified for lower thirds; add names in the profile speaker map"]
+    withheld = st.metadata.get("lower_thirds_withheld") or []
+    if withheld:
+        review.append(f"Name strap withheld for {len(withheld)} speaker(s) whose name is unknown: add it to your instructions, e.g. 'lower third: Jane Doe, Host'")
     for r in report:
         if not r["inside_title_safe"]:
             review.append(f"{r['graphic_id']} extends outside the title-safe area")

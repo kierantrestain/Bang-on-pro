@@ -19,6 +19,8 @@ SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
 
 from __future__ import annotations
 
+import re
+
 from typing import Any
 
 from bangonpro.ai_engine.department import editorial_text as et
@@ -120,6 +122,25 @@ def _speaker_names(state: Any) -> dict[str, dict[str, Any]]:
     return identify_speakers(state)
 
 
+_NAME_STRAP_RE = re.compile(
+    r"(?i:lower[\s-]*thirds?|name\s+straps?|name\s+titles?|chyrons?)\s*(?i:for|:|-|–|saying|reading)?\s*"
+    r"(?P<name>[A-Z][\w'.-]+(?:\s+[A-Z][\w'.-]+){0,3})(?:\s*(?:,|–|-|—|\()\s*(?P<title>[^.,;()\n]{2,48}))?"
+)
+_PLACEHOLDER = re.compile(r"^(cam(era)?[_ ]?\w*|speaker[_ ]?\w*|spk[_ ]?\w*|host|guest|presenter|unknown|person[_ ]?\d*)$", re.IGNORECASE)
+
+
+def _real_name(name: Any, speaker_id: str) -> bool:
+    n = str(name or "").strip()
+    return bool(n) and n != speaker_id and not _PLACEHOLDER.match(n)
+
+
+def names_from_brief(brief: str, speaker_ids: list[str]) -> dict[str, dict[str, Any]]:
+    """Names the editor typed ("lower third: Jane Doe, Host"), assigned to speakers in order of first appearance."""
+    found = [(m.group("name").strip(), (m.group("title") or "").strip()) for m in _NAME_STRAP_RE.finditer(brief or "")]
+    order = list(dict.fromkeys(speaker_ids))
+    return {spk: {"name": n, "title": t, "source": "editor_brief", "confidence": 1.0} for spk, (n, t) in zip(order, found, strict=False)}
+
+
 def _to_edited(state: Any, t: float) -> float | None:
     for s in state.rough_cut_shots:
         if s.master_sync_in_sec - 1e-3 <= t <= s.master_sync_out_sec + 1e-3:
@@ -172,17 +193,25 @@ def plan_lower_thirds(state: Any, occupied: list[tuple[float, float]] | None = N
     spk_map = dict((state.metadata.get("camera_plan") or {}).get("speaker_camera_map") or eff.get("speaker_camera_map") or {})
     roles = {**eff.get("camera_roles", {}), **(state.profile.get("camera_roles") or {})}
     names = _speaker_names(state)
+    brief_names = names_from_brief(str(getattr(state, "instruction", "") or ""), [s.speaker_id for s in (state.transcript_segments or [])])
     targets = state.intent.target_speakers
     segs = sorted((s for s in state.transcript_segments if not s.deleted), key=lambda s: s.start_sec)
     crosstalk = [(s.start_sec, s.end_sec) for s in segs if s.is_overlap]
     shots = state.rough_cut_shots
     total = shots[-1].timeline_out_sec if shots else max((s.end_sec for s in segs), default=0.0)
 
-    def allowed(spk: str) -> bool:
-        if not targets:
-            return True
+    def matches(spk: str) -> bool:
         low = spk.lower()
         return any(t.lower() in low or low in t.lower() for t in targets)
+
+    # A target that names no real speaker (e.g. the job title "Host" in "lower third: Jane Doe, Host") must not
+    # silently remove every graphic: the filter applies only when it matches someone in the programme.
+    if targets and not any(matches(s.speaker_id) for s in segs):
+        state.metadata["lower_third_target_ignored"] = list(targets)
+        targets = []
+
+    def allowed(spk: str) -> bool:
+        return not targets or matches(spk)
 
     def windows(spk: str, seg: Any, tier: int) -> tuple[float, float] | None:
         """Edited-time window for ``spk`` during ``seg`` (tier 1 own angle, 2 own or wide, 3 any)."""
@@ -230,7 +259,13 @@ def plan_lower_thirds(state: Any, occupied: list[tuple[float, float]] | None = N
             win = windows(spk, seg, tier)
             if win is None or not _free(win, occupied):
                 continue
-            info = names.get(spk, {})
+            info = brief_names.get(spk) or names.get(spk, {})  # the editor's own words win over generic labels
+            if not _real_name(info.get("name"), spk):
+                # V1.6: never print an internal id ("cam_wide", "SPEAKER_00") as a person's name.
+                state.metadata.setdefault("lower_thirds_withheld", [])
+                if spk not in state.metadata["lower_thirds_withheld"]:
+                    state.metadata["lower_thirds_withheld"].append(spk)
+                continue
             out.append(
                 {
                     "speaker_id": spk,

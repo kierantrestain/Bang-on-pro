@@ -26,10 +26,13 @@
 
 #include <mlt++/MltProperties.h>
 
+#include <QCoreApplication>
 #include <QCryptographicHash>
+#include <QElapsedTimer>
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QRegularExpression>
+#include <QThread>
 #include <QUuid>
 #include <algorithm>
 #include <cmath>
@@ -1502,6 +1505,21 @@ TimelineOperationResult KdenliveTimelineBridge::handleAddLowerThird(const std::s
         return res;
     }
 
+    // Kdenlive loads the new title producer on a worker thread that holds the producer lock; inserting before it
+    // is ready blocked the GUI thread for ever (found in the real app). Let the load finish first, then insert.
+    {
+        QElapsedTimer waited;
+        waited.start();
+        auto titleClip = binModel->getClipByBinID(binId);
+        while (titleClip && !titleClip->statusReady() && waited.elapsed() < 20000) {
+            QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents, 50);
+            QThread::msleep(5);
+        }
+        if (!titleClip || !titleClip->statusReady()) {
+            res.message = QStringLiteral("The lower-third title '%1' did not finish loading").arg(displayName);
+            return res;
+        }
+    }
     int createdClipId = -1;
     if (!timeline->requestClipInsertion(binId, trackId, op.frameRange.timelineStart, createdClipId, false, true, false, m_txUndo, m_txRedo)) {
         res.message = QStringLiteral("Failed to place lower-third clip '%1' onto track %2").arg(binId).arg(trackId);

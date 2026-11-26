@@ -400,7 +400,7 @@ QJsonObject BangOnProAutotest::snapshot() const
     return s;
 }
 
-void BangOnProAutotest::finish(bool ok, const QString &why)
+void BangOnProAutotest::finish(bool ok, const QString &why) // NOLINT(readability-function-cognitive-complexity)
 {
     m_timer->stop();
     m_dialogTimer->stop();
@@ -417,7 +417,16 @@ void BangOnProAutotest::finish(bool ok, const QString &why)
     if (pCore && pCore->currentDoc()) {
         pCore->currentDoc()->setModified(false); // never block quitting on a "save changes?" prompt
     }
-    QTimer::singleShot(200, qApp, [ok]() { QCoreApplication::exit(ok ? 0 : 1); });
+    // Quit the way an editor does (close the main window): Kdenlive stops its monitors and consumers first.
+    // QCoreApplication::exit() skipped that, and MLT's exit handler then unloaded modules under a live SDL thread.
+    QPointer<QMainWindow> window = m_window;
+    QTimer::singleShot(200, qApp, [window]() {
+        if (window) {
+            window->close();
+        } else {
+            QCoreApplication::quit();
+        }
+    });
 }
 
 } // namespace BangOnPro

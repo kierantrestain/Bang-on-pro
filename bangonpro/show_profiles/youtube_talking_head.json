@@ -84,9 +84,9 @@
     "title_card_duration_sec": 3.0
   },
   "graphics_templates": {
-    "lower_third_template": "youtube_name_strap",
+    "lower_third_template": "studio_clean_bar",
     "lower_third_position": "bottom_left",
-    "title_card_template": "youtube_title_open",
+    "title_card_template": "studio_opener",
     "bug_position": "top_right",
     "font_family": "DejaVu Sans",
     "accent_hex": "#FF5A1F"
