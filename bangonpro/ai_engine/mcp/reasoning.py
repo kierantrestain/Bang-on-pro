@@ -36,11 +36,11 @@ from . import subscriptions
 
 PROVIDERS = ("claude", "codex", "grok", "agy")
 CLIENTS = PROVIDERS  # V1.4 name
-PROVIDER_INFO: dict[str, dict[str, Any]] = {
-    "claude": {"title": "Claude Code", "binary": "claude", "login": "claude (then /login)", "api_key_env": ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")},
-    "codex": {"title": "OpenAI Codex", "binary": "codex", "login": "codex login", "api_key_env": ("OPENAI_API_KEY", "CODEX_API_KEY")},
-    "grok": {"title": "Grok Build", "binary": "grok", "login": "grok (sign in with your X / SuperGrok account)", "api_key_env": ("XAI_API_KEY", "GROK_API_KEY")},
-    "agy": {"title": "Google Antigravity", "binary": "agy", "login": "agy (sign in with your Google account)", "api_key_env": ("GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GENAI_API_KEY")},
+PROVIDER_INFO = {
+    "claude": {"title": "Claude Code", "binary": "claude"},
+    "codex": {"title": "OpenAI Codex", "binary": "codex"},
+    "grok": {"title": "Grok Build", "binary": "grok"},
+    "agy": {"title": "Google Antigravity", "binary": "agy"},
 }
 # Failure kinds. Only availability problems fail over; the others need the editor or a better request.
 FAILOVER_KINDS = frozenset({"usage_exhausted", "rate_limited", "unavailable", "auth", "not_entitled", "incompatible"})

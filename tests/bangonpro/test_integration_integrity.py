@@ -89,6 +89,9 @@ def test_provider_registry_lists_only_callable_providers(tmp_path: Path, monkeyp
     provs = {p.provider_id: p for p in AiProviderRegistry().list_providers()}
     external = sorted(k for k, p in provs.items() if p.is_external)
     assert external == sorted(f"reasoning_{p}" for p in reasoning.PROVIDERS)
+    assert not provs["reasoning_codex"].consent_granted
+    reasoning.configure({"privacy": {"mode": "connected_subscriptions", "consent": True}})
+    provs = {p.provider_id: p for p in AiProviderRegistry().list_providers()}
     assert provs["reasoning_codex"].consent_granted and not provs["reasoning_claude"].consent_granted
     assert not any("whisper_cpp" in k or k in ("openai_compatible", "anthropic", "deepgram", "local_ollama") for k in provs)
     # No catalogued model without an inference backend in this release (nothing to download for nothing).

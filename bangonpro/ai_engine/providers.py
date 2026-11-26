@@ -223,26 +223,25 @@ def _builtin_provider_configs() -> list[AiProviderConfig]:
             description="Offline PyTorch OpenAI Whisper ASR using locally verified checkpoints.",
         ),
     ]
-    # Reasoning providers are the editor's own signed-in CLIs, routed by the department's shared
-    # router (``mcp/reasoning.py``: priority order, failover, cooldowns, one budget). They are the only
-    # external providers Bang On Pro calls; authorising one is the editor's consent.
-    from bangonpro.ai_engine.mcp.reasoning import PROVIDER_INFO, PROVIDERS, load_config
+    # Account authorisation, consent and current availability are independent router states.
+    from bangonpro.ai_engine.mcp.reasoning import PROVIDER_INFO, PROVIDERS, enabled, reasoning_status
 
-    authorised = {k for k, v in (load_config().get("providers") or {}).items() if v.get("authorised")}
+    status = reasoning_status()
     for pid in PROVIDERS:
         info = PROVIDER_INFO[pid]
+        provider = status["providers"][pid]
         configs.append(
             AiProviderConfig(
                 provider_id=f"reasoning_{pid}",
-                display_name=f"{info['title']} (shared reasoning router)",
+                display_name=info["title"],
                 kind="external",
                 capabilities=("editorial_llm", "instruction_interpretation", "planning"),
                 requires_network=True,
                 requires_api_key=False,
-                consent_granted=pid in authorised,
-                enabled=pid in authorised,
-                description=f"Signed-in {info['binary']} CLI. Authorise with: python -m bangonpro.ai_engine.mcp authorise --client {pid}",
-                extra={"router_provider": pid},
+                consent_granted=enabled(status) and provider["authorised"],
+                enabled=provider["available"],
+                description=f"Official {info['binary']} client. Manage authorisation in AI Providers & Subscriptions.",
+                extra={"router_provider": pid, "state": provider["state"]},
             )
         )
     return configs
