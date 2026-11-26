@@ -823,7 +823,19 @@ TimelineOperationResult KdenliveTimelineBridge::handlePlaceClip(const std::share
         stream == QLatin1String("video") ? QStringLiteral("V") + binId : (stream == QLatin1String("audio") ? QStringLiteral("A") + binId : binId);
     int createdClipId = -1;
     if (!timeline->requestClipInsertion(insertId, trackId, op.frameRange.timelineStart, createdClipId, false, true, false, m_txUndo, m_txRedo)) {
-        res.message = QStringLiteral("TimelineItemModel::requestClipInsertion failed for bin '%1' on track %2").arg(binId).arg(trackId);
+        QStringList layout;
+        for (int tid : timeline->getAllTracksIds()) {
+            layout << QStringLiteral("%1:%2@%3[%4 items]")
+                          .arg(tid)
+                          .arg(timeline->isAudioTrack(tid) ? QStringLiteral("A") : QStringLiteral("V"))
+                          .arg(timeline->getTrackPosition(tid))
+                          .arg(timeline->getItemsInRange(tid, 0, -1, false).size());
+        }
+        res.message = QStringLiteral("TimelineItemModel::requestClipInsertion failed for %1 on track %2 at frame %3 (tracks %4)")
+                          .arg(insertId)
+                          .arg(trackId)
+                          .arg(op.frameRange.timelineStart)
+                          .arg(layout.join(QLatin1Char(' ')));
         return res;
     }
 

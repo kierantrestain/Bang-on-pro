@@ -1241,8 +1241,15 @@ void BangOnProIntegration::openEditedSequence(const QString &jobDir)
                 continue;
             }
             rest.append(op);
-            if (op.type == QLatin1String("place_clip") && heldCameraOps.contains(op.clipId.trimmed())) {
-                rest.append(heldCameraOps.take(op.clipId.trimmed()));
+            if (op.type == QLatin1String("place_clip") && op.params.value(QStringLiteral("stream")).toString() != QLatin1String("audio")) {
+                // Revised drafts name placements shot_0001_v / shot_0001_a; the camera choice belongs to the picture.
+                const QString placed = op.clipId.trimmed();
+                const QString shot = placed.endsWith(QLatin1String("_v")) ? placed.chopped(2) : placed;
+                if (heldCameraOps.contains(shot)) {
+                    TimelineOperation cam = heldCameraOps.take(shot);
+                    cam.clipId = placed;
+                    rest.append(cam);
+                }
             }
         }
     }
