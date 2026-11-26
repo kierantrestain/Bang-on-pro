@@ -387,7 +387,14 @@ bool KdenliveTimelineBridge::resolveTrackId(const std::shared_ptr<TimelineItemMo
     static const QRegularExpression kLogicalTrackRe(QStringLiteral("^([VA])(\\d+)$"), QRegularExpression::CaseInsensitiveOption);
     const QRegularExpressionMatch match = kLogicalTrackRe.match(key);
     if (match.hasMatch()) {
+        const QString normalized = match.captured(1).toUpper() + match.captured(2);
         const bool wantAudio = (match.captured(1).toUpper() == QStringLiteral("A"));
+        for (int tid : timeline->getAllTracksIds()) {
+            if (timeline->isAudioTrack(tid) == wantAudio && timeline->getTrackTagById(tid).compare(normalized, Qt::CaseInsensitive) == 0) {
+                *trackIdOut = tid;
+                return true;
+            }
+        }
         const int logicalIndex = qMax(1, match.captured(2).toInt()) - 1;
         QVector<QPair<int, int>> matchingTracks;
         for (int tid : timeline->getAllTracksIds()) {
@@ -395,8 +402,9 @@ bool KdenliveTimelineBridge::resolveTrackId(const std::shared_ptr<TimelineItemMo
                 matchingTracks.append({timeline->getTrackPosition(tid), tid});
             }
         }
+        // In Kdenlive, video tracks increase upward (V1 = lowest video pos) while audio tracks increase downward (A1 = highest audio pos).
         std::sort(matchingTracks.begin(), matchingTracks.end(),
-                  [](const QPair<int, int> &a, const QPair<int, int> &b) { return a.first < b.first; });
+                  [wantAudio](const QPair<int, int> &a, const QPair<int, int> &b) { return wantAudio ? (a.first > b.first) : (a.first < b.first); });
         if (!matchingTracks.isEmpty()) {
             const int clampedIdx = qMin(logicalIndex, matchingTracks.size() - 1);
             *trackIdOut = matchingTracks.at(clampedIdx).second;
@@ -815,12 +823,36 @@ TimelineOperationResult KdenliveTimelineBridge::handlePlaceClip(const std::share
         return res;
     }
 
+    // Ensure newly imported bin clips have finished loading their producer before insertion.
+    const std::shared_ptr<ProjectItemModel> binModel = Core::self() ? Core::self()->projectItemModel() : nullptr;
+    std::shared_ptr<ProjectClip> binClip = binModel ? binModel->getClipByBinID(binId) : nullptr;
+    if (binClip && !binClip->statusReady()) {
+        QElapsedTimer waited;
+        waited.start();
+        while (binClip && !binClip->statusReady() && waited.elapsed() < 15000) {
+            QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents, 50);
+            QThread::msleep(5);
+        }
+    }
+
     // Kdenlive inserts an audio+video clip on a video track as a grouped A/V pair unless the bin id carries its
     // stream prefix. The agents place picture (V1) and dialogue (A1) separately, so honour "stream": an untrimmed
-    // audio twin would otherwise occupy the audio track and block the next shot.
+    // audio twin would otherwise occupy the audio track and block the next shot. Passing /in/out (inclusive) trims
+    // the clip before track placement so consecutive or out-of-order shots never collide or drift by a frame.
     const QString stream = op.params.value(QStringLiteral("stream")).toString();
-    const QString insertId =
+    QString insertId =
         stream == QLatin1String("video") ? QStringLiteral("V") + binId : (stream == QLatin1String("audio") ? QStringLiteral("A") + binId : binId);
+    bool trimmedAtCreation = false;
+    if (op.frameRange.outFrame >= op.frameRange.inFrame && op.frameRange.inFrame >= 0 && binClip) {
+        const int maxOut = qMax(0, static_cast<int>(binClip->frameDuration()) - 1);
+        const int safeIn = qBound(0, op.frameRange.inFrame, maxOut);
+        const int safeOut = qBound(safeIn, op.frameRange.outFrame, maxOut);
+        if (safeIn > 0 || safeOut < maxOut) {
+            insertId += QStringLiteral("/%1/%2").arg(safeIn).arg(safeOut);
+            trimmedAtCreation = true;
+        }
+    }
+
     int createdClipId = -1;
     if (!timeline->requestClipInsertion(insertId, trackId, op.frameRange.timelineStart, createdClipId, false, true, false, m_txUndo, m_txRedo)) {
         QStringList layout;
@@ -839,21 +871,22 @@ TimelineOperationResult KdenliveTimelineBridge::handlePlaceClip(const std::share
         return res;
     }
 
-    // Apply source inFrame trim (left edge) followed by outFrame duration (right edge)
-    const int initialPlaytime = timeline->getClipPlaytime(createdClipId);
-    if (op.frameRange.inFrame > 0 && initialPlaytime > op.frameRange.inFrame) {
-        int leftTrimmedSize = initialPlaytime - op.frameRange.inFrame;
-        if (timeline->requestItemResize(createdClipId, leftTrimmedSize, false, false, m_txUndo, m_txRedo)) {
-            timeline->requestClipMove(createdClipId, trackId, op.frameRange.timelineStart, true, true, false, true, m_txUndo, m_txRedo);
+    if (!trimmedAtCreation) {
+        const int initialPlaytime = timeline->getClipPlaytime(createdClipId);
+        if (op.frameRange.inFrame > 0 && initialPlaytime > op.frameRange.inFrame) {
+            int leftTrimmedSize = initialPlaytime - op.frameRange.inFrame;
+            if (timeline->requestItemResize(createdClipId, leftTrimmedSize, false, false, m_txUndo, m_txRedo)) {
+                timeline->requestClipMove(createdClipId, trackId, op.frameRange.timelineStart, true, true, false, true, m_txUndo, m_txRedo);
+            }
         }
-    }
 
-    if (op.frameRange.outFrame > op.frameRange.inFrame) {
-        int requestedDuration = op.frameRange.outFrame - op.frameRange.inFrame;
-        if (requestedDuration > 0 && requestedDuration != timeline->getClipPlaytime(createdClipId)) {
-            if (!timeline->requestItemResize(createdClipId, requestedDuration, true, false, m_txUndo, m_txRedo)) {
-                res.message = QStringLiteral("Inserted clip %1 but failed to resize to duration %2").arg(createdClipId).arg(requestedDuration);
-                return res;
+        if (op.frameRange.outFrame >= op.frameRange.inFrame) {
+            int requestedDuration = op.frameRange.outFrame - op.frameRange.inFrame + 1;
+            if (requestedDuration > 0 && requestedDuration != timeline->getClipPlaytime(createdClipId)) {
+                if (!timeline->requestItemResize(createdClipId, requestedDuration, true, false, m_txUndo, m_txRedo)) {
+                    res.message = QStringLiteral("Inserted clip %1 but failed to resize to duration %2").arg(createdClipId).arg(requestedDuration);
+                    return res;
+                }
             }
         }
     }
@@ -1123,7 +1156,12 @@ TimelineOperationResult KdenliveTimelineBridge::handleAddEffect(const std::share
     if (!initialParams.isEmpty()) {
         if (auto assetModel = stack->getAssetModelById(effectId)) {
             for (auto it = initialParams.constBegin(); it != initialParams.constEnd(); ++it) {
-                assetModel->setParameter(it.key(), jsonValueToParamString(it.value()), true);
+                QString paramKey = it.key();
+                if ((effectId == QLatin1String("avfilter.highpass") || effectId == QLatin1String("avfilter.lowpass")) &&
+                    paramKey == QLatin1String("av.frequency")) {
+                    paramKey = QStringLiteral("av.f");
+                }
+                assetModel->setParameter(paramKey, jsonValueToParamString(it.value()), true);
             }
         }
     }
@@ -1510,7 +1548,9 @@ TimelineOperationResult KdenliveTimelineBridge::handleAddLowerThird(const std::s
                              : op.params.value(QStringLiteral("duration_frames")).toInt(125);
     std::unordered_map<QString, QString> props;
     props[QStringLiteral("xmldata")] = titleXml;
-    const QString displayName = speakerName.isEmpty() ? QStringLiteral("Lower Third") : QStringLiteral("LT: %1").arg(speakerName);
+    const QString customDisplayName = op.params.value(QStringLiteral("display_name")).toString().trimmed();
+    const QString displayName =
+        !customDisplayName.isEmpty() ? customDisplayName : (speakerName.isEmpty() ? QStringLiteral("Lower Third") : QStringLiteral("LT: %1").arg(speakerName));
     const QString binId = ClipCreator::createTitleClip(props, qMax(1, duration), displayName, binModel->getRootFolder()->clipId(), binModel);
     if (binId.isEmpty() || binId == QStringLiteral("-1")) {
         res.message = QStringLiteral("ClipCreator::createTitleClip failed for lower third '%1'").arg(displayName);

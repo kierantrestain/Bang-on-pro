@@ -1921,7 +1921,30 @@ bool TimelineModel::requestClipInsertion(const QString &binClipId, int trackId, 
             return false;
         }
         int audioStream = -1;
-        QList<int> keys = m_binAudioTargets.keys();
+        QMap<int, QString> binAudioTargets = m_binAudioTargets;
+        if (!useTargets && master->hasAudio() && dropType != PlaylistState::VideoOnly) {
+            const bool needAudioTargets = audioDrop || !binAudioTargets.isEmpty();
+            if (needAudioTargets) {
+                const QMap<int, QString> clipStreams = master->activeStreams();
+                bool matchesClip = !binAudioTargets.isEmpty();
+                if (matchesClip && !clipStreams.isEmpty()) {
+                    for (int streamIdx : binAudioTargets.keys()) {
+                        if (!clipStreams.contains(streamIdx)) {
+                            matchesClip = false;
+                            break;
+                        }
+                    }
+                }
+                if (!matchesClip) {
+                    binAudioTargets = clipStreams;
+                    if (binAudioTargets.isEmpty()) {
+                        const int defaultAudio = master->getProducerIntProperty(QStringLiteral("audio_index"));
+                        binAudioTargets.insert(defaultAudio, QStringLiteral("Audio"));
+                    }
+                }
+            }
+        }
+        QList<int> keys = binAudioTargets.keys();
         if (!useTargets) {
             // Drag and drop, calculate target tracks
             if (audioDrop) {
@@ -2020,12 +2043,12 @@ bool TimelineModel::requestClipInsertion(const QString &binClipId, int trackId, 
                     audioTids = getLowerTracksId(trackId, TrackType::AudioTrack);
                 }
                 // First audio stream already inserted in target_track or in timeline
-                streamsCount = m_binAudioTargets.count() - 1;
+                streamsCount = binAudioTargets.count() - 1;
                 while (streamsCount > 0 && !audioTids.isEmpty()) {
                     target_track << audioTids.takeFirst();
                     streamsCount--;
                 }
-                QList<int> aTargets = m_binAudioTargets.keys();
+                QList<int> aTargets = binAudioTargets.keys();
                 if (audioDrop) {
                     aTargets.removeAll(audioStream);
                 }
@@ -2055,7 +2078,7 @@ bool TimelineModel::requestClipInsertion(const QString &binClipId, int trackId, 
             int mirrorAudioStream = -1;
             for (int &target_ix : target_track) {
                 bool currentDropIsAudio = !audioDrop;
-                if (!useTargets && m_binAudioTargets.count() > 1 && dropTargets.contains(target_ix)) {
+                if (!useTargets && binAudioTargets.count() > 1 && dropTargets.contains(target_ix)) {
                     // Audio clip dropped first but has other streams
                     currentDropIsAudio = true;
                     mirrorAudioStream = dropTargets.value(target_ix);

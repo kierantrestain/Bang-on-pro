@@ -301,6 +301,18 @@ def build_parser() -> argparse.ArgumentParser:
     pf.add_argument("--name", default=None)
     pf.add_argument("--set", nargs="*", default=[], help="key=value (dotted keys, JSON values), e.g. editing_rules.min_silence_sec=1.2")
     pf.add_argument("--out", default=None, help="Folder or file (default: the custom profiles folder)")
+
+    st = sub.add_parser("style", help="Reference-video style learning: analyze, list, show, save, delete")
+    st.add_argument("action", choices=("analyze", "list", "show", "save", "delete"))
+    st.add_argument("targets", nargs="*", default=[], help="Reference video paths (analyze), profile id (show/delete), or profile JSON (save)")
+    st.add_argument("--name", default="", help="Display name for the learned style")
+    st.add_argument("--id", default=None, help="Profile id slug")
+    st.add_argument("--base", default=None, help="Optional base Show Profile id")
+    st.add_argument("--set", nargs="*", default=[], help="key=value overrides (dotted keys, JSON values)")
+    st.add_argument("--save", action="store_true", help="Save the learned profile to the custom profiles folder")
+    st.add_argument("--out", default=None, help="Custom profiles directory override")
+    st.add_argument("--cache-dir", default=None, help="Analysis cache directory override")
+    st.add_argument("--local-only", action="store_true", help="Skip optional subscription semantic summary")
     return p
 
 
@@ -351,6 +363,78 @@ def _cmd_profile(a: argparse.Namespace) -> int:
     prof = create_custom_profile(profile_id=a.id, display_name=a.name or a.id.replace("_", " ").capitalize(), format_type=base.get("format_type", "custom"), base_profile=base)
     path = save_custom_profile(prof, a.out or default_custom_profiles_dir())
     return _emit({"profile_id": prof["profile_id"], "path": str(path), "valid": True})
+
+
+def _cmd_style(a: argparse.Namespace) -> int:
+    from bangonpro.ai_engine.department.reference_style import (
+        delete_reference_style,
+        learn_style_from_references,
+        list_reference_styles,
+    )
+    from bangonpro.show_profiles.loader import (
+        default_custom_profiles_dir,
+        load_show_profile,
+        save_custom_profile,
+        user_profile_dirs,
+        validate_show_profile,
+    )
+
+    if a.action == "list":
+        styles = list_reference_styles(a.out)
+        return _emit({"styles": styles, "custom_dir": str(Path(a.out).expanduser().resolve() if a.out else default_custom_profiles_dir())})
+    if a.action == "show":
+        if not a.targets:
+            raise ValueError("style show requires a profile id")
+        dirs = [Path(a.out).expanduser().resolve()] if a.out else user_profile_dirs()
+        return _emit(load_show_profile(a.targets[0], custom_dirs=dirs))
+    if a.action == "delete":
+        if not a.targets:
+            raise ValueError("style delete requires a profile id")
+        removed = delete_reference_style(a.targets[0], custom_dir=a.out)
+        return _emit({"profile_id": a.targets[0], "deleted": removed})
+    if a.action == "save":
+        if not a.targets:
+            raise ValueError("style save requires a profile JSON file path")
+        data = json.loads(Path(a.targets[0]).read_text(encoding="utf-8"))
+        for item in a.set:
+            key, sep, raw = item.partition("=")
+            if not sep:
+                raise ValueError(f"Expected key=value, got '{item}'")
+            _set_dotted(data, key.strip(), raw.strip())
+        if a.id:
+            data["profile_id"] = a.id
+        if a.name:
+            data["display_name"] = a.name
+        validate_show_profile(data)
+        target_dir = Path(a.out).expanduser().resolve() if a.out else default_custom_profiles_dir()
+        target_dir.mkdir(parents=True, exist_ok=True)
+        saved = save_custom_profile(data, target_dir / f"{data['profile_id']}.json")
+        return _emit({"profile_id": data["profile_id"], "display_name": data["display_name"], "path": str(saved), "valid": True})
+
+    if not a.targets:
+        raise ValueError("style analyze requires at least one reference video path")
+    overrides: dict[str, Any] = {}
+    for item in a.set:
+        key, sep, raw = item.partition("=")
+        if not sep:
+            raise ValueError(f"Expected key=value, got '{item}'")
+        try:
+            overrides[key.strip()] = json.loads(raw.strip())
+        except ValueError:
+            overrides[key.strip()] = raw.strip()
+    cache = AnalysisCache(a.cache_dir) if a.cache_dir else AnalysisCache()
+    res = learn_style_from_references(
+        a.targets,
+        name=a.name,
+        profile_id=a.id,
+        base_profile=a.base,
+        overrides=overrides or None,
+        save=bool(a.save),
+        output_dir=a.out,
+        cache=cache,
+        allow_reasoning=not bool(a.local_only),
+    )
+    return _emit(res)
 
 
 def _cmd_queue(a: argparse.Namespace) -> int:
@@ -576,6 +660,8 @@ def _dispatch(a: argparse.Namespace) -> int:
         return _emit(payload)
     if a.cmd == "profile":
         return _cmd_profile(a)
+    if a.cmd == "style":
+        return _cmd_style(a)
     return _cmd_job(a)
 
 

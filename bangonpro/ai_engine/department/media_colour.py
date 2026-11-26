@@ -147,20 +147,30 @@ def plan_colour(st: Any, video: dict[str, Any]) -> dict[str, Any]:
         ref = next((c for c in cams if roles.get(c) == "wide"), None) or min(cams, key=lambda c: video[c].priority)
     exposure = 1.0
     rl = cams[ref]["luma"]
+    match_ref_look = bool(cr.get("match_reference_look", False))
     if rules["correct_exposure"] and rl > 0:
-        if rl < rules["min_luma"]:
+        if match_ref_look and abs(rl - rules["target_luma"]) > 0.03:
+            exposure = min(1.35, max(0.75, rules["target_luma"] / rl))
+        elif rl < rules["min_luma"]:
             exposure = min(1.5, rules["target_luma"] / rl)
         elif rl > rules["max_luma"]:
             exposure = max(0.7, rules["target_luma"] / rl)
+    style_tint = np.ones(3)
+    raw_tint = cr.get("style_tint_rgb")
+    if match_ref_look and isinstance(raw_tint, (list, tuple)) and len(raw_tint) == 3:
+        style_tint = np.clip(np.asarray([float(x) for x in raw_tint], dtype=np.float64), 0.85, 1.15)
+    ref_target_gain = np.clip(np.ones(3) * exposure * style_tint, 1.0 / rules["max_channel_gain"], rules["max_channel_gain"])
     cam_gain: dict[str, Any] = {}
     for cid, cs in cams.items():
         if cid == ref:
-            g = np.ones(3) * exposure  # creative look of the reference angle is kept
+            g = ref_target_gain.copy()
             info = {"wb": [1.0, 1.0, 1.0], "exposure_match": 1.0, "skin_nudge": [1.0, 1.0, 1.0], "clamped": False}
         else:
             g, info = match_gains(cs, cams[ref], rules, exposure)
+            if match_ref_look:
+                g = np.clip(g * style_tint, 1.0 / rules["max_channel_gain"], rules["max_channel_gain"])
         before = corrected_distance(cs, cams[ref], np.ones(3))
-        after = corrected_distance(cs, cams[ref], g, np.ones(3) * exposure)
+        after = corrected_distance(cs, cams[ref], g, ref_target_gain)
         cam_gain[cid] = {"gains": [round(float(x), 4) for x in g], **info, "de_before": {k: round(v, 3) for k, v in before.items()}, "de_after": {k: round(v, 3) for k, v in after.items()}, "wb_source": cs["wb_source"]}
     shots: dict[str, Any] = {}
     for sh in st.rough_cut_shots:

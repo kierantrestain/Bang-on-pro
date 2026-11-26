@@ -388,7 +388,7 @@ QWidget *AgentControlCentre::buildSetup()
     m_profileCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
     m_profileCombo->setMinimumContentsLength(10);
     m_profileCombo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    m_profileCombo->addItem(tr("Automatic (matches your footage)"), QString());
+    m_profileCombo->addItem(tr("Automatic (by footage)"), QString());
     m_profileCombo->setItemData(0, tr("One camera: YouTube talking head. Two: interview. More: multicamera studio."), Qt::ToolTipRole);
     m_profileCombo->addItem(tr("YouTube talking head"), QStringLiteral("youtube_talking_head"));
     m_profileCombo->addItem(tr("Podcast multicam"), QStringLiteral("podcast_multicam"));
@@ -1077,10 +1077,31 @@ void AgentControlCentre::setQueueSelected(bool queued)
 
 void AgentControlCentre::addCustomProfile(const QString &profileId, const QString &displayName)
 {
-    if (profileId.isEmpty() || m_profileCombo->findData(profileId) >= 0) {
+    if (profileId.isEmpty()) {
+        return;
+    }
+    const int idx = m_profileCombo->findData(profileId);
+    if (idx >= 0) {
+        m_profileCombo->setItemText(idx, displayName.isEmpty() ? profileId : displayName);
         return;
     }
     m_profileCombo->addItem(displayName.isEmpty() ? profileId : displayName, profileId);
+}
+
+void AgentControlCentre::selectProfile(const QString &profileId)
+{
+    const int idx = m_profileCombo->findData(profileId);
+    if (idx >= 0) {
+        m_profileCombo->setCurrentIndex(idx);
+    }
+}
+
+void AgentControlCentre::removeCustomProfile(const QString &profileId)
+{
+    const int idx = m_profileCombo->findData(profileId);
+    if (idx >= 0) {
+        m_profileCombo->removeItem(idx);
+    }
 }
 
 void AgentControlCentre::loadHistory(const QJsonObject &payload)

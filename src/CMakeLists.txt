@@ -98,6 +98,7 @@ list(APPEND kdenlive_SRCS
     bangonpro/ui/BangOnProShortcutPresets.cpp
     bangonpro/ui/TranscriptEditorWidget.cpp
     bangonpro/ui/ShowProfileEditorDialog.cpp
+    bangonpro/ui/ReferenceStyleDialog.cpp
     bangonpro/ui/ExternalProviderConsentDialog.cpp
     bangonpro/ui/ModelManagerDialog.cpp
     bangonpro/roto_ui/RotoMaskCanvasWidget.cpp
@@ -155,6 +156,7 @@ set_source_files_properties(
     bangonpro/ui/BangOnProShortcutPresets.cpp
     bangonpro/ui/TranscriptEditorWidget.cpp
     bangonpro/ui/ShowProfileEditorDialog.cpp
+    bangonpro/ui/ReferenceStyleDialog.cpp
     bangonpro/ui/ExternalProviderConsentDialog.cpp
     bangonpro/ui/ModelManagerDialog.cpp
     bangonpro/roto_ui/RotoMaskCanvasWidget.cpp

@@ -45,6 +45,7 @@ CANONICAL: dict[str, str] = {
     "lower_thirds": "Add lower thirds.",
     "title_card": "Add a title card.",
     "topic_cards": "Add topic cards.",
+    "motion_graphics": "Add motion graphics and callouts.",
     "colour": "Match the colour and grade.",
     "blur_background": "Blur the background.",
     "audio_cleanup": "Clean up the audio levels.",

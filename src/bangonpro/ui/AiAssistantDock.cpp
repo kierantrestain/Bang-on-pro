@@ -77,7 +77,7 @@ AiAssistantDock::AiAssistantDock(QWidget *parent)
     qRegisterMetaType<BangOnPro::TimelineCommandResponse>("BangOnPro::TimelineCommandResponse");
 
     setObjectName(QStringLiteral("bangOnProAiAssistant"));
-    setMinimumWidth(340);
+    setMinimumWidth(280);
 
     buildUi();
     populateDefaultProfiles();
@@ -125,6 +125,7 @@ void AiAssistantDock::buildUi()
 
     auto *manualNoteLabel = new QLabel(tr("Proposals stay reversible until you approve them"), m_headerFrame);
     manualNoteLabel->setObjectName(QStringLiteral("bangOnProSubtitle"));
+    manualNoteLabel->setWordWrap(true);
 
     m_revisionLabel = new QLabel(tr("Rev #0"), m_headerFrame);
     m_revisionLabel->setObjectName(QStringLiteral("bangOnProRevision"));
@@ -136,7 +137,7 @@ void AiAssistantDock::buildUi()
     headerVBox->addLayout(headerSubRow);
     rootLayout->addWidget(m_headerFrame);
 
-    // 2. Show Profile selector
+    // 2. Show Profile selector (two clean rows so labels never clip at laptop widths)
     auto *profileSectionLayout = new QVBoxLayout();
     profileSectionLayout->setSpacing(4);
 
@@ -149,12 +150,14 @@ void AiAssistantDock::buildUi()
     profileHeaderRow->addStretch(1);
     profileHeaderRow->addWidget(m_profileMetaLabel);
 
-    auto *profileControlRow = new QHBoxLayout();
-    profileControlRow->setSpacing(6);
-
     m_profileCombo = new QComboBox(this);
     m_profileCombo->setObjectName(QStringLiteral("showProfileCombo"));
+    m_profileCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    m_profileCombo->setMinimumContentsLength(10);
     m_profileCombo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+
+    auto *profileControlRow = new QHBoxLayout();
+    profileControlRow->setSpacing(6);
 
     m_loadProfileButton = new QPushButton(tr("Load JSON…"), this);
     m_loadProfileButton->setObjectName(QStringLiteral("loadProfileButton"));
@@ -164,16 +167,16 @@ void AiAssistantDock::buildUi()
     m_editProfileButton->setObjectName(QStringLiteral("editProfileButton"));
     m_editProfileButton->setToolTip(tr("Create or customize a Show Profile (pacing, cameras, audio, graphics)"));
 
-    m_providerSettingsButton = new QPushButton(tr("AI Providers & Subscriptions…"), this);
+    m_providerSettingsButton = new QPushButton(tr("AI Providers…"), this);
     m_providerSettingsButton->setObjectName(QStringLiteral("providerSettingsButton"));
     m_providerSettingsButton->setToolTip(tr("Manage subscription sign-in, routing and privacy"));
 
-    profileControlRow->addWidget(m_profileCombo, 1);
-    profileControlRow->addWidget(m_loadProfileButton);
-    profileControlRow->addWidget(m_editProfileButton);
-    profileControlRow->addWidget(m_providerSettingsButton);
+    profileControlRow->addWidget(m_loadProfileButton, 1);
+    profileControlRow->addWidget(m_editProfileButton, 1);
+    profileControlRow->addWidget(m_providerSettingsButton, 1);
 
     profileSectionLayout->addLayout(profileHeaderRow);
+    profileSectionLayout->addWidget(m_profileCombo);
     profileSectionLayout->addLayout(profileControlRow);
     rootLayout->addLayout(profileSectionLayout);
 
@@ -204,17 +207,17 @@ void AiAssistantDock::buildUi()
     m_instructionInput->setTabChangesFocus(true);
     rootLayout->addWidget(m_instructionInput);
 
-    // Quick-action chips grid
+    // Quick-action chips grid (concise labels that never clip in narrow docks; full prompt in tooltip)
     struct QuickChipSpec
     {
         QString label;
         QString prompt;
     };
     const QVector<QuickChipSpec> chips = {
-        {tr("Sync, first cut and graphics"), QStringLiteral("Sync all four cameras, remove setup delays, build a first cut and add our standard graphics")},
-        {tr("Remove setup delays and dead air"), QStringLiteral("Remove setup delays and silence pauses while preserving natural pacing")},
-        {tr("Active-speaker multicam cut"), QStringLiteral("Build a multicam edit switching on active speaker with reaction shots")},
-        {tr("Dialogue polish and captions"), QStringLiteral("Normalize dialogue loudness, clean background noise, and add captions and lower thirds")},
+        {tr("Sync + first cut"), QStringLiteral("Sync all four cameras, remove setup delays, build a first cut and add our standard graphics")},
+        {tr("Trim dead air"), QStringLiteral("Remove setup delays and silence pauses while preserving natural pacing")},
+        {tr("Multicam speaker cut"), QStringLiteral("Build a multicam edit switching on active speaker with reaction shots")},
+        {tr("Audio + captions"), QStringLiteral("Normalize dialogue loudness, clean background noise, and add captions and lower thirds")},
     };
 
     auto *chipsGrid = new QGridLayout();

@@ -21,6 +21,7 @@
 #include <QMenu>
 #include <QPointer>
 #include <QPushButton>
+#include <QResizeEvent>
 #include <QScreen>
 #include <QSettings>
 #include <QTimer>
@@ -901,6 +902,17 @@ void WorkspaceSwitcherBar::buildUi()
         editBtn->setChecked(true);
     }
 
+    m_overflowButton = new QToolButton(this);
+    m_overflowButton->setObjectName(QStringLiteral("workspaceOverflowButton"));
+    m_overflowButton->setText(tr("More"));
+    m_overflowButton->setPopupMode(QToolButton::InstantPopup);
+    m_overflowButton->setCursor(Qt::PointingHandCursor);
+    m_overflowButton->setToolTip(tr("Additional studio workspaces"));
+    m_overflowMenu = new QMenu(m_overflowButton);
+    m_overflowButton->setMenu(m_overflowMenu);
+    m_overflowButton->setVisible(false);
+    layout->addWidget(m_overflowButton);
+
     layout->addStretch(1);
 
     m_aiPanelToggleButton = new QPushButton(tr("AI panel"), this);
@@ -911,11 +923,11 @@ void WorkspaceSwitcherBar::buildUi()
     m_aiPanelToggleButton->setToolTip(tr("Show or collapse the Bang On Pro AI Assistant dock"));
     layout->addWidget(m_aiPanelToggleButton);
 
-    layout->addSpacing(8);
+    layout->addSpacing(6);
 
     m_saveLayoutButton = new QToolButton(this);
     m_saveLayoutButton->setObjectName(QStringLiteral("workspaceSaveLayoutButton"));
-    m_saveLayoutButton->setText(tr("Save Layout"));
+    m_saveLayoutButton->setText(tr("Layout"));
     m_saveLayoutButton->setPopupMode(QToolButton::MenuButtonPopup);
     m_saveLayoutButton->setCursor(Qt::PointingHandCursor);
     m_saveLayoutButton->setToolTip(tr("Save current panel layout or restore a saved custom workspace"));
@@ -932,6 +944,43 @@ void WorkspaceSwitcherBar::buildUi()
 #endif
     connect(m_aiPanelToggleButton, &QPushButton::toggled, this, &WorkspaceSwitcherBar::handleAiPanelToggled);
     connect(m_saveLayoutButton, &QToolButton::clicked, this, &WorkspaceSwitcherBar::handleSaveLayoutClicked);
+}
+
+void WorkspaceSwitcherBar::resizeEvent(QResizeEvent *event)
+{
+    QWidget::resizeEvent(event);
+    updateResponsivePills();
+}
+
+void WorkspaceSwitcherBar::updateResponsivePills()
+{
+    if (!m_overflowButton || !m_overflowMenu || width() <= 0) {
+        return;
+    }
+    const int reserved = 135 + m_aiPanelToggleButton->sizeHint().width() + m_saveLayoutButton->sizeHint().width() + 72;
+    const int budget = qMax(180, width() - reserved);
+    const QVector<WorkspaceMode> modes = allWorkspaceModes();
+    int used = 0;
+    m_overflowMenu->clear();
+    bool hasOverflow = false;
+    for (const WorkspaceMode mode : modes) {
+        QPushButton *btn = m_modeButtons.value(static_cast<int>(mode));
+        if (!btn) {
+            continue;
+        }
+        const int w = btn->sizeHint().width() + 4;
+        const bool isActive = (mode == m_activeMode);
+        if (isActive || used + w <= budget) {
+            btn->setVisible(true);
+            used += w;
+        } else {
+            btn->setVisible(false);
+            hasOverflow = true;
+            QAction *act = m_overflowMenu->addAction(workspaceModeDisplayName(mode));
+            connect(act, &QAction::triggered, this, [this, mode]() { handleWorkspaceButtonClicked(static_cast<int>(mode)); });
+        }
+    }
+    m_overflowButton->setVisible(hasOverflow);
 }
 
 WorkspaceMode WorkspaceSwitcherBar::activeWorkspace() const

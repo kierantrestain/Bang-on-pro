@@ -18,6 +18,7 @@
 #include "ui/BangOnProWorkspace.h"
 #include "ui/ExternalProviderConsentDialog.h"
 #include "ui/ModelManagerDialog.h"
+#include "ui/ReferenceStyleDialog.h"
 #include "ui/ShowProfileEditorDialog.h"
 #include "ui/TranscriptEditorWidget.h"
 
@@ -207,9 +208,13 @@ BangOnProIntegration::BangOnProIntegration(QMainWindow *mainWindow, EffectListWi
         }
     }
     qApp->installEventFilter(this);
-    // Restored window geometry can come from a larger display; keep the editor on the current screen.
-    QTimer::singleShot(0, m_mainWindow, [this]() { fitWindowToScreen(m_mainWindow); });
-    QTimer::singleShot(1500, m_mainWindow, [this]() { fitWindowToScreen(m_mainWindow); });
+    // Apply a clean studio workspace after Kdenlive finishes restoring docks so unused panels never pile up
+    // beside the timeline on laptop displays (e.g. 1470x956); monitor and timeline stay the main focus.
+    QTimer::singleShot(900, m_mainWindow, [this]() {
+        applyStudioWorkspace(WorkspaceMode::Edit);
+        fitWindowToScreen(m_mainWindow);
+    });
+    QTimer::singleShot(1600, m_mainWindow, [this]() { fitWindowToScreen(m_mainWindow); });
     // Editor acceptance tests drive this very window when BANGONPRO_AUTOTEST names a script (inactive otherwise).
     BangOnProAutotest::startIfRequested(m_mainWindow, this);
 }
@@ -1335,8 +1340,127 @@ void BangOnProIntegration::setQcMarkersVisible(const QString &jobDir, bool visib
 
 void BangOnProIntegration::openReferenceStyles()
 {
-    // Filled in by the reference-style dialog (V1.6 style learning).
-    m_aiWidget->appendActivityLog(QStringLiteral("styles"), QStringLiteral("Reference videos"));
+    auto *dlg = new ReferenceStyleDialog(m_mainWindow);
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    QPointer<ReferenceStyleDialog> guard(dlg);
+    const QString profilesDir = customProfilesDir();
+    QDir().mkpath(profilesDir);
+
+    auto refreshSaved = [this, guard, profilesDir]() {
+        runQuickDepartmentCommand({QStringLiteral("style"), QStringLiteral("list"), QStringLiteral("--out"), profilesDir}, [guard](const QJsonObject &res) {
+            if (!guard) {
+                return;
+            }
+            if (!res.value(QStringLiteral("error")).toString().isEmpty()) {
+                guard->setStatusMessage(res.value(QStringLiteral("error")).toString(), true);
+                return;
+            }
+            guard->setSavedStyles(res.value(QStringLiteral("styles")).toArray());
+        });
+    };
+
+    connect(dlg, &ReferenceStyleDialog::analyzeRequested, this, [this, guard, profilesDir](const QStringList &videos, const QString &styleName) {
+        if (!guard || videos.isEmpty()) {
+            return;
+        }
+        guard->setBusy(true, QStringLiteral("Analysing %1 reference video(s) locally…").arg(videos.size()));
+        QStringList args{QStringLiteral("style"), QStringLiteral("analyze")};
+        args += videos;
+        if (!styleName.isEmpty()) {
+            args << QStringLiteral("--name") << styleName;
+        }
+        args << QStringLiteral("--out") << profilesDir;
+        runQuickDepartmentCommand(args, [this, guard](const QJsonObject &res) {
+            if (!guard) {
+                return;
+            }
+            guard->setBusy(false);
+            const QString err = res.value(QStringLiteral("error")).toString();
+            if (!err.isEmpty()) {
+                guard->setStatusMessage(err, true);
+                m_aiWidget->appendActivityLog(QStringLiteral("styles"), QStringLiteral("Reference analysis failed: %1").arg(err), QStringLiteral("WARN"));
+                return;
+            }
+            guard->setAnalysisResult(res);
+            m_aiWidget->appendActivityLog(QStringLiteral("styles"),
+                                          QStringLiteral("Analysed reference style '%1'").arg(res.value(QStringLiteral("display_name")).toString()));
+        });
+    });
+
+    connect(dlg, &ReferenceStyleDialog::saveProfileRequested, this, [this, guard, profilesDir, refreshSaved](const QJsonObject &profileJson) {
+        if (!guard || profileJson.isEmpty()) {
+            return;
+        }
+        const QString tmpPath =
+            QDir(QDir::tempPath()).filePath(QStringLiteral("bop_ref_style_%1.json").arg(QUuid::createUuid().toString(QUuid::WithoutBraces)));
+        QFile f(tmpPath);
+        if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            guard->setStatusMessage(QStringLiteral("Could not write temporary style file"), true);
+            return;
+        }
+        f.write(QJsonDocument(profileJson).toJson(QJsonDocument::Indented));
+        f.close();
+
+        guard->setBusy(true, QStringLiteral("Validating and saving editing style…"));
+        const QStringList args{QStringLiteral("style"), QStringLiteral("save"), tmpPath, QStringLiteral("--out"), profilesDir};
+        runQuickDepartmentCommand(args, [this, guard, tmpPath, refreshSaved](const QJsonObject &res) {
+            QFile::remove(tmpPath);
+            if (!guard) {
+                return;
+            }
+            guard->setBusy(false);
+            const QString err = res.value(QStringLiteral("error")).toString();
+            if (!err.isEmpty()) {
+                guard->setStatusMessage(err, true);
+                return;
+            }
+            const QString pid = res.value(QStringLiteral("profile_id")).toString();
+            const QString name = res.value(QStringLiteral("display_name")).toString(pid);
+            if (!pid.isEmpty() && m_agentCentre) {
+                m_agentCentre->addCustomProfile(pid, name);
+                m_agentCentre->selectProfile(pid);
+            }
+            refreshSaved();
+            guard->setStatusMessage(QStringLiteral("Saved and selected style '%1'.").arg(name));
+            m_aiWidget->appendActivityLog(QStringLiteral("styles"), QStringLiteral("Saved reference editing style '%1' (%2)").arg(name, pid));
+        });
+    });
+
+    connect(dlg, &ReferenceStyleDialog::selectSavedStyleRequested, this, [this](const QString &profileId, const QString &displayName) {
+        if (m_agentCentre && !profileId.isEmpty()) {
+            m_agentCentre->addCustomProfile(profileId, displayName);
+            m_agentCentre->selectProfile(profileId);
+            m_aiWidget->appendActivityLog(QStringLiteral("styles"), QStringLiteral("Selected editing style '%1'").arg(displayName));
+        }
+    });
+
+    connect(dlg, &ReferenceStyleDialog::deleteSavedStyleRequested, this, [this, guard, profilesDir, refreshSaved](const QString &profileId) {
+        if (!guard || profileId.isEmpty()) {
+            return;
+        }
+        guard->setBusy(true, QStringLiteral("Removing style…"));
+        runQuickDepartmentCommand({QStringLiteral("style"), QStringLiteral("delete"), profileId, QStringLiteral("--out"), profilesDir},
+                                  [this, guard, profileId, refreshSaved](const QJsonObject &res) {
+                                      if (!guard) {
+                                          return;
+                                      }
+                                      guard->setBusy(false);
+                                      if (res.value(QStringLiteral("deleted")).toBool()) {
+                                          if (m_agentCentre) {
+                                              m_agentCentre->removeCustomProfile(profileId);
+                                          }
+                                          guard->setStatusMessage(QStringLiteral("Removed style '%1'.").arg(profileId));
+                                          refreshSaved();
+                                      } else {
+                                          guard->setStatusMessage(QStringLiteral("Could not remove style '%1'.").arg(profileId), true);
+                                      }
+                                  });
+    });
+
+    refreshSaved();
+    dlg->show();
+    dlg->raise();
+    dlg->activateWindow();
 }
 
 void BangOnProIntegration::stageDepartmentDraft(const QString &jobDir)
@@ -1582,6 +1706,14 @@ void BangOnProIntegration::setupMenu()
         kdenliveWin->actionCollection()->addAction(QStringLiteral("bangonpro_shortcut_presets"), shortcutsAct);
     }
     connect(shortcutsAct, &QAction::triggered, this, &BangOnProIntegration::openShortcutPresetsDialog);
+
+    QAction *newSeqAct = menu->addAction(QStringLiteral("New Sequence from Selected Clips…"));
+    newSeqAct->setObjectName(QStringLiteral("bangonpro_new_sequence"));
+    connect(newSeqAct, &QAction::triggered, this, &BangOnProIntegration::createSequenceFromFootage);
+
+    QAction *refStylesAct = menu->addAction(QStringLiteral("Reference Video Editing Styles…"));
+    refStylesAct->setObjectName(QStringLiteral("bangonpro_reference_styles"));
+    connect(refStylesAct, &QAction::triggered, this, &BangOnProIntegration::openReferenceStyles);
 
     QAction *profileEditorAct = menu->addAction(QStringLiteral("Custom Show Profile Editor…"));
     connect(profileEditorAct, &QAction::triggered, this, &BangOnProIntegration::openShowProfileEditor);

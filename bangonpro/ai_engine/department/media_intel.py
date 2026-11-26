@@ -263,6 +263,19 @@ def colour_from_visual_analysis(ctx: Any, video: dict[str, Any]) -> Any:
                 rationale=why + (f"; predicted Delta E to reference {de.get('neutral_de', 0):.1f}" if de else "") + (f"; exposure x{exposure:.2f}" if exposure != 1.0 else ""),
             )
             applied += 1
+        if cr.get("match_reference_look"):
+            st_con = float(cr.get("style_contrast", 1.0) or 1.0)
+            st_sat = float(cr.get("style_saturation", 1.0) or 1.0)
+            if abs(st_con - 1.0) > 0.04 or abs(st_sat - 1.0) > 0.04:
+                eq_props = {"av.contrast": round(min(1.5, max(0.7, st_con)), 3), "av.saturation": round(min(1.6, max(0.6, st_sat)), 3)}
+                b.add_operation(
+                    "add_effect",
+                    clip_id=clip_id,
+                    track_id="V1",
+                    params={"effect_id": "avfilter.eq", "mlt_service": "avfilter.eq", "kdenlive_id": "avfilter.eq", "parameters": eq_props, "properties": eq_props, "agent_id": "colourist"},
+                    confidence=0.88,
+                    rationale=f"Reference style look ({cr.get('treatment', 'custom')}): contrast {eq_props['av.contrast']:.2f}, saturation {eq_props['av.saturation']:.2f}",
+                )
         if lut_ok:
             b.add_operation(
                 "add_effect",

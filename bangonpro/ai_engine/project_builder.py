@@ -796,7 +796,7 @@ def emit_kdenlive_xml(
         _add_prop(prod, "mlt_service", "kdenlivetitle")
         _add_prop(prod, "xmldata", clip.params.get("kdenlive_title_xml", ""))
         _add_prop(prod, "kdenlive:id", k_id)
-        _add_prop(prod, "kdenlive:clipname", f"Lower Third: {clip.params.get('title', clip.clip_id)}")
+        _add_prop(prod, "kdenlive:clipname", clip.params.get("display_name") or f"Lower Third: {clip.params.get('title', clip.clip_id)}")
         _add_prop(prod, "kdenlive:clip_type", 2)
         _add_prop(prod, "kdenlive:folderid", -1)
         _add_prop(prod, "set.test_audio", 1)

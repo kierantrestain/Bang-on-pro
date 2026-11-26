@@ -126,7 +126,7 @@ def build_audio_restoration_chain(
         AudioFilterSpec(
             filter_id=f"flt_{track_slug}_highpass",
             mlt_service="avfilter.highpass",
-            mlt_params={"av.frequency": highpass_hz},
+            mlt_params={"av.f": highpass_hz},
             ffmpeg_filter=f"highpass=f={int(highpass_hz) if highpass_hz.is_integer() else highpass_hz}",
             track_id=target_track_id,
             enabled=True,
@@ -311,6 +311,7 @@ def generate_ass_subtitles(
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
     ]
 
+    animated = bool(style.get("animated", False))
     for cue in captions:
         start_ts = _format_ass_timestamp(cue.start_sec)
         end_ts = _format_ass_timestamp(max(cue.end_sec, cue.start_sec + 0.1))
@@ -319,6 +320,8 @@ def generate_ass_subtitles(
             cue.text, max_chars_per_line=max_chars, uppercase=uppercase
         )
         safe_text = wrapped.replace("\n", "\\N")
+        if animated:
+            safe_text = f"{{\\fad(120,100)\\fscx92\\fscy92\\t(0,120,\\fscx100\\fscy100)}}{safe_text}"
         lines.append(
             f"Dialogue: 0,{start_ts},{end_ts},Default,{safe_speaker},0,0,0,,{safe_text}"
         )

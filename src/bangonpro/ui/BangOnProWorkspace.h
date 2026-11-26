@@ -217,11 +217,17 @@ private Q_SLOTS:
     void handleAiPanelToggled(bool checked);
     void handleSaveLayoutClicked();
 
+protected:
+    void resizeEvent(QResizeEvent *event) override;
+
 private:
     void buildUi();
+    void updateResponsivePills();
 
     QButtonGroup *m_modeGroup = nullptr;
     QHash<int, QPushButton *> m_modeButtons;
+    QToolButton *m_overflowButton = nullptr;
+    QMenu *m_overflowMenu = nullptr;
     QPushButton *m_aiPanelToggleButton = nullptr;
     QToolButton *m_saveLayoutButton = nullptr;
     QMenu *m_savedLayoutsMenu = nullptr;

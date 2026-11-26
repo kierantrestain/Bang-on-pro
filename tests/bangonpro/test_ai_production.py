@@ -543,10 +543,19 @@ def test_end_to_end_4cam_pipeline_and_melt_render(
     progress_events: list[tuple[str, float, str]] = []
     out_dir = tmp_path / "e2e_podcast_run"
 
+    from bangonpro.show_profiles.loader import load_show_profile
+    profile = load_show_profile("podcast_multicam")
+    profile.setdefault("graphics_rules", {})["speaker_names"] = {
+        "Host": {"name": "Alex Rivera", "title": "Host"},
+        "Guest": {"name": "Priya Shah", "title": "Guest"},
+    }
+    profile_path = tmp_path / "podcast_named.json"
+    profile_path.write_text(json.dumps(profile), encoding="utf-8")
+
     state, orch = run_production_pipeline(
         inputs=synthetic_4cam_footage,
         output_dir=out_dir,
-        profile_ref="podcast_multicam",
+        profile_ref=str(profile_path),
         instruction="Sync all four cameras, remove setup delays, build a first cut and add our standard graphics",
         export_video=True,
         dry_run=False,

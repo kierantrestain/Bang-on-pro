@@ -13,11 +13,11 @@ on:
   workflow_dispatch:
     inputs:
       release_version:
-        description: "Release version label (defaults to 1.5.1 or git tag)"
+        description: "Release version label (defaults to 1.6.0-beta.1 or git tag)"
         required: false
-        default: "1.5.1"
+        default: "1.6.0-beta.1"
       publish_tag:
-        description: "Publish a GitHub Release for this tag after the gated build passes (e.g. v1.5.1); empty = build only"
+        description: "Publish a GitHub Release for this tag after the gated build passes (e.g. v1.6.0-beta.1); empty = build only"
         required: false
         default: ""
       prerelease:
@@ -80,7 +80,7 @@ jobs:
           elif [[ -n "${INPUT_RELEASE_VERSION:-}" ]]; then
             VER="${INPUT_RELEASE_VERSION}"
           else
-            VER="1.5.1"
+            VER="1.6.0-beta.1"
           fi
           echo "app_version=${VER}" >> "$GITHUB_OUTPUT"
           echo "Resolved Bang On Pro version: ${VER}"
@@ -247,7 +247,9 @@ jobs:
             tests/bangonpro/test_security_and_compliance.py \
             tests/bangonpro/test_project_integrity.py \
             tests/bangonpro/test_macos_perf.py \
-            tests/bangonpro/test_v12_department.py
+            tests/bangonpro/test_v12_department.py \
+            tests/bangonpro/test_v16_reliability.py \
+            tests/bangonpro/test_v16_style_and_graphics.py
 
           # V1.2: run a full production-department job INSIDE the packaged app's bundled runtime
           # (synthetic generated footage; virtualised Apple Silicon runner) and keep the evidence.
@@ -355,11 +357,24 @@ jobs:
           make_latest: ${{ inputs.prerelease == 'true' && 'false' || 'true' }}
           generate_release_notes: true
           body: |
-            ## Bang On Pro — Apple Silicon (`arm64`) Native macOS Installer
+            ## Bang On Pro V1.6 — Apple Silicon (`arm64`) Native macOS Pre-Release
 
-            **V1.2 highlights:** 14-agent AI Production Department, Agent Control Centre, automation modes with isolated drafts and approval-gated promotion, bundled local AI runtime (faster-whisper + onnxruntime; weights on demand), and real-app Kdenlive compatibility fixes. Release report: `docs/V1.2_RELEASE_REPORT.md`; packaged-app neural verification: `department_verification.json`. The 60–85 % editing-time target is **not yet measured** (needs paired human editing sessions).
+            **V1.6 highlights:**
+            - **Zero-freeze production ownership & crash recovery:** Kernel `flock` worker ownership, truthful terminal states, clean cancel/interrupt/resume recovery, and 8 real measured progress stages.
+            - **Same-project edited sequences & multi-revision reliability:** Original sequence stays untouched; first edit (`· Edited`) and multiple revisions (`· Edited v2`, `v3`…) open cleanly inside the same project with frame-accurate picture/dialogue sync on V1/A1, hidden-by-default QC markers, and single-step native Undo.
+            - **Reference-video style learning:** Import one or more reference videos via **Reference videos…** to analyse pacing, cuts, transitions, framing, colour, loudness, captions, graphics, and B-roll locally (cached by content hash), preview/tweak, and save reusable editing styles that measurably shape subsequent edits.
+            - **Intelligent animated motion graphics:** Native editable Kdenlive titles animated with MLT `qtblend` (Transform) keyframes — lower thirds, title cards, scoreboards, statistics, comparisons, vector bar charts, animated captions, callouts, branded transitions, and social CTAs — validated for safe areas, WCAG contrast, and collision avoidance.
+            - **Clean laptop-friendly interface (1470×956):** Unobstructed startup Edit layout, responsive workspace switcher with overflow menu, simplified Production panel, Premiere-Pro-familiar sequence creation, and non-clipping labels across AI Assistant and Premiere Presets.
+            - **Truthful subscription reasoning:** Preserves the 4-provider official-client subscription router and automatic failover with truthful per-job usage reporting (zero separately billed API usage).
+
+            Editor handbook: `docs/EDITOR_QUICK_START.md`.
 
             Self-contained `.app` bundle packaged as a native Apple Silicon `.dmg` (includes Qt 6, KDE Frameworks 6, MLT 7, frei0r plugins, FFmpeg with Apple VideoToolbox acceleration, Breeze icons, and embedded Python 3.12 AI runtime — zero manual terminal setup required).
+
+            ### Known limitations
+            - Live authenticated reasoning against personal subscriptions requires installing and signing into an eligible official client on your Mac (not exercised on headless CI runners).
+            - Physical Apple Silicon Mac interactive testing and paired human editing-time benchmarks remain separate from virtualised CI runner verification.
+            - Ad-hoc signed builds (see `SIGNING_STATUS.txt`) require macOS Gatekeeper confirmation on first launch.
 
             ### 1. Verify Download Integrity (SHA-256)
             ```bash

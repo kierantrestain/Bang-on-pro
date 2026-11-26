@@ -122,6 +122,8 @@ public:
     void loadHistory(const QJsonObject &historyPayload);
     int historyCount() const;
     void addCustomProfile(const QString &profileId, const QString &displayName);
+    void selectProfile(const QString &profileId);
+    void removeCustomProfile(const QString &profileId);
 
     void setTimingActive(bool active, bool paused = false);
     bool timingActive() const;

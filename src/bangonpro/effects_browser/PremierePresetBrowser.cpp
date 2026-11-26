@@ -120,25 +120,31 @@ void PremierePresetBrowser::buildUi()
     headerLayout->addWidget(m_importBtn, 0);
     rootLayout->addLayout(headerLayout);
 
-    // Search & filter toolbar
-    auto *filterRow = new QHBoxLayout();
+    // Search & filter toolbar (two rows so search never squashes at narrow dock widths)
     m_searchEdit = new QLineEdit(this);
-    m_searchEdit->setPlaceholderText(QStringLiteral("Search presets, packs, folders, effects, notes..."));
+    m_searchEdit->setPlaceholderText(QStringLiteral("Search presets, packs, effects…"));
     m_searchEdit->setClearButtonEnabled(true);
+    rootLayout->addWidget(m_searchEdit);
 
+    auto *filterRow = new QHBoxLayout();
+    filterRow->setSpacing(4);
     m_packFilterCombo = new QComboBox(this);
+    m_packFilterCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    m_packFilterCombo->setMinimumContentsLength(8);
     m_packFilterCombo->addItem(QStringLiteral("All Packs / Folders"), QString());
 
     m_statusFilterCombo = new QComboBox(this);
+    m_statusFilterCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    m_statusFilterCombo->setMinimumContentsLength(8);
     m_statusFilterCombo->addItem(QStringLiteral("All Statuses"), QStringLiteral("all"));
     m_statusFilterCombo->addItem(QStringLiteral("Exact Validated"), QStringLiteral("exact_validated"));
     m_statusFilterCombo->addItem(QStringLiteral("Approximated"), QStringLiteral("approximated"));
     m_statusFilterCombo->addItem(QStringLiteral("Missing Dependency"), QStringLiteral("missing_dependency"));
     m_statusFilterCombo->addItem(QStringLiteral("Unsupported"), QStringLiteral("unsupported"));
 
-    m_favoritesOnlyCheck = new QCheckBox(QStringLiteral("Favourites Only"), this);
+    m_favoritesOnlyCheck = new QCheckBox(QStringLiteral("Favourites"), this);
+    m_favoritesOnlyCheck->setToolTip(QStringLiteral("Show favourite presets only"));
 
-    filterRow->addWidget(m_searchEdit, 2);
     filterRow->addWidget(m_packFilterCombo, 1);
     filterRow->addWidget(m_statusFilterCombo, 1);
     filterRow->addWidget(m_favoritesOnlyCheck, 0);
@@ -164,11 +170,15 @@ void PremierePresetBrowser::buildUi()
     bottomLayout->setSpacing(6);
 
     auto *actionRow = new QHBoxLayout();
-    m_applyBtn = new QPushButton(QStringLiteral("Apply Preset"), bottomPane);
+    actionRow->setSpacing(4);
+    m_applyBtn = new QPushButton(QStringLiteral("Apply"), bottomPane);
+    m_applyBtn->setToolTip(QStringLiteral("Apply selected preset to the active clip"));
     m_applyBtn->setEnabled(false);
-    m_favoriteBtn = new QPushButton(QStringLiteral("Toggle Favourite"), bottomPane);
+    m_favoriteBtn = new QPushButton(QStringLiteral("Favourite"), bottomPane);
+    m_favoriteBtn->setToolTip(QStringLiteral("Toggle favourite status for this preset"));
     m_favoriteBtn->setEnabled(false);
-    m_saveStackBtn = new QPushButton(QStringLiteral("Save to Custom Stack..."), bottomPane);
+    m_saveStackBtn = new QPushButton(QStringLiteral("Save Stack…"), bottomPane);
+    m_saveStackBtn->setToolTip(QStringLiteral("Save to Custom Stack…"));
     m_saveStackBtn->setEnabled(false);
 
     actionRow->addWidget(m_applyBtn);

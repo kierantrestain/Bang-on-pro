@@ -102,6 +102,7 @@ add_executable(bangonpro_test_pro_workspace
     ${CMAKE_CURRENT_SOURCE_DIR}/../ui/BangOnProShortcutPresets.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../ui/TranscriptEditorWidget.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../ui/ShowProfileEditorDialog.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../ui/ReferenceStyleDialog.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../ui/ExternalProviderConsentDialog.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../ui/ModelManagerDialog.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../ui/AiAssistantDock.cpp

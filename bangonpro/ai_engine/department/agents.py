@@ -137,7 +137,7 @@ _BRIEF_PATTERNS: dict[str, str] = {
     "vfx": r"\b(mask|rotoscop\w*|blur (the )?background|background (blur|replace\w*|removal)|remove (the )?background|green ?screen|track(ing)? (the )?(face|subject|person))\b",
     "social": r"\b(social|vertical|9:16|shorts|reels?|tiktok|instagram)\b",
     "highlights": r"\b(highlights?|best (bits|moments)|clips?|teaser|promo)\b",
-    "graphics": r"\b(graphics?|lower thirds?|brand\w*|title card|intro|outro|logo)\b",
+    "graphics": r"\b(graphics?|lower thirds?|brand\w*|title card|intro|outro|logo|scoreboard|stat(?:istic)?s?|compar(?:e|ison)|charts?|callouts?|subscribe|follow cta|bumper|motion graphics?|animated captions?|kinetic captions?)\b",
     "captions": r"\b(captions?|subtitles?|srt)\b",
     "audio": r"\b(audio|sound|loudness|lufs|denoise|noise|levels?|mix)\b",
     "export": r"\b(export|render|master|deliver\w*)\b",
@@ -877,6 +877,8 @@ def run_captions(ctx: AgentContext) -> AgentOutcome:
             review_items=["Captions need a spoken transcript. Install a Whisper model in Model Manager, then rerun Captions"],
             skipped_reason="no_spoken_transcript",
         )
+    if re.search(r"\b(animated|kinetic)\s+captions?\b", str(st.instruction or ""), re.IGNORECASE):
+        st.profile.setdefault("caption_style", {})["animated"] = True
     agq.prepare_captions(st)
     b = agq.new_agent_builder(st, agent_id="captions", agent_role="captions", transaction_label="Captions Agent: subtitles")
     n = agq.emit_caption_ops(st, b)
@@ -896,6 +898,7 @@ def run_captions(ctx: AgentContext) -> AgentOutcome:
 
 def run_graphics(ctx: AgentContext) -> AgentOutcome:
     from bangonpro.ai_engine.department import editorial_graphics as eg
+    from bangonpro.ai_engine.department import motion_graphics as mg
 
     st = ctx.state
     rules = st.profile.get("graphics_rules", {}) or {}
@@ -905,45 +908,71 @@ def run_graphics(ctx: AgentContext) -> AgentOutcome:
     title_sec = float(min(6.0, max(2.0, float(rules.get("title_card_duration_sec", 3.0)))))
     spec = st.profile["video_spec"]
     width, height = int(spec["width"]), int(spec["height"])
+    fps = max(1.0, float(st.fps))
     accent = str(rules.get("brand_accent_hex", templates.get("accent_hex", "#FF5A1F")))
     font = str(templates.get("font_family", "DejaVu Sans"))
-    # V1.2.2: V2 occupancy is planned up front: title card, then topic cards, then lower thirds
+    default_anim = str(rules.get("animation_style", "slide_left"))
+    animate_graphics = bool(rules.get("animate_graphics", True))
+    captions_active = bool(st.captions or st.intent.add_captions)
+    caption_align = str((st.profile.get("caption_style") or {}).get("alignment", "bottom_center"))
+
+    def _add_animation(clip_id: str, dur_frames: int, animation: str, label: str) -> str:
+        rect_kf = mg.build_qtblend_animation_rect(animation=animation, width=width, height=height, duration_frames=dur_frames, fps=fps)
+        if animate_graphics:
+            props = {"rect": rect_kf, "compositing": 0, "distort": 0}
+            b.add_operation(
+                "add_effect",
+                clip_id=clip_id,
+                track_id="V2",
+                params={"effect_id": "qtblend", "mlt_service": "qtblend", "kdenlive_id": "qtblend", "parameters": props, "properties": props, "agent_id": "graphics"},
+                confidence=0.94,
+                rationale=f"Animate {label} ({animation}) using native Transform (qtblend) keyframes",
+            )
+        return rect_kf
+
+    # V1.2.2 + V1.6: V2 occupancy is planned up front: title card, topic cards, lower thirds, then motion graphics
     reserved: list[tuple[float, float]] = [(0.0, title_sec)] if want_title else []
     topic_cards = eg.plan_topic_cards(st, reserved) if st.rough_cut_shots or st.transcript_segments else []
     st.metadata["graphics_reserved"] = reserved
     agq.prepare_lower_thirds(st)
-    b = agq.new_agent_builder(st, agent_id="graphics", agent_role="graphics", transaction_label="Graphics Agent: lower thirds & title card")
+    b = agq.new_agent_builder(st, agent_id="graphics", agent_role="graphics", transaction_label="Graphics Agent: animated lower thirds, titles & motion graphics")
     n = agq.emit_lower_third_ops(st, b)
     report: list[dict[str, Any]] = []
     lt_name, lt_spec, lt_known = eg.get_template(str(templates.get("lower_third_template", "studio_clean_bar")), "lower_third")
     lt_min, lt_max = float(rules.get("lower_third_min_sec", 3.0)), float(rules.get("lower_third_max_sec", 8.0))
     for lt in st.lower_thirds:
-        report.append({"graphic_id": lt.graphic_id, "kind": "lower_third", "template": lt.template, "start_sec": lt.start_sec, **eg.validate_graphic(spec=lt_spec, position=lt.position, width=width, height=height, title=lt.title, subtitle=lt.subtitle, duration_sec=lt.duration_sec, min_sec=lt_min, max_sec=lt_max)})
+        reserved.append((lt.start_sec, lt.start_sec + lt.duration_sec))
+        dur_f = max(4, st.sec_to_frame(lt.duration_sec))
+        anim = "slide_right" if "right" in str(lt.position) else default_anim
+        kf = _add_animation(lt.graphic_id, dur_f, anim, f"lower third '{lt.title}'")
+        report.append({"graphic_id": lt.graphic_id, "kind": "lower_third", "template": lt.template, "start_sec": lt.start_sec, "duration_sec": lt.duration_sec, "animation": anim, "keyframes": kf, **eg.validate_graphic(spec=lt_spec, position=lt.position, width=width, height=height, title=lt.title, subtitle=lt.subtitle, duration_sec=lt.duration_sec, min_sec=lt_min, max_sec=lt_max)})
     tc_name, tc_spec, _ = eg.get_template("topic_card", "topic_card")
     for k, card in enumerate(topic_cards, start=1):
-        dur_f = max(1, st.sec_to_frame(card["duration_sec"]))
+        dur_f = max(4, st.sec_to_frame(card["duration_sec"]))
         xml = agq.generate_kdenlive_lower_third_xml(
             title=card["title"], subtitle=card["subtitle"], width=width, height=height, accent_hex=accent, duration_frames=dur_f,
             position=str(tc_spec["position"]), font_family=font, box_w_frac=float(tc_spec["box_w"]), box_h_frac=float(tc_spec["box_h"]),
             title_px_frac=float(tc_spec["title_px"]), sub_px_frac=float(tc_spec["sub_px"]),
         )
         start_f = st.sec_to_frame(card["start_sec"])
+        cid = f"topic_card_{k:02d}"
         b.add_operation(
             "place_clip",
-            clip_id=f"topic_card_{k:02d}",
+            clip_id=cid,
             track_id="V2",
             in_frame=0,
             out_frame=max(0, dur_f - 1),
             timeline_start=start_f,
-            params={"clip_kind": "kdenlivetitle", "title": card["title"], "subtitle": card["subtitle"], "template": tc_name, "position": str(tc_spec["position"]), "kdenlive_title_xml": xml},
+            params={"clip_kind": "kdenlivetitle", "display_name": f"Topic: {card['title']}", "title": card["title"], "subtitle": card["subtitle"], "template": tc_name, "position": str(tc_spec["position"]), "kdenlive_title_xml": xml},
             confidence=0.85,
             rationale=f"Topic card for {card['section_id']} at the start of the story",
         )
-        report.append({"graphic_id": f"topic_card_{k:02d}", "kind": "topic_card", "template": tc_name, "start_sec": card["start_sec"], **eg.validate_graphic(spec=tc_spec, position=str(tc_spec["position"]), width=width, height=height, title=card["title"], subtitle=card["subtitle"], duration_sec=card["duration_sec"], min_sec=2.5, max_sec=6.0)})
+        kf = _add_animation(cid, dur_f, "slide_down", f"topic card '{card['title']}'")
+        report.append({"graphic_id": cid, "kind": "topic_card", "template": tc_name, "start_sec": card["start_sec"], "duration_sec": card["duration_sec"], "animation": "slide_down", "keyframes": kf, **eg.validate_graphic(spec=tc_spec, position=str(tc_spec["position"]), width=width, height=height, title=card["title"], subtitle=card["subtitle"], duration_sec=card["duration_sec"], min_sec=2.5, max_sec=6.0)})
     title_added = False
     if want_title:
         t_name, t_spec, _ = eg.get_template(str(templates.get("title_card_template", "episode_opener")), "title_card")
-        dur_f = st.sec_to_frame(title_sec)
+        dur_f = max(4, st.sec_to_frame(title_sec))
         xml = agq.generate_kdenlive_lower_third_xml(
             title=title,
             subtitle=str(st.profile.get("display_name", "")),
@@ -958,7 +987,6 @@ def run_graphics(ctx: AgentContext) -> AgentOutcome:
             title_px_frac=float(t_spec["title_px"]),
             sub_px_frac=float(t_spec["sub_px"]),
         )
-        report.append({"graphic_id": "title_card_001", "kind": "title_card", "template": t_name, "start_sec": 0.0, **eg.validate_graphic(spec=t_spec, position="center", width=width, height=height, title=title, subtitle=str(st.profile.get("display_name", "")), duration_sec=title_sec, min_sec=2.0, max_sec=6.0)})
         b.add_operation(
             "place_clip",
             clip_id="title_card_001",
@@ -966,15 +994,77 @@ def run_graphics(ctx: AgentContext) -> AgentOutcome:
             in_frame=0,
             out_frame=max(0, dur_f - 1),
             timeline_start=0,
-            params={"clip_kind": "kdenlivetitle", "title": title, "subtitle": str(st.profile.get("display_name", "")), "template": str(templates.get("title_card_template", "episode_opener")), "position": "center", "kdenlive_title_xml": xml},
+            params={"clip_kind": "kdenlivetitle", "display_name": f"Title: {title}", "title": title, "subtitle": str(st.profile.get("display_name", "")), "template": str(templates.get("title_card_template", "episode_opener")), "position": "center", "kdenlive_title_xml": xml},
             confidence=0.97,
             rationale=f"Episode title card '{title}' ({templates.get('title_card_template', 'episode_opener')})",
         )
+        kf = _add_animation("title_card_001", dur_f, "scale_fade", f"title card '{title}'")
+        report.append({"graphic_id": "title_card_001", "kind": "title_card", "template": t_name, "start_sec": 0.0, "duration_sec": title_sec, "animation": "scale_fade", "keyframes": kf, **eg.validate_graphic(spec=t_spec, position="center", width=width, height=height, title=title, subtitle=str(st.profile.get("display_name", "")), duration_sec=title_sec, min_sec=2.0, max_sec=6.0)})
         title_added = True
+
+    # V1.6 Intelligent Motion Graphics: scoreboards, stats, comparisons, charts, animated captions, callouts, transitions, social CTA
+    total_sec = st.rough_cut_shots[-1].timeline_out_sec if st.rough_cut_shots else max((s.end_sec for s in st.transcript_segments), default=0.0)
+    requested_mg = mg.parse_motion_graphics_from_brief(str(st.instruction or ""), st.profile, total_sec=total_sec)
+    placed_mg = mg.allocate_motion_graphics_slots(requested_mg, occupied=reserved, total_sec=total_sec)
+    for idx, item in enumerate(placed_mg, start=1):
+        kind = str(item["kind"])
+        tmpl = mg.MOTION_TEMPLATES.get(kind, mg.MOTION_TEMPLATES["callout"])
+        pos = mg.choose_non_colliding_position(kind, str(item.get("position") or tmpl["position"]), width, height, captions_active=captions_active, caption_alignment=caption_align)
+        dur_f = max(4, st.sec_to_frame(item["duration_sec"]))
+        start_f = st.sec_to_frame(item["start_sec"])
+        xml, _bbox, val = mg.render_motion_graphic_xml(
+            kind=kind,
+            data=item,
+            width=width,
+            height=height,
+            duration_frames=dur_f,
+            accent_hex=accent,
+            font_family=font,
+            position=pos,
+        )
+        cid = f"mg_{kind}_{idx:02d}"
+        disp = f"{kind.replace('_', ' ').title()}: {item.get('title') or item.get('metric') or kind}"
+        b.add_operation(
+            "place_clip",
+            clip_id=cid,
+            track_id="V2",
+            in_frame=0,
+            out_frame=max(0, dur_f - 1),
+            timeline_start=start_f,
+            params={
+                "clip_kind": "kdenlivetitle",
+                "graphic_kind": kind,
+                "display_name": disp,
+                "title": str(item.get("title") or item.get("metric") or kind),
+                "subtitle": str(item.get("subtitle") or item.get("label") or ""),
+                "template": kind,
+                "position": pos,
+                "accent_hex": accent,
+                "kdenlive_title_xml": xml,
+            },
+            confidence=0.92,
+            rationale=str(item.get("rationale") or f"Animated {kind} graphic"),
+        )
+        kf = _add_animation(cid, dur_f, str(item["animation"]), disp)
+        report.append(
+            {
+                "graphic_id": cid,
+                "kind": kind,
+                "template": kind,
+                "position": pos,
+                "start_sec": item["start_sec"],
+                "duration_sec": item["duration_sec"],
+                "animation": str(item["animation"]),
+                "keyframes": kf,
+                "duration_ok": float(tmpl["min_sec"]) - 0.1 <= float(item["duration_sec"]) <= float(tmpl["max_sec"]) + 0.1,
+                **val,
+            }
+        )
+
     intro = (st.profile.get("intro_outro_rules", {}) or {})
-    st.metadata["graphics_report"] = {"graphics": report, "lower_third_plan": st.metadata.get("lower_third_plan", []), "template_known": lt_known, "lower_third_template": lt_name}
+    st.metadata["graphics_report"] = {"graphics": report, "lower_third_plan": st.metadata.get("lower_third_plan", []), "template_known": lt_known, "lower_third_template": lt_name, "motion_graphics_count": len(placed_mg)}
     write_json_atomic(Path(st.output_dir) / "graphics_report.json", st.metadata["graphics_report"])
-    review = [] if st.lower_thirds or title_added else ["No speakers identified for lower thirds; add names in the profile speaker map"]
+    review = [] if st.lower_thirds or title_added or placed_mg else ["No speakers identified for lower thirds; add names in the profile speaker map"]
     withheld = st.metadata.get("lower_thirds_withheld") or []
     if withheld:
         review.append(f"Name strap withheld for {len(withheld)} speaker(s) whose name is unknown: add it to your instructions, e.g. 'lower third: Jane Doe, Host'")
@@ -991,10 +1081,10 @@ def run_graphics(ctx: AgentContext) -> AgentOutcome:
     return AgentOutcome(
         batches=[b.build()] if b.operation_count else [],
         confidence=0.95 if all(r.get("tier", 1) < 3 for r in st.metadata.get("lower_third_plan", [])) else 0.8,
-        summary=f"{n} lower thirds" + (f", {len(topic_cards)} topic cards" if topic_cards else "") + (", title card" if title_added else "") + (f"; intro={intro.get('intro_asset')}" if intro.get("intro_asset") else ""),
-        rationale="Lower thirds at each speaker's first substantive appearance on their own angle (never during crosstalk or under another graphic); branded templates; title/action-safe validated",
+        summary=f"{n} lower thirds" + (f", {len(topic_cards)} topic cards" if topic_cards else "") + (", title card" if title_added else "") + (f", {len(placed_mg)} motion graphics" if placed_mg else "") + (f"; intro={intro.get('intro_asset')}" if intro.get("intro_asset") else ""),
+        rationale="Editable native kdenlivetitle graphics animated via MLT qtblend keyframes; collision-free V2 placement with caption-band awareness; title/action-safe and contrast validated",
         review_items=review,
-        metrics={"lower_thirds": n, "topic_cards": len(topic_cards), "safe_area_failures": sum(1 for r in report if not r["inside_title_safe"])},
+        metrics={"lower_thirds": n, "topic_cards": len(topic_cards), "motion_graphics": len(placed_mg), "animated_graphics": len(report), "safe_area_failures": sum(1 for r in report if not r["inside_title_safe"])},
         est_external_cost_usd=0.0,
     )
 

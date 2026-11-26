@@ -219,7 +219,7 @@ def codex_account(binary: str, auth_config: list[str]) -> tuple[dict[str, Any], 
                             buffer += chunk
                         return {}
 
-                    request("initialize", {"clientInfo": {"name": "bang_on_pro", "version": "1.5.2"}}, 1)
+                    request("initialize", {"clientInfo": {"name": "bang_on_pro", "version": "1.6.0"}}, 1)
                     request("initialized", {})
                     doc = request("account/read", {"refreshToken": False}, 2)
                     account = doc.get("account") or {}
