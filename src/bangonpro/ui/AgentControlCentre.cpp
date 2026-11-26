@@ -975,6 +975,51 @@ QString AgentControlCentre::activeJobDir() const
     return m_jobDir;
 }
 
+void AgentControlCentre::loadAgentSession(const QJsonObject &presence, const QJsonObject &agentEdits)
+{
+    const QString client = presence.value(QStringLiteral("client")).toString(tr("Reasoning client"));
+    const bool connected = presence.value(QStringLiteral("status")).toString() == QLatin1String("connected");
+    const QString activity = presence.value(QStringLiteral("activity")).toString();
+    const QString agentId = presence.value(QStringLiteral("agent")).toString();
+    QString text = connected ? tr("%1 connected").arg(client) : tr("%1 disconnected").arg(client);
+    if (connected && !activity.isEmpty() && activity != QLatin1String("idle")) {
+        QTreeWidgetItem *it = agentId.isEmpty() ? nullptr : agentItem(agentId);
+        text = it != nullptr ? tr("%1 · %2: %3").arg(text, it->text(ColAgent), activity) : tr("%1 · %2").arg(text, activity);
+        if (it != nullptr) {
+            it->setText(ColSummary, tr("%1 (%2)").arg(activity, client));
+        }
+    }
+    const QJsonArray entries = agentEdits.value(QStringLiteral("entries")).toArray();
+    int edits = 0;
+    for (const QJsonValue &e : entries) {
+        edits += e.toObject().value(QStringLiteral("undone")).toBool() ? 0 : 1;
+    }
+    if (edits > 0) {
+        text = tr("%1 · %n agent edit(s)", nullptr, edits).arg(text);
+    }
+    m_agentSessionText = text;
+    m_jobMetaLabel->setText(tr("%1 · %2").arg(QFileInfo(m_jobDir).fileName(), text));
+    // Unresolved issues from finished agent tasks go to the same review list, under the owning agent.
+    const QJsonObject tasks = agentEdits.value(QStringLiteral("tasks")).toObject();
+    for (auto t = tasks.constBegin(); t != tasks.constEnd(); ++t) {
+        for (const QJsonValue &u : t.value().toObject().value(QStringLiteral("unresolved")).toArray()) {
+            const QJsonObject issue = u.toObject();
+            QTreeWidgetItem *owner = agentItem(issue.value(QStringLiteral("agent")).toString());
+            auto *row = new QListWidgetItem(tallyIcon(TallyState::Review),
+                                            QStringLiteral("%1 · %2").arg(owner != nullptr ? owner->text(ColAgent) : issue.value(QStringLiteral("agent")).toString(),
+                                                                         issue.value(QStringLiteral("message")).toString()),
+                                            m_reviewList);
+            row->setData(kIdRole, issue.value(QStringLiteral("agent")).toString());
+        }
+    }
+    m_reviewTitle->setText(m_reviewList->count() > 0 ? tr("Review · %1").arg(m_reviewList->count()) : tr("Review"));
+}
+
+QString AgentControlCentre::agentSessionText() const
+{
+    return m_agentSessionText;
+}
+
 bool AgentControlCentre::refreshFromDisk()
 {
     if (m_jobDir.isEmpty()) {
@@ -989,6 +1034,17 @@ bool AgentControlCentre::refreshFromDisk()
         return false; // partially written file; next poll will pick it up
     }
     loadJobStatus(doc.object());
+    {
+        // V1.4: agent session written by the MCP adapter (absent when no reasoning client was connected)
+        auto readObj = [this](const QString &rel) {
+            QFile pf(QDir(m_jobDir).filePath(rel));
+            return pf.open(QIODevice::ReadOnly) ? QJsonDocument::fromJson(pf.readAll()).object() : QJsonObject();
+        };
+        const QJsonObject presence = readObj(QStringLiteral("draft/agent_presence.json"));
+        if (!presence.isEmpty()) {
+            loadAgentSession(presence, readObj(QStringLiteral("draft/agent_edits.json")));
+        }
+    }
     if (m_interrupted && m_jobStatus == QLatin1String("running")) {
         m_jobStatus = QStringLiteral("interrupted");
         m_statusLabel->setText(tr("Job %1 was interrupted — Resume continues from the last checkpoint").arg(QFileInfo(m_jobDir).fileName()));

@@ -105,6 +105,10 @@ class CompiledTimeline:
     srt_subtitle_path: str | None = None
     markers: list[dict[str, Any]] = field(default_factory=list)
     unresolved_effects: list[dict[str, Any]] = field(default_factory=list)
+    # V1.4: same-track dissolves (incoming clip on V1's b-lane + a native luma mix) and caption edits
+    v1b_clips: list[CompiledClip] = field(default_factory=list)
+    transitions: list[dict[str, Any]] = field(default_factory=list)
+    captions_edited: bool = False
 
     @property
     def fps(self) -> float:
@@ -113,14 +117,41 @@ class CompiledTimeline:
     @property
     def total_frames(self) -> int:
         max_end = 0
-        for lst in (self.v1_clips, self.a1_clips, self.v2_clips, self.a2_clips):
+        for lst in (self.v1_clips, self.a1_clips, self.v2_clips, self.a2_clips, self.v1b_clips):
             for c in lst:
                 max_end = max(max_end, c.timeline_end_inclusive + 1)
         return max(1, max_end)
 
+    def track_lists(self) -> dict[str, list[CompiledClip]]:
+        return {"V1": self.v1_clips, "V2": self.v2_clips, "A1": self.a1_clips, "A2": self.a2_clips, "V1b": self.v1b_clips}
 
-def compile_command_batches(command_batches: list[dict[str, Any]]) -> CompiledTimeline:
-    """Validate and deterministically replay Timeline Command API v1 batches into a CompiledTimeline."""
+    def find(self, clip_id: str | None) -> tuple[str, CompiledClip] | None:
+        if not clip_id:
+            return None
+        for tid, lst in self.track_lists().items():
+            for c in lst:
+                if c.clip_id == clip_id:
+                    return tid, c
+        return None
+
+    def media_frames(self, media_ref: str | None) -> int:
+        meta = self.media_registry.get(media_ref or "") or {}
+        if meta.get("is_image"):
+            return 10**9
+        return max(1, round(float(meta.get("duration_sec", 0.0) or 0.0) * self.fps)) if meta.get("duration_sec") else 10**9
+
+
+def compile_command_batches(command_batches: list[dict[str, Any]], op_results: list[dict[str, Any]] | None = None) -> CompiledTimeline:
+    """Validate and deterministically replay Timeline Command API v1 batches into a CompiledTimeline.
+
+    V1.4: structural operations (``move_clip``, ``trim_clip``, ``split_clip``, ``delete_clip``,
+    ``set_audio_level``, ``set_keyframe``, ``set_effect_param``, ``add_transition``,
+    ``update_caption``, ``delete_caption``) are replayed too, so an agent's edit to a headless draft
+    is a real change in the emitted project. Frame ranges here are inclusive (``out_frame`` is the
+    last frame shown), as in every department batch. When ``op_results`` is given, one
+    ``{"op_id", "type", "applied", "message"}`` entry per operation is appended (invalid structural
+    operations are skipped and reported, never half-applied).
+    """
     if not command_batches:
         raise ValueError("Cannot compile project from empty command_batches list")
 
@@ -131,148 +162,347 @@ def compile_command_batches(command_batches: list[dict[str, Any]]) -> CompiledTi
     )
 
     for batch in command_batches:
-        validate_timeline_command_batch(batch)
-        for op in batch["operations"]:
-            op_type = op["type"]
-            params = op.get("params", {}) or {}
-            fr = op.get("frame_range", {}) or {}
+        replay_batch(compiled, batch, op_results)
+    for lst in compiled.track_lists().values():
+        lst.sort(key=lambda c: c.timeline_start)
+    return compiled
 
-            if op_type == "import_media":
-                media_ref = op.get("media_ref") or f"media_{len(compiled.media_registry) + 1}"
-                compiled.media_registry[media_ref] = dict(params)
 
-            elif op_type == "create_sequence":
-                compiled.profile_id = str(params.get("profile_id", compiled.profile_id))
-                compiled.display_name = str(params.get("display_name", compiled.display_name))
-                compiled.width = int(params.get("width", compiled.width))
-                compiled.height = int(params.get("height", compiled.height))
-                compiled.fps_num = int(params.get("fps_num", compiled.fps_num))
-                compiled.fps_den = int(params.get("fps_den", compiled.fps_den))
-                compiled.color_space = str(params.get("color_space", compiled.color_space))
+def replay_batch(compiled: CompiledTimeline, batch: dict[str, Any], op_results: list[dict[str, Any]] | None = None) -> CompiledTimeline:
+    """Validate one batch and replay it onto ``compiled`` (incremental form of ``compile_command_batches``)."""
+    validate_timeline_command_batch(batch)
+    for op in batch["operations"]:
+        op_type = op["type"]
+        params = op.get("params", {}) or {}
+        fr = op.get("frame_range", {}) or {}
 
-            elif op_type == "create_track":
-                track_id = op.get("track_id") or f"T{len(compiled.tracks) + 1}"
-                compiled.tracks[track_id] = dict(params)
+        if op_type in _STRUCTURAL_OPS:
+            ok, msg = _apply_structural_op(compiled, op_type, op, params, fr)
+            if op_results is not None:
+                op_results.append({"op_id": op["op_id"], "type": op_type, "applied": ok, "message": msg})
+            continue
+        if op_results is not None:
+            op_results.append({"op_id": op["op_id"], "type": op_type, "applied": True, "message": ""})
 
-            elif op_type == "place_clip":
-                track_id = op.get("track_id") or "V1"
-                clip = CompiledClip(
+        if op_type == "import_media":
+            media_ref = op.get("media_ref") or f"media_{len(compiled.media_registry) + 1}"
+            compiled.media_registry[media_ref] = dict(params)
+
+        elif op_type == "create_sequence":
+            compiled.profile_id = str(params.get("profile_id", compiled.profile_id))
+            compiled.display_name = str(params.get("display_name", compiled.display_name))
+            compiled.width = int(params.get("width", compiled.width))
+            compiled.height = int(params.get("height", compiled.height))
+            compiled.fps_num = int(params.get("fps_num", compiled.fps_num))
+            compiled.fps_den = int(params.get("fps_den", compiled.fps_den))
+            compiled.color_space = str(params.get("color_space", compiled.color_space))
+
+        elif op_type == "create_track":
+            track_id = op.get("track_id") or f"T{len(compiled.tracks) + 1}"
+            compiled.tracks[track_id] = dict(params)
+
+        elif op_type == "place_clip":
+            track_id = op.get("track_id") or "V1"
+            clip = CompiledClip(
+                clip_id=op.get("clip_id") or op["op_id"],
+                track_id=track_id,
+                media_ref=op.get("media_ref"),
+                in_frame=int(fr.get("in_frame", 0)),
+                out_frame=int(fr.get("out_frame", 0)),
+                timeline_start=int(fr.get("timeline_start", 0)),
+                params=dict(params),
+                confidence=float(op.get("confidence", 1.0)),
+                rationale=str(op.get("rationale", "")),
+            )
+            if track_id == "V1":
+                compiled.v1_clips.append(clip)
+            elif track_id == "V2":
+                compiled.v2_clips.append(clip)
+            elif track_id == "A1":
+                compiled.a1_clips.append(clip)
+            elif track_id == "A2":
+                compiled.a2_clips.append(clip)
+
+        elif op_type in ("add_effect", "apply_mask"):
+            target_id = op.get("clip_id")
+            target = _find_compiled_clip(compiled, target_id) if target_id else None
+            if target is not None:
+                target.filters.extend(_effect_op_to_filters(op_type, params))
+            else:
+                compiled.unresolved_effects.append(dict(op))
+
+        elif op_type == "add_lower_third":
+            dur_f = max(
+                1,
+                int(
+                    params.get(
+                        "duration_frames",
+                        max(1, int(fr.get("out_frame", 99)) - int(fr.get("in_frame", 0)) + 1),
+                    )
+                ),
+            )
+            title = str(params.get("speaker_name", params.get("title", "Speaker")))
+            subtitle = str(params.get("subtitle", compiled.display_name))
+            accent = str(params.get("accent_hex", "#FF5A1F"))
+            position = str(params.get("position", "bottom_left"))
+            xml_str = str(
+                params.get("kdenlive_title_xml")
+                or generate_kdenlive_lower_third_xml(
+                    title=title,
+                    subtitle=subtitle,
+                    width=compiled.width,
+                    height=compiled.height,
+                    accent_hex=accent,
+                    duration_frames=dur_f,
+                    position=position,
+                )
+            )
+            compiled.v2_clips.append(
+                CompiledClip(
                     clip_id=op.get("clip_id") or op["op_id"],
-                    track_id=track_id,
-                    media_ref=op.get("media_ref"),
-                    in_frame=int(fr.get("in_frame", 0)),
-                    out_frame=int(fr.get("out_frame", 0)),
-                    timeline_start=int(fr.get("timeline_start", 0)),
-                    params=dict(params),
-                    confidence=float(op.get("confidence", 1.0)),
+                    track_id=op.get("track_id") or "V2",
+                    media_ref=None,
+                    in_frame=0,
+                    out_frame=max(0, dur_f - 1),
+                    timeline_start=int(fr.get("timeline_start", fr.get("in_frame", 0))),
+                    params={
+                        "clip_kind": "kdenlivetitle",
+                        "title": title,
+                        "subtitle": subtitle,
+                        "accent_hex": accent,
+                        "kdenlive_title_xml": xml_str,
+                    },
+                    confidence=float(op.get("confidence", 0.95)),
                     rationale=str(op.get("rationale", "")),
                 )
-                if track_id == "V1":
-                    compiled.v1_clips.append(clip)
-                elif track_id == "V2":
-                    compiled.v2_clips.append(clip)
-                elif track_id == "A1":
-                    compiled.a1_clips.append(clip)
-                elif track_id == "A2":
-                    compiled.a2_clips.append(clip)
+            )
 
-            elif op_type in ("add_effect", "apply_mask"):
-                target_id = op.get("clip_id")
-                target = _find_compiled_clip(compiled, target_id) if target_id else None
-                if target is not None:
-                    target.filters.extend(_effect_op_to_filters(op_type, params))
-                else:
-                    compiled.unresolved_effects.append(dict(op))
+        elif op_type == "add_audio_filter":
+            compiled.audio_filters.append(
+                {
+                    "track_id": op.get("track_id") or "A1",
+                    "filter_id": params.get("filter_id") or op["op_id"],
+                    "mlt_service": params.get("mlt_service", ""),
+                    "mlt_params": dict(params.get("mlt_params", {})),
+                    "ffmpeg_filter": params.get("ffmpeg_filter", ""),
+                    "rationale": str(op.get("rationale", "")),
+                }
+            )
 
-            elif op_type == "add_lower_third":
-                dur_f = max(
-                    1,
-                    int(
-                        params.get(
-                            "duration_frames",
-                            max(1, int(fr.get("out_frame", 99)) - int(fr.get("in_frame", 0)) + 1),
-                        )
-                    ),
-                )
-                title = str(params.get("speaker_name", params.get("title", "Speaker")))
-                subtitle = str(params.get("subtitle", compiled.display_name))
-                accent = str(params.get("accent_hex", "#FF5A1F"))
-                position = str(params.get("position", "bottom_left"))
-                xml_str = str(
-                    params.get("kdenlive_title_xml")
-                    or generate_kdenlive_lower_third_xml(
-                        title=title,
-                        subtitle=subtitle,
-                        width=compiled.width,
-                        height=compiled.height,
-                        accent_hex=accent,
-                        duration_frames=dur_f,
-                        position=position,
-                    )
-                )
-                compiled.v2_clips.append(
-                    CompiledClip(
-                        clip_id=op.get("clip_id") or op["op_id"],
-                        track_id=op.get("track_id") or "V2",
-                        media_ref=None,
-                        in_frame=0,
-                        out_frame=max(0, dur_f - 1),
-                        timeline_start=int(fr.get("timeline_start", fr.get("in_frame", 0))),
-                        params={
-                            "clip_kind": "kdenlivetitle",
-                            "title": title,
-                            "subtitle": subtitle,
-                            "accent_hex": accent,
-                            "kdenlive_title_xml": xml_str,
-                        },
-                        confidence=float(op.get("confidence", 0.95)),
-                        rationale=str(op.get("rationale", "")),
-                    )
-                )
+        elif op_type == "add_caption":
+            if params.get("text") and (op.get("clip_id") or params.get("caption_id")):
+                compiled.captions_edited = True  # an agent's own caption, not the Captions Agent's file
+            compiled.captions.append(
+                {
+                    "caption_style": params.get("caption_style"),
+                    "caption_id": str(op.get("clip_id") or params.get("caption_id") or f"cap_{len(compiled.captions) + 1:04d}"),
+                    "in_frame": int(fr.get("in_frame", 0)),
+                    "out_frame": int(fr.get("out_frame", 0)),
+                    "speaker_id": params.get("speaker_id", ""),
+                    "text": params.get("text", ""),
+                }
+            )
+            if params.get("ass_path"):
+                compiled.ass_subtitle_path = str(params["ass_path"])
+            if params.get("srt_path"):
+                compiled.srt_subtitle_path = str(params["srt_path"])
 
-            elif op_type == "add_audio_filter":
-                compiled.audio_filters.append(
+        elif op_type == "add_marker":
+            if op.get("track_id") in ("V1", None):
+                compiled.markers.append(
                     {
-                        "track_id": op.get("track_id") or "A1",
-                        "filter_id": params.get("filter_id") or op["op_id"],
-                        "mlt_service": params.get("mlt_service", ""),
-                        "mlt_params": dict(params.get("mlt_params", {})),
-                        "ffmpeg_filter": params.get("ffmpeg_filter", ""),
+                        "frame": int(fr.get("timeline_start", fr.get("in_frame", 0))),
+                        "label": str(params.get("label", op.get("rationale", "Marker"))),
+                        "category": str(params.get("category", "review")),
+                        "confidence": float(op.get("confidence", 1.0)),
                         "rationale": str(op.get("rationale", "")),
                     }
                 )
-
-            elif op_type == "add_caption":
-                compiled.captions.append(
-                    {
-                        "in_frame": int(fr.get("in_frame", 0)),
-                        "out_frame": int(fr.get("out_frame", 0)),
-                        "speaker_id": params.get("speaker_id", ""),
-                        "text": params.get("text", ""),
-                    }
-                )
-                if params.get("ass_path"):
-                    compiled.ass_subtitle_path = str(params["ass_path"])
-                if params.get("srt_path"):
-                    compiled.srt_subtitle_path = str(params["srt_path"])
-
-            elif op_type == "add_marker":
-                if op.get("track_id") in ("V1", None):
-                    compiled.markers.append(
-                        {
-                            "frame": int(fr.get("timeline_start", fr.get("in_frame", 0))),
-                            "label": str(params.get("label", op.get("rationale", "Marker"))),
-                            "category": str(params.get("category", "review")),
-                            "confidence": float(op.get("confidence", 1.0)),
-                            "rationale": str(op.get("rationale", "")),
-                        }
-                    )
-
-    compiled.v1_clips.sort(key=lambda c: c.timeline_start)
-    compiled.v2_clips.sort(key=lambda c: c.timeline_start)
-    compiled.a1_clips.sort(key=lambda c: c.timeline_start)
-    compiled.a2_clips.sort(key=lambda c: c.timeline_start)
+    for lst in compiled.track_lists().values():
+        lst.sort(key=lambda c: c.timeline_start)
     return compiled
+
+
+_STRUCTURAL_OPS = frozenset(
+    {"move_clip", "trim_clip", "split_clip", "delete_clip", "set_audio_level", "set_keyframe", "set_effect_param", "add_transition", "update_caption", "delete_caption"}
+)
+
+
+def _overlaps(compiled: CompiledTimeline, track_id: str, start: int, end_incl: int, ignore: set[str]) -> str | None:
+    for c in compiled.track_lists().get(track_id, []):
+        if c.clip_id in ignore:
+            continue
+        if start <= c.timeline_end_inclusive and end_incl >= c.timeline_start:
+            return c.clip_id
+    return None
+
+
+def _target_filter(clip: CompiledClip, params: dict[str, Any]) -> dict[str, Any] | None:
+    if "filter_index" in params:
+        idx = int(params["filter_index"])
+        return clip.filters[idx] if 0 <= idx < len(clip.filters) else None
+    want = str(params.get("kdenlive_id") or params.get("effect_id") or params.get("mlt_service") or "")
+    for flt in reversed(clip.filters):
+        if want and want in (flt.get("kdenlive_id"), flt.get("mlt_service")):
+            return flt
+    return None
+
+
+def _keyframe_string(keyframes: list[dict[str, Any]]) -> str:
+    """MLT animation syntax: ``frame=value`` (linear), ``frame~=value`` (smooth), ``frame|=value`` (hold)."""
+    sep = {"linear": "=", "smooth": "~=", "hold": "|=", "discrete": "|="}
+    parts = []
+    for kf in sorted(keyframes, key=lambda k: int(k["frame"])):
+        parts.append(f"{int(kf['frame'])}{sep.get(str(kf.get('interpolation', 'linear')), '=')}{kf['value']}")
+    return ";".join(parts)
+
+
+def _apply_structural_op(compiled: CompiledTimeline, op_type: str, op: dict[str, Any], params: dict[str, Any], fr: dict[str, Any]) -> tuple[bool, str]:
+    """Apply one structural edit to the compiled draft; returns ``(applied, message)``. Never half-applies."""
+    if op_type in ("update_caption", "delete_caption"):
+        cid = str(op.get("clip_id") or params.get("caption_id") or "")
+        idx = next((i for i, c in enumerate(compiled.captions) if c.get("caption_id") == cid), None)
+        if idx is None:
+            return False, f"Caption '{cid}' does not exist"
+        compiled.captions_edited = True
+        if op_type == "delete_caption":
+            compiled.captions.pop(idx)
+            return True, f"Deleted caption '{cid}'"
+        cap = compiled.captions[idx]
+        new_in, new_out = int(fr.get("in_frame", cap["in_frame"])), int(fr.get("out_frame", cap["out_frame"]))
+        if new_out < new_in:
+            return False, "Caption out_frame precedes in_frame"
+        cap.update({"in_frame": new_in, "out_frame": new_out})
+        if "text" in params:
+            cap["text"] = str(params["text"])
+        if "style" in params:
+            cap["style"] = dict(params["style"])
+        return True, f"Updated caption '{cid}'"
+
+    found = compiled.find(op.get("clip_id"))
+    if found is None:
+        return False, f"Clip '{op.get('clip_id')}' does not exist"
+    track_id, clip = found
+    lists = compiled.track_lists()
+
+    if op_type == "move_clip":
+        target = str(op.get("track_id") or track_id)
+        if target not in lists or (target == "V1b" and track_id != "V1b"):
+            return False, f"Target track '{target}' does not exist"
+        start = int(params.get("timeline_start", fr.get("timeline_start", clip.timeline_start)))
+        if start < 0:
+            return False, "timeline_start must be non-negative"
+        end = start + clip.duration_frames - 1
+        hit = None if params.get("allow_overlap") else _overlaps(compiled, target, start, end, {clip.clip_id})
+        if hit:
+            return False, f"Move destination overlaps clip '{hit}' on track '{target}'"
+        lists[track_id].remove(clip)
+        for trn in compiled.transitions:  # a dissolve travels with its incoming clip
+            if trn.get("clip_id") == clip.clip_id:
+                trn["in_frame"] += start - clip.timeline_start
+                trn["out_frame"] += start - clip.timeline_start
+        clip.track_id, clip.timeline_start = target, start
+        lists[target].append(clip)
+        lists[target].sort(key=lambda c: c.timeline_start)
+        return True, f"Moved clip '{clip.clip_id}' to {target} frame {start}"
+
+    if op_type == "trim_clip":
+        new_in = int(params.get("in_frame", fr.get("in_frame", clip.in_frame)))
+        new_out = int(params.get("out_frame", fr.get("out_frame", clip.out_frame)))
+        if "duration_frames" in params:
+            new_out = new_in + int(params["duration_frames"]) - 1
+        start = int(params.get("timeline_start", fr.get("timeline_start", clip.timeline_start)))
+        if new_in < 0 or new_out < new_in or start < 0:
+            return False, f"trim_clip requires 0 <= in_frame <= out_frame (got in={new_in}, out={new_out})"
+        if new_out >= compiled.media_frames(clip.media_ref) and not params.get("allow_extend"):
+            return False, f"Trim out_frame {new_out} exceeds the media length of '{clip.media_ref}'"
+        hit = _overlaps(compiled, track_id, start, start + (new_out - new_in), {clip.clip_id})
+        if hit:
+            return False, f"Trim would overlap clip '{hit}' on {track_id}"
+        clip.in_frame, clip.out_frame, clip.timeline_start = new_in, new_out, start
+        return True, f"Trimmed clip '{clip.clip_id}' to source [{new_in}, {new_out}] at {start}"
+
+    if op_type == "split_clip":
+        split = int(params.get("split_frame", params.get("timeline_frame", fr.get("timeline_start", -1))))
+        if not clip.timeline_start < split <= clip.timeline_end_inclusive:
+            return False, f"Split frame {split} is outside clip '{clip.clip_id}' ({clip.timeline_start}, {clip.timeline_end_inclusive}]"
+        right_id = str(params.get("new_clip_id") or f"{clip.clip_id}_r{split}")
+        if compiled.find(right_id) is not None:
+            return False, f"Clip id '{right_id}' already exists"
+        left_len = split - clip.timeline_start
+        right = CompiledClip(
+            clip_id=right_id, track_id=clip.track_id, media_ref=clip.media_ref, in_frame=clip.in_frame + left_len, out_frame=clip.out_frame,
+            timeline_start=split, params=dict(clip.params), confidence=clip.confidence, rationale=clip.rationale, filters=[dict(f, properties=dict(f.get("properties") or {})) for f in clip.filters],
+        )
+        clip.out_frame = clip.in_frame + left_len - 1
+        lists[track_id].append(right)
+        lists[track_id].sort(key=lambda c: c.timeline_start)
+        return True, f"Split '{clip.clip_id}' at {split}; right part '{right_id}'"
+
+    if op_type == "delete_clip":
+        lists[track_id].remove(clip)
+        compiled.transitions = [t for t in compiled.transitions if t.get("clip_id") != clip.clip_id]
+        return True, f"Deleted clip '{clip.clip_id}'"
+
+    if op_type == "set_audio_level":
+        kfs = params.get("keyframes")
+        level: Any = _keyframe_string([{"frame": k["frame"], "value": float(k["gain_db"]), "interpolation": k.get("interpolation", "linear")} for k in kfs]) if kfs else float(params.get("gain_db", 0.0))
+        existing = next((f for f in clip.filters if f.get("kdenlive_id") == "volume" and f.get("mlt_service") == "volume"), None)
+        if existing is None:
+            clip.filters.append({"mlt_service": "volume", "kdenlive_id": "volume", "properties": {"level": level}, "agent_id": params.get("agent_id")})
+        else:
+            existing["properties"]["level"] = level
+        return True, f"Audio level of '{clip.clip_id}' set to {level} dB"
+
+    if op_type in ("set_effect_param", "set_keyframe"):
+        flt = _target_filter(clip, params)
+        if flt is None:
+            return False, f"No matching effect on '{clip.clip_id}' (give kdenlive_id or filter_index)"
+        prop = str(params.get("property") or params.get("param") or "")
+        if not prop:
+            return False, "property is required"
+        if op_type == "set_effect_param":
+            flt.setdefault("properties", {})[prop] = params.get("value")
+        else:
+            kfs = params.get("keyframes") or []
+            if not kfs or any(int(k.get("frame", -1)) < 0 or int(k["frame"]) >= clip.duration_frames for k in kfs):
+                return False, f"keyframes must be clip-relative frames inside 0..{clip.duration_frames - 1}"
+            flt.setdefault("properties", {})[prop] = _keyframe_string(kfs)
+        return True, f"Set {prop} on '{clip.clip_id}' ({flt.get('kdenlive_id')})"
+
+    if op_type == "add_transition":
+        kind = str(params.get("kind") or params.get("transition_id") or "dissolve")
+        d = int(params.get("duration_frames", 12))
+        if d < 1 or d >= clip.duration_frames:
+            return False, f"Transition length {d} must be shorter than the clip ({clip.duration_frames} frames)"
+        video = track_id in ("V1", "V2", "V1b")
+        fade = {"fade_in": ("fade_from_black", "fadein", f"0=0;{d}=1", f"0=-60;{d}=0"),
+                "fade_out": ("fade_to_black", "fadeout", f"{clip.duration_frames - 1 - d}=1;{clip.duration_frames - 1}=0", f"{clip.duration_frames - 1 - d}=0;{clip.duration_frames - 1}=-60")}
+        if kind in fade:
+            vid_id, aud_id, vkf, akf = fade[kind]
+            if video:
+                clip.filters.append({"mlt_service": "brightness", "kdenlive_id": vid_id, "properties": {"level": vkf, "alpha": 1}, "agent_id": params.get("agent_id")})
+            else:
+                clip.filters.append({"mlt_service": "volume", "kdenlive_id": aud_id, "properties": {"level": akf}, "agent_id": params.get("agent_id")})
+            return True, f"{kind} of {d} frames on '{clip.clip_id}'"
+        if kind == "dissolve":
+            if track_id != "V1":
+                return False, "Dissolves are made between adjacent clips on V1"
+            prev = next((c for c in compiled.v1_clips if c.timeline_end_inclusive + 1 == clip.timeline_start), None)
+            if prev is None:
+                return False, f"'{clip.clip_id}' has no clip ending where it starts on V1"
+            if clip.in_frame < d or prev.duration_frames <= d:
+                return False, f"Not enough handle before '{clip.clip_id}' for a {d}-frame dissolve"
+            lists["V1"].remove(clip)
+            cut = clip.timeline_start
+            clip.in_frame -= d
+            clip.timeline_start = cut - d
+            clip.track_id = "V1b"
+            lists["V1b"].append(clip)
+            compiled.transitions.append({"kind": "dissolve", "clip_id": clip.clip_id, "in_frame": cut - d, "out_frame": cut - 1, "agent_id": params.get("agent_id")})
+            return True, f"Dissolve of {d} frames into '{clip.clip_id}'"
+        return False, f"Unknown transition kind '{kind}' (dissolve, fade_in, fade_out)"
+    return False, f"Unsupported operation '{op_type}'"
 
 
 def kdenlive_file_hash(path: str | Path) -> tuple[str, int] | None:
@@ -473,6 +703,22 @@ def emit_kdenlive_xml(
         next_k_id += 1
         kdenlive_id_map[media_ref] = k_id
         is_audio_only = bool(meta.get("is_audio_only") or meta.get("video_codec") is None)
+        if meta.get("is_image"):
+            # V1.4: a supplied still (logo, score card, headline image) as Kdenlive's native image clip.
+            img_id = f"image_{idx}"
+            prod = ET.SubElement(mlt, "producer", {"id": img_id, "in": "0", "out": str(out_f)})
+            _add_prop(prod, "length", dur_frames)
+            _add_prop(prod, "eof", "pause")
+            _add_prop(prod, "resource", file_path)
+            _add_prop(prod, "ttl", 25)
+            _add_prop(prod, "mlt_service", "qimage")
+            _add_prop(prod, "kdenlive:id", k_id)
+            _add_prop(prod, "kdenlive:clipname", meta.get("name") or Path(file_path).name)
+            _add_prop(prod, "kdenlive:clip_type", 5)
+            _add_prop(prod, "kdenlive:folderid", -1)
+            bin_chain_map[media_ref] = img_id
+            video_chain_map[media_ref] = img_id
+            continue
 
         chain_specs: list[tuple[str, dict[str, str], str]] = [
             ("bin", bin_chain_map, f"chain_bin_{idx}"),
@@ -597,7 +843,8 @@ def emit_kdenlive_xml(
     # 6. Video Track V1 (Multicam Program)
     pl_v1 = ET.SubElement(mlt, "playlist", {"id": "playlist_v1"})
     _populate_playlist_with_clips(pl_v1, compiled.v1_clips, video_chain_map, kdenlive_id_map)
-    ET.SubElement(mlt, "playlist", {"id": "playlist_v1_b"})
+    pl_v1_b = ET.SubElement(mlt, "playlist", {"id": "playlist_v1_b"})
+    _populate_playlist_with_clips(pl_v1_b, compiled.v1b_clips, video_chain_map, kdenlive_id_map)
 
     tr_v1 = ET.SubElement(mlt, "tractor", {"id": "tractor_v1", "in": "0", "out": str(last_frame)})
     _add_prop(tr_v1, "kdenlive:track_name", "Multicam Program V1")
@@ -605,10 +852,22 @@ def emit_kdenlive_xml(
     _add_prop(tr_v1, "kdenlive:timeline_active", 1)
     ET.SubElement(tr_v1, "track", {"hide": "audio", "producer": "playlist_v1"})
     ET.SubElement(tr_v1, "track", {"hide": "audio", "producer": "playlist_v1_b"})
+    for t_idx, trn in enumerate(t for t in compiled.transitions if t.get("kind") == "dissolve"):
+        # Kdenlive same-track mix: the incoming clip sits on the track's second playlist and a luma
+        # transition dissolves into it; after the mix the upper playlist simply shows that clip.
+        mix = ET.SubElement(tr_v1, "transition", {"id": f"mix_v1_{t_idx}", "in": str(trn["in_frame"]), "out": str(trn["out_frame"])})
+        _add_prop(mix, "a_track", 0)
+        _add_prop(mix, "b_track", 1)
+        _add_prop(mix, "mlt_service", "luma")
+        _add_prop(mix, "kdenlive_id", "luma")
+        _add_prop(mix, "kdenlive:mixcut", trn["out_frame"] - trn["in_frame"] + 1)
+        if trn.get("agent_id"):
+            _add_prop(mix, "kdenlive:bangonpro_agent", trn["agent_id"])
 
     # 7. Video Track V2 (Graphics & Lower Thirds)
     pl_v2 = ET.SubElement(mlt, "playlist", {"id": "playlist_v2"})
-    _populate_playlist_with_clips(pl_v2, compiled.v2_clips, title_prod_map, kdenlive_id_map)
+    # V1.4: V2 carries supplied B-roll and still graphics as well as generated titles.
+    _populate_playlist_with_clips(pl_v2, compiled.v2_clips, {**video_chain_map, **title_prod_map}, kdenlive_id_map)
     ET.SubElement(mlt, "playlist", {"id": "playlist_v2_b"})
 
     tr_v2 = ET.SubElement(mlt, "tractor", {"id": "tractor_v2", "in": "0", "out": str(last_frame)})

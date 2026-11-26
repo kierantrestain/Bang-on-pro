@@ -20,6 +20,7 @@ SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
 from __future__ import annotations
 
 import copy
+import hashlib
 import html
 import json
 import os
@@ -742,10 +743,32 @@ class ProductionJob:
         arts = self.doc.setdefault("artifacts", {})
         arts["timeline_commands_json"] = str(cmds_path)
         if any(op["type"] == "place_clip" for b in batches for op in b["operations"]):
-            compiled = compile_command_batches(batches)
-            arts["kdenlive_project"] = str(emit_kdenlive_xml(compiled, self.draft_dir / f"{st.sequence_id}_draft.kdenlive"))
+            from bangonpro.ai_engine.department.edit_layer import EditLayer, file_sha256, protect_manual_edits, regenerate_captions
+
+            # V1.4: direct agent edits (MCP tools, correction loop) are replayed after the agents' batches.
+            layer = EditLayer(self.draft_dir)
+            project = self.draft_dir / f"{st.sequence_id}_draft.kdenlive"
+            if layer.exists:
+                base_sig = hashlib.sha1(json.dumps([b["request_id"] for b in batches]).encode()).hexdigest()[:16]  # noqa: S324 - change detection
+                if layer.doc.get("base_signature") != base_sig:
+                    layer.doc["base_signature"] = base_sig
+                    layer.bump()
+                compiled, _, report = layer.replay(batches)
+                for row in report:
+                    for e in layer.doc["entries"]:
+                        if e["entry_id"] == row["entry"]:
+                            e["replay_status"], e["replay_messages"] = row["status"], row["messages"][:5]
+                if compiled.captions_edited:
+                    regenerate_captions(compiled, self.draft_dir)
+                protect_manual_edits(project, layer)
+            else:
+                compiled = compile_command_batches(batches)
+            arts["kdenlive_project"] = str(emit_kdenlive_xml(compiled, project))
             arts["otio_timeline"] = str(emit_otio_timeline(compiled, self.draft_dir / f"{st.sequence_id}_draft.otio"))
             arts["unresolved_effects"] = str(len(compiled.unresolved_effects))
+            if layer.exists:
+                layer.doc["emitted"] = {"sha256": file_sha256(project), "path": str(project), "revision": layer.revision}
+                layer.save()
         for k in ("transcript_json", "captions_srt", "captions_ass", "qc_report_json", "rendered_video", "delivery_manifest_json", "highlights_json", "media_inventory_json"):
             if k in st.artifacts:
                 arts[k] = st.artifacts[k]

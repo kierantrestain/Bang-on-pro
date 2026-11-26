@@ -98,6 +98,16 @@ class SyncResult:
                 return master_sec + float(seg.get("offset_sec", 0.0)) + float(seg.get("drift_ppm", 0.0)) * 1e-6 * master_sec
         return master_sec + float(self.offsets_sec.get(camera_id, 0.0)) + float(self.drift_ppm.get(camera_id, 0.0)) * 1e-6 * master_sec
 
+    def master_time(self, camera_id: str, source_sec: float) -> float:
+        """Inverse of :meth:`source_time`: a time in the source file on the master clock."""
+        for seg in self.segment_offsets.get(camera_id, []) or []:
+            k = 1.0 + float(seg.get("drift_ppm", 0.0)) * 1e-6
+            m = (source_sec - float(seg.get("offset_sec", 0.0))) / k
+            if float(seg.get("master_start_sec", 0.0)) <= m < float(seg.get("master_end_sec", float("inf"))):
+                return m
+        k = 1.0 + float(self.drift_ppm.get(camera_id, 0.0)) * 1e-6
+        return (source_sec - float(self.offsets_sec.get(camera_id, 0.0))) / k
+
 
 @dataclass
 class AsrBackendReport:

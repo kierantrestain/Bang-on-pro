@@ -103,6 +103,27 @@ private Q_SLOTS:
         QCOMPARE(acc.reviewItemCount(), 1);
     }
 
+    void showsConnectedReasoningClientAndAgentActivity()
+    {
+        // V1.4: the MCP adapter's presence and task files appear in the existing panel, nothing new.
+        AgentControlCentre acc;
+        acc.loadJobStatus(sampleJob(QStringLiteral("draft_ready")));
+        const int before = acc.reviewItemCount();
+        QJsonObject presence{{QStringLiteral("client"), QStringLiteral("Claude Code")},
+                             {QStringLiteral("status"), QStringLiteral("connected")},
+                             {QStringLiteral("activity"), QStringLiteral("switching cameras")},
+                             {QStringLiteral("agent"), QStringLiteral("rough_cut")}};
+        QJsonObject issue{{QStringLiteral("agent"), QStringLiteral("rough_cut")}, {QStringLiteral("message"), QStringLiteral("Picture gap at 12.0s")}};
+        QJsonObject task{{QStringLiteral("unresolved"), QJsonArray{issue}}};
+        QJsonObject edits{{QStringLiteral("entries"), QJsonArray{QJsonObject{{QStringLiteral("entry_id"), QStringLiteral("e1")}}}},
+                          {QStringLiteral("tasks"), QJsonObject{{QStringLiteral("t1"), task}}}};
+        acc.loadAgentSession(presence, edits);
+        QVERIFY(acc.agentSessionText().contains(QStringLiteral("Claude Code connected")));
+        QVERIFY(acc.agentSessionText().contains(QStringLiteral("switching cameras")));
+        QVERIFY(acc.agentSessionText().contains(QStringLiteral("1 agent edit")));
+        QCOMPARE(acc.reviewItemCount(), before + 1);
+    }
+
     void pollsJobFileAndEmitsFinishedWithSummary()
     {
         QTemporaryDir tmp;

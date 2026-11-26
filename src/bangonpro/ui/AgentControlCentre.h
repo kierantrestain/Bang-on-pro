@@ -69,6 +69,10 @@ public:
 
     /** @brief Render a job.json document (agents, progress, decisions, artifacts). */
     void loadJobStatus(const QJsonObject &jobDoc);
+    /** @brief V1.4: show the connected reasoning client, the agent at work and unresolved task issues
+     *  (draft/agent_presence.json and draft/agent_edits.json, written by the MCP adapter). */
+    void loadAgentSession(const QJsonObject &presence, const QJsonObject &agentEdits);
+    QString agentSessionText() const;
     /** @brief Start polling <jobDir>/job.json (and summary.md when the job finishes). */
     void setActiveJobDir(const QString &jobDir);
     QString activeJobDir() const;
@@ -162,6 +166,7 @@ private:
     QPlainTextEdit *m_summaryView{nullptr};
     QTimer *m_pollTimer{nullptr};
     QString m_jobDir;
+    QString m_agentSessionText;
     QString m_jobStatus;
     QString m_draftProject;
     QString m_lastStatusSeen;
