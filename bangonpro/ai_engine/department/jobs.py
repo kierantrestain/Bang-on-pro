@@ -470,7 +470,8 @@ class ProductionJob:
         n = len(AGENT_ORDER)
 
         def _progress(frac: float, msg: str) -> None:
-            rec["progress"] = round(min(1.0, max(0.0, float(frac))), 3)
+            # Monotonic: sub-stages (multi-window sync, quality-loop reruns) restart their own 0..1
+            rec["progress"] = round(min(1.0, max(float(rec.get("progress") or 0.0), float(frac))), 3)
             rec["message"] = msg
             self.doc["progress"] = round((idx + rec["progress"]) / n, 4)
             if progress_callback:

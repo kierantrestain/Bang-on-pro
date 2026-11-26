@@ -322,7 +322,9 @@ def test_all_four_show_profiles_conform_to_schema() -> None:
         assert prof["profile_id"] == profile_id
         assert prof["video_spec"]["width"] == 1920
         assert prof["video_spec"]["height"] == 1080
-        assert prof["audio_rules"]["target_lufs"] == -16.0
+        # V1.2.2: broadcast genres follow EBU R128 (-23 LUFS); the podcast stays at -16 LUFS (online)
+        broadcast = {"daily_news", "gameshow_multicam", "sports_discussion"}
+        assert prof["audio_rules"]["target_lufs"] == (-23.0 if profile_id in broadcast else -16.0)
         assert len(prof["export_presets"]) >= 1
 
     assert len(load_show_profile("podcast_multicam")["cameras"]) == 4
