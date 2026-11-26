@@ -1196,6 +1196,7 @@ void BangOnProIntegration::openEditedSequence(const QString &jobDir)
     int videoTracks = 0;
     int audioTracks = 0;
     QVector<TimelineOperation> rest;
+    QHash<QString, TimelineOperation> heldCameraOps;
     QJsonArray qcMarkers;
     const QJsonObject batchAgents = cmds.value(QStringLiteral("batch_agents")).toObject();
     for (const QJsonValue &bv : cmds.value(QStringLiteral("batches")).toArray()) {
@@ -1211,6 +1212,11 @@ void BangOnProIntegration::openEditedSequence(const QString &jobDir)
             TimelineOperation op = b.operations.at(oi);
             if (op.type == QLatin1String("export_sequence")) {
                 continue; // exporting is the editor's own action
+            }
+            if (op.type == QLatin1String("sync_clips")) {
+                // The agents already applied each camera's sync offset to its placements' in/out points; replaying
+                // the grouping step here would address clips that do not exist yet (and needs two cameras).
+                continue;
             }
             if (op.type == QLatin1String("create_sequence") && !haveCreate) {
                 create = op;
@@ -1229,7 +1235,15 @@ void BangOnProIntegration::openEditedSequence(const QString &jobDir)
                 }
             }
             op.rationale = QStringLiteral("[%1] %2").arg(agent, op.rationale);
+            if (op.type == QLatin1String("select_camera") && !op.clipId.trimmed().isEmpty()) {
+                // The agents record the camera choice before the shot exists; native Kdenlive needs the clip first.
+                heldCameraOps.insert(op.clipId.trimmed(), op);
+                continue;
+            }
             rest.append(op);
+            if (op.type == QLatin1String("place_clip") && heldCameraOps.contains(op.clipId.trimmed())) {
+                rest.append(heldCameraOps.take(op.clipId.trimmed()));
+            }
         }
     }
     if (!haveCreate) {
@@ -1243,8 +1257,16 @@ void BangOnProIntegration::openEditedSequence(const QString &jobDir)
     merged.operations += rest;
     const TimelineCommandResponse resp = m_engine->executeBatch(merged);
     if (resp.status != CommandStatus::Ok) {
+        QStringList failed;
+        for (const TimelineOperationResult &r : resp.results) {
+            if (!r.applied) {
+                failed << QStringLiteral("%1: %2").arg(r.opId, r.message);
+            }
+        }
+        qWarning("Bang On Pro: edited sequence failed: %s | %s", qPrintable(resp.errorMessage), qPrintable(failed.join(QStringLiteral(" | "))));
         m_agentCentre->showTaskProblem(QStringLiteral("The edited sequence could not be created"),
-                                       QStringLiteral("Your project was not changed. Export diagnostics and send them to the team."), resp.errorMessage);
+                                       QStringLiteral("Your original sequence was not changed. Export diagnostics and send them to the team."),
+                                       resp.errorMessage + QStringLiteral("\n") + failed.join(QLatin1Char('\n')));
         m_aiWidget->appendActivityLog(QStringLiteral("department"), QStringLiteral("Edited sequence failed: %1").arg(resp.errorMessage),
                                       QStringLiteral("ERROR"));
         return;
