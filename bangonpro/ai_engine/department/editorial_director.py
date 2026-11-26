@@ -160,6 +160,9 @@ def _remerge(shots: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+_GROW_NOT_ABSORB = ("overlapping_speech_wide", "rapid_exchange_wide")
+
+
 def _absorb_short(shots: list[dict[str, Any]], min_shot: float, protect: tuple[str, ...] = ()) -> list[dict[str, Any]]:
     """Merge avoidable sub-minimum shots into a contiguous neighbour on the same kept interval."""
     shots = [dict(s) for s in shots]
@@ -174,6 +177,21 @@ def _absorb_short(shots: list[dict[str, Any]], min_shot: float, protect: tuple[s
             next_ok = i + 1 < len(shots) and abs(shots[i + 1]["start"] - sp["end"]) < 1e-3
             if not (prev_ok or next_ok):
                 continue
+            if any(sp["reason"].startswith(r) for r in _GROW_NOT_ABSORB):
+                # Crosstalk / rapid exchange belongs on the wide: lengthen the wide to the minimum by
+                # borrowing from a neighbour that can spare it, instead of hiding it in a close-up.
+                need = (min_shot - dur) + 1e-3
+                sides = [(n, shots[n]["end"] - shots[n]["start"]) for n, okn in ((i - 1, prev_ok), (i + 1, next_ok)) if okn]
+                donor = next((n for n, nd in sorted(sides, key=lambda x: -x[1]) if nd - need >= min_shot - 0.05), None)
+                if donor is not None:
+                    if donor < i:
+                        shots[donor]["end"] = round(shots[donor]["end"] - need, 4)
+                        sp["start"] = shots[donor]["end"]
+                    else:
+                        shots[donor]["start"] = round(shots[donor]["start"] + need, 4)
+                        sp["end"] = shots[donor]["start"]
+                    changed = True
+                    break
             if prev_ok and (not next_ok or (shots[i - 1]["end"] - shots[i - 1]["start"]) >= (shots[i + 1]["end"] - shots[i + 1]["start"])):
                 shots[i - 1]["end"] = sp["end"]
             else:

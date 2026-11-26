@@ -437,6 +437,14 @@ def _plan_shots_for_kept_interval(
     coalesced: list[dict[str, Any]] = []
     for sp in merged:
         dur = sp["end"] - sp["start"]
+        if coalesced and dur < min_shot and str(sp.get("reason", "")).startswith(ed._GROW_NOT_ABSORB):
+            # V1.2.2: keep crosstalk / rapid exchanges on the wide; lengthen it from the previous shot
+            need = min_shot - dur
+            prev = coalesced[-1]
+            if (prev["end"] - prev["start"]) - need >= min_shot and prev["camera_id"] != sp["camera_id"]:
+                prev["end"] = round(prev["end"] - need, 4)
+                coalesced.append({**sp, "start": prev["end"]})
+                continue
         if coalesced and dur < min_shot:
             coalesced[-1]["end"] = sp["end"]
             coalesced[-1]["confidence"] = round(
