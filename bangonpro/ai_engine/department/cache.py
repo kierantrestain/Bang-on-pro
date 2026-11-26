@@ -56,8 +56,7 @@ class AnalysisCache:
         return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
     def _path(self, namespace: str, key: str) -> Path:
-        safe_ns = "".join(c for c in namespace if c.isalnum() or c in "_-") or "misc"
-        return self.root / safe_ns / key[:2] / f"{key}.json"
+        return self._ns_dir(namespace) / key[:2] / f"{key}.json"
 
     def get(self, namespace: str, version: str, parts: Any) -> Any | None:
         if not self.enabled:
@@ -116,10 +115,21 @@ class AnalysisCache:
                 continue
         return removed
 
-    def clear(self) -> int:
+    def namespaces(self) -> list[str]:
+        if not self.root.exists():
+            return []
+        return sorted(p.name for p in self.root.iterdir() if p.is_dir())
+
+    def _ns_dir(self, namespace: str) -> Path:
+        safe_ns = "".join(c for c in namespace if c.isalnum() or c in "_-") or "misc"
+        return self.root / safe_ns
+
+    def clear(self, namespace: str | None = None) -> int:
+        """Delete every entry, or only one namespace's entries (e.g. ``editorial``)."""
+        base = self._ns_dir(namespace) if namespace else self.root
         removed = 0
-        if self.root.exists():
-            for p in self.root.rglob("*.json"):
+        if base.exists():
+            for p in base.rglob("*.json"):
                 try:
                     p.unlink()
                     removed += 1
@@ -127,8 +137,35 @@ class AnalysisCache:
                     pass
         return removed
 
-    def stats(self) -> dict[str, Any]:
-        return {
+    def prune_to(self, max_bytes: int, namespace: str | None = None) -> int:
+        """LRU-prune the whole cache (or one namespace) down to ``max_bytes``."""
+        base = self._ns_dir(namespace) if namespace else self.root
+        if not base.exists():
+            return 0
+        files = [p for p in base.rglob("*.json") if p.is_file()]
+        total = sum(p.stat().st_size for p in files)
+        removed = 0
+        for p in sorted(files, key=lambda f: f.stat().st_mtime):
+            if total <= max_bytes:
+                break
+            try:
+                size = p.stat().st_size
+                p.unlink()
+                total -= size
+                removed += 1
+            except OSError:
+                continue
+        return removed
+
+    def namespace_stats(self) -> list[dict[str, Any]]:
+        rows = []
+        for ns in self.namespaces():
+            files = [p for p in self._ns_dir(ns).rglob("*.json") if p.is_file()]
+            rows.append({"namespace": ns, "entries": len(files), "size_bytes": sum(p.stat().st_size for p in files), "newest_mtime": max((p.stat().st_mtime for p in files), default=None)})
+        return rows
+
+    def stats(self, *, per_namespace: bool = False) -> dict[str, Any]:
+        out: dict[str, Any] = {
             "root": str(self.root),
             "enabled": self.enabled,
             "max_bytes": self.max_bytes,
@@ -136,3 +173,7 @@ class AnalysisCache:
             "hits": dict(self.hits),
             "misses": dict(self.misses),
         }
+        if per_namespace:
+            out["namespaces"] = self.namespace_stats()
+            out["entries"] = sum(r["entries"] for r in out["namespaces"])
+        return out

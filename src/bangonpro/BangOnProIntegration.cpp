@@ -38,9 +38,11 @@
 #include <QDateTime>
 #include <QDir>
 #include <QDockWidget>
+#include <QEvent>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QInputDialog>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMainWindow>
@@ -51,6 +53,7 @@
 #include <QProcessEnvironment>
 #include <QRegularExpression>
 #include <QScrollArea>
+#include <QSettings>
 #include <QStandardPaths>
 #include <QTimer>
 #include <QToolBar>
@@ -83,6 +86,34 @@ QJsonObject readJsonFile(const QString &path, QString *err)
         return {};
     }
     return doc.object();
+}
+
+// V1.2.2: Bang On Pro's own settings (storage folder, first launch, open timing session).
+const QString kSettingsOrg = QStringLiteral("BangOnPro");
+const QString kSettingsApp = QStringLiteral("BangOnPro");
+
+QString customProfilesDir()
+{
+    // Must match bangonpro/show_profiles/loader.py default_custom_profiles_dir().
+    const QString env = qEnvironmentVariable("BANGONPRO_PROFILES_DIR");
+    return env.isEmpty() ? QDir::homePath() + QStringLiteral("/.local/share/bangonpro/profiles") : env;
+}
+
+bool queueHasPendingWork(const QJsonObject &queueDoc, QString *runningJobDir = nullptr, QString *runningLabel = nullptr)
+{
+    bool pending = false;
+    for (const QJsonValue &v : queueDoc.value(QStringLiteral("entries")).toArray()) {
+        const QJsonObject e = v.toObject();
+        const QString status = e.value(QStringLiteral("status")).toString();
+        if (status == QLatin1String("running") && runningJobDir) {
+            *runningJobDir = e.value(QStringLiteral("job_dir")).toString();
+            if (runningLabel) {
+                *runningLabel = e.value(QStringLiteral("label")).toString();
+            }
+        }
+        pending = pending || status == QLatin1String("queued") || status == QLatin1String("interrupted") || status == QLatin1String("running");
+    }
+    return pending;
 }
 
 QString sanitizeFileSlug(const QString &raw)
@@ -150,6 +181,24 @@ BangOnProIntegration::BangOnProIntegration(QMainWindow *mainWindow, EffectListWi
     setupMenu();
     setupShortcuts();
     loadBuiltinStarterPresetsIfNeeded();
+    // V1.2.2: custom profiles, queue and history, unattended queue recovery, open timing session, first launch.
+    loadCustomProfiles();
+    refreshHistory();
+    if (queueHasPendingWork(readJsonFile(queueRoot() + QStringLiteral("/queue.json"), nullptr))) {
+        // Work left in the queue (including a job interrupted by a crash or quit) resumes from its checkpoint.
+        QTimer::singleShot(2500, this, [this]() { ensureQueueWorker(); });
+    }
+    {
+        QSettings settings(kSettingsOrg, kSettingsApp);
+        m_timingSession = settings.value(QStringLiteral("measurement/openSession")).toString();
+        if (!m_timingSession.isEmpty()) {
+            m_agentCentre->setTimingActive(true, settings.value(QStringLiteral("measurement/paused"), false).toBool());
+        }
+        if (!settings.value(QStringLiteral("setup/firstLaunchDone"), false).toBool()) {
+            QTimer::singleShot(1800, m_mainWindow, [this]() { openSystemCheck(true); });
+        }
+    }
+    qApp->installEventFilter(this);
     // Restored window geometry can come from a larger display; keep the editor on the current screen.
     QTimer::singleShot(0, m_mainWindow, [this]() { fitWindowToScreen(m_mainWindow); });
     QTimer::singleShot(1500, m_mainWindow, [this]() { fitWindowToScreen(m_mainWindow); });
@@ -157,10 +206,31 @@ BangOnProIntegration::BangOnProIntegration(QMainWindow *mainWindow, EffectListWi
 
 BangOnProIntegration::~BangOnProIntegration()
 {
+    qApp->removeEventFilter(this);
     if (m_aiProcess) {
         m_aiProcess->kill();
         m_aiProcess->waitForFinished(2000);
     }
+    // A queued production stopped by quitting is resumed from its checkpoint on the next launch.
+    if (m_queueWorker) {
+        m_queueWorker->disconnect(this);
+        m_queueWorker->kill();
+        m_queueWorker->waitForFinished(2000);
+    }
+}
+
+bool BangOnProIntegration::eventFilter(QObject *watched, QEvent *event)
+{
+    if (!m_timingSession.isEmpty() && m_agentCentre &&
+        (event->type() == QEvent::KeyPress || event->type() == QEvent::MouseButtonPress || event->type() == QEvent::Wheel)) {
+        auto *widget = qobject_cast<QWidget *>(watched);
+        // Input inside the Control Centre is categorised there (setup, review, correction, approval).
+        const bool inCentre = widget && m_agentDock && (widget == m_agentDock || m_agentDock->isAncestorOf(widget));
+        if (!inCentre) {
+            m_agentCentre->noteActivity(QStringLiteral("editing"));
+        }
+    }
+    return QObject::eventFilter(watched, event);
 }
 
 QString BangOnProIntegration::locatePythonPackageRoot()
@@ -283,11 +353,33 @@ void BangOnProIntegration::setupAiDock()
     connect(m_engine.get(), &TimelineCommandEngine::revisionChanged, m_aiWidget, &AiAssistantDock::setTimelineRevision);
 }
 
+QString BangOnProIntegration::storageRoot()
+{
+    const QString chosen = QSettings(kSettingsOrg, kSettingsApp).value(QStringLiteral("storage/root")).toString();
+    return chosen.isEmpty() ? dataDir() : chosen;
+}
+
+bool BangOnProIntegration::storageRootChosen()
+{
+    return !QSettings(kSettingsOrg, kSettingsApp).value(QStringLiteral("storage/root")).toString().isEmpty();
+}
+
 QString BangOnProIntegration::departmentJobsRoot()
 {
-    const QString dir = dataDir() + QStringLiteral("/jobs");
+    const QString dir = storageRoot() + QStringLiteral("/jobs");
     QDir().mkpath(dir);
     return dir;
+}
+
+QString BangOnProIntegration::queueRoot()
+{
+    return storageRoot() + QStringLiteral("/queue");
+}
+
+QString BangOnProIntegration::measurementRoot()
+{
+    // Timing sessions stay with the editor's user data even when productions move to an external drive.
+    return dataDir() + QStringLiteral("/measurement");
 }
 
 void BangOnProIntegration::setupAgentControlCentre()
@@ -339,6 +431,367 @@ void BangOnProIntegration::setupAgentControlCentre()
     }
     connect(m_agentCentre, &AgentControlCentre::jobFinished, this, [this](const QString &jobDir, const QString &status) {
         m_aiWidget->appendActivityLog(QStringLiteral("department"), QStringLiteral("Job %1 finished: %2").arg(QFileInfo(jobDir).fileName(), status));
+        refreshHistory();
+        if (!m_timingSession.isEmpty()) {
+            // The agent-assisted session is measured against the job being reviewed (machine time stays separate).
+            runQuickDepartmentCommand({QStringLiteral("measure"), QStringLiteral("link"), QStringLiteral("--root"), measurementRoot(), QStringLiteral("--session"),
+                                       m_timingSession, QStringLiteral("--job-dir"), jobDir});
+        }
+    });
+    // V1.2.2: queue, history and timed sessions.
+    connect(m_agentCentre, &AgentControlCentre::queueJobRequested, this, &BangOnProIntegration::queueDepartmentJob);
+    connect(m_agentCentre, &AgentControlCentre::historyJobActivated, this, [this](const QString &jobDir) {
+        if (m_deptProcess) {
+            m_aiWidget->appendActivityLog(QStringLiteral("department"), QStringLiteral("Wait for the running department task to finish"), QStringLiteral("WARN"));
+            return;
+        }
+        m_agentCentre->recoverJob(jobDir, m_queueWorker && jobDir == m_queueRunningJobDir);
+    });
+    connect(m_agentCentre, &AgentControlCentre::queueEntryActionRequested, this, [this](const QString &queueId, const QString &action) {
+        runQuickDepartmentCommand({QStringLiteral("queue"), action, queueId, QStringLiteral("--queue-root"), queueRoot()}, [this](const QJsonObject &) { refreshHistory(); });
+    });
+    connect(m_agentCentre, &AgentControlCentre::timingStartRequested, this, &BangOnProIntegration::startTiming);
+    connect(m_agentCentre, &AgentControlCentre::measurementActivity, this, [this](const QString &category) {
+        if (!m_timingSession.isEmpty()) {
+            runQuickDepartmentCommand({QStringLiteral("measure"), QStringLiteral("activity"), QStringLiteral("--root"), measurementRoot(), QStringLiteral("--session"),
+                                       m_timingSession, QStringLiteral("--category"), category});
+        }
+    });
+    connect(m_agentCentre, &AgentControlCentre::timingPauseToggled, this, [this](bool paused) {
+        if (m_timingSession.isEmpty()) {
+            return;
+        }
+        runQuickDepartmentCommand({QStringLiteral("measure"), paused ? QStringLiteral("pause") : QStringLiteral("resume"), QStringLiteral("--root"), measurementRoot(),
+                                   QStringLiteral("--session"), m_timingSession});
+        m_agentCentre->setTimingActive(true, paused);
+        QSettings(kSettingsOrg, kSettingsApp).setValue(QStringLiteral("measurement/paused"), paused);
+    });
+    connect(m_agentCentre, &AgentControlCentre::timingFinishRequested, this, [this](int rating) {
+        if (m_timingSession.isEmpty()) {
+            m_agentCentre->setTimingActive(false);
+            return;
+        }
+        const QString session = m_timingSession;
+        runQuickDepartmentCommand({QStringLiteral("measure"), QStringLiteral("finish"), QStringLiteral("--root"), measurementRoot(), QStringLiteral("--session"), session,
+                                   QStringLiteral("--quality"), QString::number(rating)},
+                                  [this](const QJsonObject &res) {
+                                      if (res.value(QStringLiteral("ok")).toBool()) {
+                                          m_aiWidget->appendActivityLog(QStringLiteral("measurement"),
+                                                                        QStringLiteral("Timing session saved. Bang On Pro > Export diagnostics or the measurement report collects it."));
+                                      }
+                                  });
+        m_timingSession.clear();
+        QSettings settings(kSettingsOrg, kSettingsApp);
+        settings.remove(QStringLiteral("measurement/openSession"));
+        settings.remove(QStringLiteral("measurement/paused"));
+        m_agentCentre->setTimingActive(false);
+    });
+}
+
+bool BangOnProIntegration::prepareJobArguments(QStringList &args)
+{
+    m_deptBaseRevision = m_engine->currentRevision();
+    m_deptBaseProjectId = m_engine->activeProjectId().isEmpty() ? QStringLiteral("active_project") : m_engine->activeProjectId();
+    m_deptBaseSequenceId = m_engine->activeSequenceId().isEmpty() ? QStringLiteral("seq_main") : m_engine->activeSequenceId();
+    if (!args.contains(QStringLiteral("--inputs"))) {
+        QStringList inputs = collectProjectBinMediaPaths();
+        if (inputs.isEmpty()) {
+            inputs = QFileDialog::getOpenFileNames(m_mainWindow, QStringLiteral("Select camera / microphone media for this production"), QString(),
+                                                   QStringLiteral("Media (*.mp4 *.mov *.mxf *.mkv *.m4v *.wav *.mp3);;All files (*)"));
+        }
+        if (inputs.isEmpty()) {
+            m_aiWidget->appendActivityLog(QStringLiteral("department"), QStringLiteral("Job not started: no source media selected"));
+            return false;
+        }
+        args << QStringLiteral("--inputs") << inputs;
+    }
+    args << QStringLiteral("--job-root") << departmentJobsRoot() << QStringLiteral("--project-id") << m_deptBaseProjectId << QStringLiteral("--sequence-id")
+         << m_deptBaseSequenceId;
+    return true;
+}
+
+void BangOnProIntegration::runQuickDepartmentCommand(const QStringList &args, const std::function<void(const QJsonObject &)> &onDone)
+{
+    QStringList full{QStringLiteral("-m"), QStringLiteral("bangonpro.ai_engine.department")};
+    full << args;
+    QProcess *proc = startPython(full);
+    if (!proc) {
+        return;
+    }
+    const QString what = args.isEmpty() ? QString() : args.first();
+    connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this, [this, proc, onDone, what](int code, QProcess::ExitStatus status) {
+        proc->deleteLater();
+        const QJsonObject res = QJsonDocument::fromJson(proc->readAllStandardOutput()).object();
+        if (status != QProcess::NormalExit || code != 0) {
+            // The department prints {"error", "help": {"title", "fix"}}; show the plain fix.
+            const QJsonObject help = res.value(QStringLiteral("help")).toObject();
+            const QString text = help.isEmpty() ? QString::fromUtf8(proc->readAllStandardError().right(400))
+                                                : QStringLiteral("%1. %2").arg(help.value(QStringLiteral("title")).toString(), help.value(QStringLiteral("fix")).toString());
+            m_aiWidget->appendActivityLog(QStringLiteral("department"), QStringLiteral("%1: %2").arg(what, text), QStringLiteral("WARN"));
+        }
+        if (onDone) {
+            onDone(res);
+        }
+    });
+}
+
+void BangOnProIntegration::refreshHistory()
+{
+    runQuickDepartmentCommand({QStringLiteral("history"), QStringLiteral("--job-root"), departmentJobsRoot(), QStringLiteral("--queue-root"), queueRoot(),
+                               QStringLiteral("--limit"), QStringLiteral("30")},
+                              [this](const QJsonObject &res) {
+                                  if (res.contains(QStringLiteral("jobs"))) {
+                                      m_agentCentre->loadHistory(res);
+                                  }
+                              });
+}
+
+void BangOnProIntegration::queueDepartmentJob(const QStringList &runArguments)
+{
+    QStringList args = runArguments;
+    if (args.isEmpty() || args.first() != QLatin1String("run")) {
+        return;
+    }
+    args.removeFirst();
+    args.prepend(QStringLiteral("add"));
+    args.prepend(QStringLiteral("queue"));
+    if (!prepareJobArguments(args)) {
+        return;
+    }
+    args << QStringLiteral("--queue-root") << queueRoot();
+    runQuickDepartmentCommand(args, [this](const QJsonObject &res) {
+        const QJsonObject entry = res.value(QStringLiteral("queued")).toObject();
+        if (entry.isEmpty()) {
+            return;
+        }
+        m_aiWidget->appendActivityLog(QStringLiteral("department"), QStringLiteral("Added to the production queue: %1").arg(entry.value(QStringLiteral("label")).toString()));
+        refreshHistory();
+        ensureQueueWorker();
+    });
+}
+
+void BangOnProIntegration::ensureQueueWorker()
+{
+    if (m_queueWorker) {
+        return;
+    }
+    QProcess *proc = startPython({QStringLiteral("-m"), QStringLiteral("bangonpro.ai_engine.department"), QStringLiteral("queue"), QStringLiteral("run"),
+                                  QStringLiteral("--queue-root"), queueRoot()});
+    if (!proc) {
+        return;
+    }
+    m_queueWorker = proc;
+    if (!m_queuePollTimer) {
+        m_queuePollTimer = new QTimer(this);
+        m_queuePollTimer->setInterval(2000);
+        connect(m_queuePollTimer, &QTimer::timeout, this, &BangOnProIntegration::pollQueue);
+    }
+    m_queuePollTimer->start();
+    m_aiWidget->appendActivityLog(QStringLiteral("department"), QStringLiteral("Production queue running (it keeps going while Bang On Pro is open)"));
+    connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this, [this, proc](int code, QProcess::ExitStatus) {
+        proc->deleteLater();
+        m_queueWorker.clear();
+        m_queuePollTimer->stop();
+        pollQueue();
+        refreshHistory();
+        const QJsonObject res = QJsonDocument::fromJson(proc->readAllStandardOutput()).object();
+        if (code != 0) {
+            const QJsonObject help = res.value(QStringLiteral("help")).toObject();
+            m_aiWidget->appendActivityLog(QStringLiteral("department"), QStringLiteral("Production queue stopped: %1").arg(res.value(QStringLiteral("error")).toString()),
+                                          QStringLiteral("WARN"));
+            Q_UNUSED(help)
+            return; // e.g. another worker owns the queue; do not loop
+        }
+        // Work added while the worker was finishing: start again.
+        if (queueHasPendingWork(readJsonFile(queueRoot() + QStringLiteral("/queue.json"), nullptr))) {
+            QTimer::singleShot(1000, this, [this]() { ensureQueueWorker(); });
+        }
+    });
+}
+
+void BangOnProIntegration::pollQueue()
+{
+    QString runningDir;
+    QString runningLabel;
+    queueHasPendingWork(readJsonFile(queueRoot() + QStringLiteral("/queue.json"), nullptr), &runningDir, &runningLabel);
+    if (!m_queueWorker) {
+        runningDir.clear();
+    }
+    if (runningDir == m_queueRunningJobDir) {
+        return;
+    }
+    m_queueRunningJobDir = runningDir;
+    refreshHistory();
+    if (m_deptProcess) {
+        return; // the editor is watching their own task; the queue entry stays in the list
+    }
+    if (!runningDir.isEmpty()) {
+        // Follow the queued production live: progress, Cancel and per-agent state work as for any job.
+        m_agentCentre->setActiveJobDir(runningDir);
+        m_agentCentre->setBusy(true, QStringLiteral("Queued production running: %1").arg(runningLabel));
+    } else {
+        m_agentCentre->setBusy(false);
+        m_agentCentre->refreshFromDisk();
+    }
+}
+
+void BangOnProIntegration::startTiming(const QString &kind, const QString &deliverable)
+{
+    QString name = deliverable;
+    if (name.isEmpty()) {
+        bool ok = false;
+        name = QInputDialog::getText(m_mainWindow, QStringLiteral("Time this edit"), QStringLiteral("Deliverable (for example the episode title)"), QLineEdit::Normal,
+                                     QString(), &ok)
+                   .trimmed();
+        if (!ok || name.isEmpty()) {
+            return;
+        }
+    }
+    QStringList args{QStringLiteral("measure"), QStringLiteral("start"),  QStringLiteral("--root"),   measurementRoot(), QStringLiteral("--deliverable"),
+                     name,                      QStringLiteral("--kind"), kind,                       QStringLiteral("--editor"),
+                     qEnvironmentVariable("USER", QStringLiteral("editor"))};
+    const QString jobDir = m_agentCentre->activeJobDir();
+    if (kind == QLatin1String("agent_assisted") && !jobDir.isEmpty() && QFileInfo::exists(QDir(jobDir).filePath(QStringLiteral("job.json")))) {
+        args << QStringLiteral("--job-dir") << jobDir;
+    }
+    runQuickDepartmentCommand(args, [this, name, kind](const QJsonObject &res) {
+        const QString session = res.value(QStringLiteral("session_id")).toString();
+        if (session.isEmpty()) {
+            return;
+        }
+        m_timingSession = session;
+        QSettings settings(kSettingsOrg, kSettingsApp);
+        settings.setValue(QStringLiteral("measurement/openSession"), session);
+        settings.setValue(QStringLiteral("measurement/paused"), false);
+        m_agentCentre->setTimingActive(true);
+        m_aiWidget->appendActivityLog(QStringLiteral("measurement"), QStringLiteral("Timing %1 work on '%2'").arg(kind == QLatin1String("manual_baseline") ? QStringLiteral("manual") : QStringLiteral("agent-assisted"), name));
+    });
+}
+
+void BangOnProIntegration::loadCustomProfiles()
+{
+    const QFileInfoList files = QDir(customProfilesDir()).entryInfoList({QStringLiteral("*.json")}, QDir::Files, QDir::Name);
+    for (const QFileInfo &fi : files) {
+        const QJsonObject p = readJsonFile(fi.absoluteFilePath(), nullptr);
+        const QString id = p.value(QStringLiteral("profile_id")).toString();
+        if (!id.isEmpty()) {
+            m_agentCentre->addCustomProfile(id, p.value(QStringLiteral("display_name")).toString(id));
+        }
+    }
+}
+
+void BangOnProIntegration::openSystemCheck(bool firstLaunch)
+{
+    SystemCheckDialog dlg(m_mainWindow);
+    QPointer<SystemCheckDialog> guard(&dlg);
+    if (storageRootChosen()) {
+        dlg.setStorageFolder(storageRoot());
+    }
+    connect(&dlg, &SystemCheckDialog::recheckRequested, this, [this, guard]() {
+        if (guard) {
+            runReadinessInto(guard);
+        }
+    });
+    connect(&dlg, &SystemCheckDialog::modelManagerRequested, this, [this, guard]() {
+        openModelManager();
+        if (guard) {
+            runReadinessInto(guard);
+        }
+    });
+    connect(&dlg, &SystemCheckDialog::exportDiagnosticsRequested, this, &BangOnProIntegration::exportDiagnostics);
+    connect(&dlg, &SystemCheckDialog::storageFolderChosen, this, [this, guard](const QString &folder) {
+        if (!QDir().mkpath(folder + QStringLiteral("/jobs")) || !QFileInfo(folder).isWritable()) {
+            QMessageBox::warning(guard, QStringLiteral("Folder not usable"),
+                                 QStringLiteral("Bang On Pro cannot write to %1. Choose a folder you own, or allow access in System Settings > Privacy & Security.").arg(folder));
+            return;
+        }
+        QSettings(kSettingsOrg, kSettingsApp).setValue(QStringLiteral("storage/root"), folder);
+        m_aiWidget->appendActivityLog(QStringLiteral("storage"), QStringLiteral("Productions and the analysis cache now go to %1 (existing jobs stay where they are)").arg(folder));
+        refreshHistory();
+        if (guard) {
+            runReadinessInto(guard);
+        }
+    });
+    connect(&dlg, &SystemCheckDialog::cacheActionRequested, this, [this, guard](const QString &action) {
+        if (action == QLatin1String("clear") &&
+            QMessageBox::question(guard, QStringLiteral("Clear the analysis cache?"),
+                                  QStringLiteral("The next production analyses the footage again. Source media and productions are not touched.")) != QMessageBox::Yes) {
+            return;
+        }
+        QStringList args{QStringLiteral("cache"), action};
+        if (action == QLatin1String("prune")) {
+            args << QStringLiteral("--max-mb") << QStringLiteral("1024");
+        }
+        if (storageRootChosen()) {
+            args << QStringLiteral("--cache-dir") << storageRoot() + QStringLiteral("/cache");
+        }
+        runQuickDepartmentCommand(args, [this, guard, action](const QJsonObject &res) {
+            m_aiWidget->appendActivityLog(QStringLiteral("storage"), QStringLiteral("Analysis cache %1: %2 entries removed").arg(action).arg(res.value(QStringLiteral("removed")).toInt()));
+            if (guard) {
+                runReadinessInto(guard);
+            }
+        });
+    });
+    runReadinessInto(&dlg);
+    dlg.exec();
+    if (firstLaunch) {
+        QSettings(kSettingsOrg, kSettingsApp).setValue(QStringLiteral("setup/firstLaunchDone"), true);
+    }
+}
+
+void BangOnProIntegration::runReadinessInto(SystemCheckDialog *dialog)
+{
+    QPointer<SystemCheckDialog> guard(dialog);
+    dialog->setBusy(true);
+    QStringList args{QStringLiteral("readiness"), QStringLiteral("--job-root"), departmentJobsRoot()};
+    if (storageRootChosen()) {
+        args << QStringLiteral("--cache-dir") << storageRoot() + QStringLiteral("/cache");
+    }
+    runQuickDepartmentCommand(args, [guard](const QJsonObject &report) {
+        if (guard && !guard->loadReport(report)) {
+            guard->setBusy(false);
+        }
+    });
+}
+
+void BangOnProIntegration::exportDiagnostics()
+{
+    const QString suggested =
+        QDir::homePath() + QStringLiteral("/Desktop/BangOnPro-diagnostics-%1.zip").arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmm")));
+    const QString out = QFileDialog::getSaveFileName(m_mainWindow, QStringLiteral("Export diagnostics"), suggested, QStringLiteral("Zip archive (*.zip)"));
+    if (out.isEmpty()) {
+        return;
+    }
+    QMessageBox ask(QMessageBox::Question, QStringLiteral("Include media?"),
+                    QStringLiteral("Diagnostics never contain passwords, API keys, provider settings or camera originals, and home folder paths are shortened to ~."),
+                    QMessageBox::Yes | QMessageBox::No, m_mainWindow);
+    ask.setInformativeText(QStringLiteral("Also include transcripts, captions, timelines and renders from recent productions? Only do this if the team asked for them."));
+    ask.setDefaultButton(QMessageBox::No);
+    const bool includeMedia = ask.exec() == QMessageBox::Yes;
+    QStringList args{QStringLiteral("diagnostics"), QStringLiteral("export"), QStringLiteral("--out"), out, QStringLiteral("--job-root"), departmentJobsRoot(),
+                     QStringLiteral("--queue-root"), queueRoot()};
+    const QString jobDir = m_agentCentre ? m_agentCentre->activeJobDir() : QString();
+    if (!jobDir.isEmpty() && QFileInfo::exists(QDir(jobDir).filePath(QStringLiteral("job.json")))) {
+        args << QStringLiteral("--job") << jobDir;
+    }
+    if (storageRootChosen()) {
+        args << QStringLiteral("--cache-dir") << storageRoot() + QStringLiteral("/cache");
+    }
+    if (includeMedia) {
+        args << QStringLiteral("--include-media");
+    }
+    m_aiWidget->appendActivityLog(QStringLiteral("diagnostics"), QStringLiteral("Exporting diagnostics to %1").arg(out));
+    runQuickDepartmentCommand(args, [this](const QJsonObject &res) {
+        const QString zip = res.value(QStringLiteral("zip_path")).toString();
+        if (zip.isEmpty()) {
+            return;
+        }
+        const QString text = QStringLiteral("Saved %1.\n%2 files included; %3 items left out (listed in manifest.json inside the zip).")
+                                 .arg(zip)
+                                 .arg(res.value(QStringLiteral("included")).toInt())
+                                 .arg(res.value(QStringLiteral("excluded")).toInt());
+        m_aiWidget->appendActivityLog(QStringLiteral("diagnostics"), text);
+        QMessageBox::information(m_mainWindow, QStringLiteral("Diagnostics exported"), text);
     });
 }
 
@@ -348,27 +801,19 @@ void BangOnProIntegration::startDepartmentJob(const QStringList &runArguments)
         m_aiWidget->appendActivityLog(QStringLiteral("department"), QStringLiteral("A production job is already running"), QStringLiteral("WARN"));
         return;
     }
-    m_deptBaseRevision = m_engine->currentRevision();
-    m_deptBaseProjectId = m_engine->activeProjectId().isEmpty() ? QStringLiteral("active_project") : m_engine->activeProjectId();
-    m_deptBaseSequenceId = m_engine->activeSequenceId().isEmpty() ? QStringLiteral("seq_main") : m_engine->activeSequenceId();
-
+    if (m_queueWorker) {
+        // One production at a time: while the queue is busy, a new production waits its turn.
+        m_aiWidget->appendActivityLog(QStringLiteral("department"), QStringLiteral("A queued production is running, so this one was added to the queue"));
+        queueDepartmentJob(runArguments);
+        return;
+    }
     QStringList args = runArguments;
-    if (!args.contains(QStringLiteral("--inputs"))) {
-        QStringList inputs = collectProjectBinMediaPaths();
-        if (inputs.isEmpty()) {
-            inputs = QFileDialog::getOpenFileNames(m_mainWindow, QStringLiteral("Select camera / microphone media for this production"), QString(),
-                                                   QStringLiteral("Media (*.mp4 *.mov *.mxf *.mkv *.m4v *.wav *.mp3);;All files (*)"));
-        }
-        if (inputs.isEmpty()) {
-            m_aiWidget->appendActivityLog(QStringLiteral("department"), QStringLiteral("Job not started: no source media selected"));
-            return;
-        }
-        args << QStringLiteral("--inputs") << inputs;
+    if (!prepareJobArguments(args)) {
+        return;
     }
     const QString jobId = QStringLiteral("job_") + QDateTime::currentDateTimeUtc().toString(QStringLiteral("yyyyMMdd-HHmmss"));
     const QString jobDir = departmentJobsRoot() + QLatin1Char('/') + jobId;
-    args << QStringLiteral("--job-root") << departmentJobsRoot() << QStringLiteral("--job-id") << jobId << QStringLiteral("--project-id") << m_deptBaseProjectId
-         << QStringLiteral("--sequence-id") << m_deptBaseSequenceId;
+    args << QStringLiteral("--job-id") << jobId;
     runDepartmentCommand(args, jobDir, QStringLiteral("Production job started"));
 }
 
@@ -396,11 +841,13 @@ void BangOnProIntegration::runDepartmentCommand(const QStringList &subcommandArg
         m_agentCentre->setBusy(false);
         m_agentCentre->refreshFromDisk();
         if (status != QProcess::NormalExit || code != 0) {
-            m_aiWidget->appendActivityLog(
-                QStringLiteral("department"),
-                QStringLiteral("Department task failed (exit=%1): %2").arg(code).arg(QString::fromUtf8(proc->readAllStandardError().right(800))),
-                QStringLiteral("ERROR"));
+            // V1.2.2: the department explains failures as {"error", "help": {"title", "fix"}}.
+            const QJsonObject help = QJsonDocument::fromJson(proc->readAllStandardOutput()).object().value(QStringLiteral("help")).toObject();
+            const QString detail = help.isEmpty() ? QString::fromUtf8(proc->readAllStandardError().right(800))
+                                                  : QStringLiteral("%1. %2").arg(help.value(QStringLiteral("title")).toString(), help.value(QStringLiteral("fix")).toString());
+            m_aiWidget->appendActivityLog(QStringLiteral("department"), QStringLiteral("Department task failed (exit=%1): %2").arg(code).arg(detail), QStringLiteral("ERROR"));
         }
+        refreshHistory();
         Q_UNUSED(jobDir)
     });
 }
@@ -643,6 +1090,14 @@ void BangOnProIntegration::setupMenu()
     QAction *modelManagerAct = menu->addAction(QStringLiteral("Manage Local AI Models (Whisper / SAM)…"));
     connect(modelManagerAct, &QAction::triggered, this, &BangOnProIntegration::openModelManager);
 
+    // V1.2.2: the first-launch check is always one click away, and so is a sanitised diagnostics zip.
+    QAction *systemCheckAct = menu->addAction(QStringLiteral("System check…"));
+    systemCheckAct->setObjectName(QStringLiteral("bangonpro_system_check"));
+    connect(systemCheckAct, &QAction::triggered, this, [this]() { openSystemCheck(false); });
+    QAction *diagnosticsAct = menu->addAction(QStringLiteral("Export diagnostics…"));
+    diagnosticsAct->setObjectName(QStringLiteral("bangonpro_export_diagnostics"));
+    connect(diagnosticsAct, &QAction::triggered, this, &BangOnProIntegration::exportDiagnostics);
+
     QAction *clearCacheAct = menu->addAction(QStringLiteral("Clear Proxy & Render Caches"));
     connect(clearCacheAct, &QAction::triggered, this, &BangOnProIntegration::clearTemporaryCaches);
 
@@ -690,6 +1145,17 @@ void BangOnProIntegration::openShowProfileEditor()
     connect(&dlg, &ShowProfileEditorDialog::profileSaved, this, [this](const QString &filePath, const QJsonObject &profileJson) {
         if (m_aiWidget) {
             m_aiWidget->applyCustomProfileJson(profileJson, filePath);
+        }
+        // V1.2.2: a saved custom profile is also offered to the production department (by profile id).
+        const QString id = profileJson.value(QStringLiteral("profile_id")).toString();
+        if (!id.isEmpty() && QDir().mkpath(customProfilesDir())) {
+            const QString target = QDir(customProfilesDir()).filePath(sanitizeFileSlug(id) + QStringLiteral(".json"));
+            QFile out(target);
+            if (out.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                out.write(QJsonDocument(profileJson).toJson(QJsonDocument::Indented));
+                out.close();
+                m_agentCentre->addCustomProfile(id, profileJson.value(QStringLiteral("display_name")).toString(id));
+            }
         }
     });
     dlg.exec();
@@ -839,11 +1305,20 @@ QProcess *BangOnProIntegration::startPython(const QStringList &args)
         QStringLiteral("MLT_DATA"),
         QStringLiteral("MLT_PROFILES_PATH"),
         QStringLiteral("FREI0R_PATH"),
+        // V1.2.2 storage locations (test and power-user overrides; never secrets)
+        QStringLiteral("BANGONPRO_CACHE_DIR"),
+        QStringLiteral("BANGONPRO_PREFS_DIR"),
+        QStringLiteral("BANGONPRO_PROFILES_DIR"),
+        QStringLiteral("BANGONPRO_QUEUE_DIR"),
     };
     for (const QString &key : allowedVars) {
         if (host.contains(key)) {
             clean.insert(key, host.value(key));
         }
+    }
+    // The folder chosen in System check also holds the analysis cache (e.g. an external SSD).
+    if (!clean.contains(QStringLiteral("BANGONPRO_CACHE_DIR")) && storageRootChosen()) {
+        clean.insert(QStringLiteral("BANGONPRO_CACHE_DIR"), storageRoot() + QStringLiteral("/cache"));
     }
     const QString existing = host.value(QStringLiteral("PYTHONPATH"));
     clean.insert(QStringLiteral("PYTHONPATH"), existing.isEmpty() ? root : root + QDir::listSeparator() + existing);

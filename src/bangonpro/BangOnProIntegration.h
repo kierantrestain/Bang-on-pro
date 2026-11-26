@@ -12,12 +12,15 @@
 #include <QPointer>
 #include <QString>
 #include <QStringList>
+#include <functional>
 #include <memory>
 
 class QAction;
 class QDockWidget;
+class QEvent;
 class QMainWindow;
 class QProcess;
+class QTimer;
 class EffectListWidget;
 
 namespace BangOnPro {
@@ -27,6 +30,7 @@ class AiAssistantDock;
 class PremierePresetBrowser;
 class RotoStudioDock;
 class ShortcutPresetManager;
+class SystemCheckDialog;
 class TimelineCommandEngine;
 class TimelineCommandServer;
 class TranscriptEditorWidget;
@@ -68,6 +72,10 @@ public:
     static QString pythonExecutable();
     static QString dataDir();
 
+protected:
+    /** @brief While a timed session is open, input anywhere in the editor counts as editing time. */
+    bool eventFilter(QObject *watched, QEvent *event) override;
+
 private:
     void setupEngine();
     void setupAiDock();
@@ -97,6 +105,22 @@ private:
     void stageDepartmentDraft(const QString &jobDir);
     void promoteDepartmentDraft(const QString &jobDir);
     static QString departmentJobsRoot();
+    // V1.2.2 production readiness: storage folder, system check, diagnostics, queue, timed sessions
+    static QString storageRoot();
+    static bool storageRootChosen();
+    static QString queueRoot();
+    static QString measurementRoot();
+    bool prepareJobArguments(QStringList &args);
+    void openSystemCheck(bool firstLaunch);
+    void runReadinessInto(SystemCheckDialog *dialog);
+    void exportDiagnostics();
+    void queueDepartmentJob(const QStringList &runArguments);
+    void ensureQueueWorker();
+    void pollQueue();
+    void refreshHistory();
+    void runQuickDepartmentCommand(const QStringList &args, const std::function<void(const QJsonObject &)> &onDone = {});
+    void startTiming(const QString &kind, const QString &deliverable);
+    void loadCustomProfiles();
     void handleProposalFinished(int exitCode, int exitStatus);
     void approveBatch(const TimelineCommandBatch &batch);
     void approveBatchSelection(const QString &requestId, const QStringList &selectedOpIds, bool rebaseToCurrentRevision);
@@ -131,6 +155,10 @@ private:
     AgentControlCentre *m_agentCentre{nullptr};
     QDockWidget *m_agentDock{nullptr};
     QPointer<QProcess> m_deptProcess;
+    QPointer<QProcess> m_queueWorker;
+    QTimer *m_queuePollTimer{nullptr};
+    QString m_queueRunningJobDir;
+    QString m_timingSession;
     qint64 m_deptBaseRevision{0};
     QString m_deptBaseProjectId;
     QString m_deptBaseSequenceId;

@@ -152,6 +152,77 @@ def install_models(model_dir: Path) -> dict[str, dict]:
     return report
 
 
+def verify_v122_operations(job: ProductionJob, cams: dict[str, Path], work: Path, out: Path, model_dir: Path, failures: list[str]) -> dict:
+    """V1.2.2 gates inside the bundle: system check, sanitised diagnostics, queue, quality loop."""
+    import zipfile
+
+    from bangonpro.ai_engine.department import quality_loop as ql
+    from bangonpro.ai_engine.department.diagnostics import export_diagnostics
+    from bangonpro.ai_engine.department.queue import JobQueue
+    from bangonpro.ai_engine.department.readiness import check_system
+
+    evidence: dict = {}
+    # 1. System check: the bundle must ship ffmpeg, ffprobe, melt and a complete Python runtime.
+    try:
+        rep = check_system(job_root=work / "jobs", model_dir=model_dir)
+        by_id = {i["id"]: i for i in rep["items"]}
+        evidence["readiness"] = {"overall": rep["overall"], "summary": rep["summary"], "items": {k: {"status": v["status"], "detail": v["detail"]} for k, v in by_id.items()}}
+        for item_id in ("tool_ffmpeg", "tool_ffprobe", "tool_melt", "python"):
+            if by_id.get(item_id, {}).get("status") != "ok":
+                failures.append(f"system check: {item_id} is {by_id.get(item_id, {}).get('status')} ({by_id.get(item_id, {}).get('detail')})")
+    except Exception as exc:  # noqa: BLE001 - every gate reports, none aborts the others
+        failures.append(f"system check raised {type(exc).__name__}: {exc}")
+    # 2. Diagnostics: a planted credential and media copy must not reach the zip.
+    planted_secret = "sk-ant-BUNDLEVERIFY0000000000000000"
+    planted = [job.dir / "draft" / "provider_config.json", job.dir / "draft" / "planted_copy.mp4"]
+    try:
+        planted[0].write_text(json.dumps({"api_key": planted_secret}), encoding="utf-8")
+        planted[1].write_bytes(b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 1024)
+        zpath = out / "diagnostics_sanitised.zip"
+        res = export_diagnostics(zpath, job_dirs=[job.dir], model_dir=model_dir)
+        with zipfile.ZipFile(zpath) as zf:
+            names = zf.namelist()
+            blob = b"".join(zf.read(n) for n in names)
+        leaks = [n for n in names if n.endswith((".mp4", ".srt", ".ass", ".kdenlive")) or "provider" in n or "transcript" in n]
+        evidence["diagnostics"] = {"files": len(names), "excluded": len(res["manifest"]["excluded"]), "redactions": res["manifest"]["redactions"]}
+        if leaks or planted_secret.encode() in blob or str(Path.home()).encode() + b"/" in blob:
+            failures.append(f"diagnostics export not sanitised (leaked entries: {leaks[:5]})")
+    except Exception as exc:  # noqa: BLE001
+        failures.append(f"diagnostics export raised {type(exc).__name__}: {exc}")
+    finally:
+        for p in planted:
+            p.unlink(missing_ok=True)
+    # 3. Queue: one queued production runs to a draft through the worker (lock taken and released).
+    try:
+        q = JobQueue(work / "queue", job_root=work / "queue_jobs")
+        entry = q.add({"brief": "First cut", "inputs": [f"{k}={v}" for k, v in cams.items()], "profile": "interview_two_camera", "mode": "autonomous_first_cut", "options": {"model_dir": str(model_dir)}})
+        report = q.run_worker(max_jobs=1)
+        done = q.get(entry["queue_id"])
+        evidence["queue"] = {"status": done["status"], "job_status": done.get("job_status"), "ran": report["ran"], "lock_released": not q.lock_path.exists()}
+        if done["status"] != "completed" or q.lock_path.exists():
+            failures.append(f"queue worker: entry {done['status']} ({done.get('error')}), lock released={not q.lock_path.exists()}")
+    except Exception as exc:  # noqa: BLE001
+        failures.append(f"queue raised {type(exc).__name__}: {exc}")
+    # 4. Quality loop: extension hooks import in the bundle and assessed agents leave a log.
+    try:
+        ql.ensure_extensions_loaded()
+        assessed = {a: (r.get("quality_loop") or {}) for a, r in job.doc["agents"].items() if a in ql.ASSESSORS and r.get("status") == "completed"}
+        evidence["quality_loop"] = {
+            "assessors": sorted(ql.ASSESSORS),
+            "attempts": int(job.doc.get("quality_loop_attempts", 0)),
+            "per_agent": {a: {k: log.get(k) for k in ("metric", "initial_score", "final_score", "corrections_applied")} for a, log in assessed.items()},
+            "final_verification": sorted((job.doc.get("final_verification") or {}).keys()),
+        }
+        missing = [a for a, log in assessed.items() if log and log.get("final_score") is None]
+        if missing:
+            failures.append(f"quality loop left no score for {', '.join(missing)}")
+        if "final_verification" not in job.doc:
+            failures.append("job has no final verification record")
+    except Exception as exc:  # noqa: BLE001
+        failures.append(f"quality loop check raised {type(exc).__name__}: {exc}")
+    return evidence
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--output-dir", required=True, help="Small evidence files (JSON, summary) only")
@@ -214,6 +285,7 @@ def main() -> int:
         failures.append("MobileSAM installed but VFX segmentation used a fallback")
     if melt_ok is False:
         failures.append("draft project failed to render with melt")
+    result["v122"] = verify_v122_operations(job, cams, work, out, model_dir, failures)
     result["failures"] = failures
     result["passed"] = not failures
     (out / "department_verification.json").write_text(json.dumps(result, indent=2, default=str) + "\n", encoding="utf-8")

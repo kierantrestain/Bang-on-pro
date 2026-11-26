@@ -2,7 +2,7 @@
   "schema_version": "1.0",
   "profile_id": "interview_two_camera",
   "display_name": "Interview 2-Camera",
-  "description": "Two-camera sit-down interview (interviewer + subject) with optional independent lavalier recorder, slower pacing and -16 LUFS delivery.",
+  "description": "Long-form sit-down interview (subject and interviewer angles plus an optional wide): long holds on the subject, rare cutaways, pauses kept; -16 LUFS / -1.5 dBTP online delivery.",
   "format_type": "interview",
   "video_spec": {
     "width": 1920,
@@ -87,7 +87,8 @@
     "enable_compressor": true,
     "enable_mic_level_matching": true,
     "max_mic_trim_db": 24.0,
-    "music_duck_db": -18.0
+    "music_duck_db": -18.0,
+    "loudness_standard": "Online video (-16 LUFS integrated)"
   },
   "graphics_rules": {
     "enable_captions": true,
@@ -116,7 +117,7 @@
     "max_chars_per_line": 42,
     "uppercase": false,
     "burn_in": false,
-    "max_chars_per_sec": 20.0
+    "max_chars_per_sec": 17.0
   },
   "delivery_spec": {
     "container": "mp4",

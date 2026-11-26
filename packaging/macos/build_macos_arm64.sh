@@ -25,7 +25,7 @@ CRAFT_ROOT="${CRAFT_ROOT:-${HOME}/CraftRoot}"
 CRAFT_PREFIX=""
 APP_NAME="Bang On Pro"
 DMG_BASENAME="BangOnPro"
-APP_VERSION="${BANGONPRO_VERSION:-1.2.1}"
+APP_VERSION="${BANGONPRO_VERSION:-1.2.2}"
 MIN_MACOS="${MACOSX_DEPLOYMENT_TARGET:-13.0}"
 SIGN_IDENTITY="${APPLE_SIGNING_IDENTITY:-${MACOS_SIGNING_IDENTITY:-}}"
 NOTARY_PROFILE="${MACOS_NOTARY_PROFILE:-}"
@@ -73,7 +73,7 @@ Options:
   --output-dir <path>           Output directory for .app/.dmg/logs (default: ./dist/macos-arm64)
   --craft-root <path>           KDE Craft root or CraftMaster target prefix
                                 (auto-detects <root>/macos-arm-clang if present)
-  --version <ver>               Release version string (default: 1.2.1)
+  --version <ver>               Release version string (default: 1.2.2)
   --min-macos <ver>             MACOSX_DEPLOYMENT_TARGET (default: 13.0)
   --sign-identity <id>          Developer ID Application signing identity
                                 (omit to fall back cleanly to ad-hoc signing)

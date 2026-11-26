@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <QElapsedTimer>
 #include <QJsonObject>
 #include <QString>
 #include <QStringList>
@@ -19,9 +20,11 @@ class QListWidget;
 class QPlainTextEdit;
 class QProgressBar;
 class QPushButton;
+class QSpinBox;
 class QTimer;
 class QTreeWidget;
 class QTreeWidgetItem;
+class QVBoxLayout;
 
 namespace BangOnPro {
 
@@ -74,8 +77,37 @@ public:
     QString agentStatus(const QString &agentId) const;
     QString summaryText() const;
 
+    /** @brief V1.2.2: true when Start adds the production to the queue instead of running it now. */
+    bool queueSelected() const;
+    void setQueueSelected(bool queued);
+    /** @brief Render the output of the department `history` command ({"jobs": [...], "queue": [...]}). */
+    void loadHistory(const QJsonObject &historyPayload);
+    int historyCount() const;
+    /** @brief Adds a custom show profile (saved by the profile editor) to the profile list. */
+    void addCustomProfile(const QString &profileId, const QString &displayName);
+
+    /** @brief Timed editing session (measurement): reflect the state the integration confirmed. */
+    void setTimingActive(bool active, bool paused = false);
+    bool timingActive() const;
+    bool timingPaused() const;
+    /** @brief Deliverable name used for timing: episode title, else series, else the job id. */
+    QString timingDeliverable() const;
+    /**
+     * @brief Records editor activity for the open timing session (setup, editing, review, correction,
+     * approval). Emitted at most once per category change or heartbeat interval, never while paused.
+     */
+    void noteActivity(const QString &category);
+    void setActivityHeartbeatSec(int seconds);
+
 Q_SIGNALS:
     void startJobRequested(const QStringList &runArguments);
+    void queueJobRequested(const QStringList &runArguments);
+    void historyJobActivated(const QString &jobDir);
+    void queueEntryActionRequested(const QString &queueId, const QString &action);
+    void timingStartRequested(const QString &kind, const QString &deliverable);
+    void timingPauseToggled(bool paused);
+    void timingFinishRequested(int qualityRating);
+    void measurementActivity(const QString &category);
     void cancelJobRequested(const QString &jobDir);
     void resumeJobRequested(const QString &jobDir);
     void rerunAgentRequested(const QString &jobDir, const QString &agentId);
@@ -122,6 +154,28 @@ private:
     QString m_draftProject;
     QString m_lastStatusSeen;
     bool m_interrupted{false};
+
+    // V1.2.2: queue, history and timed sessions
+    void buildTimingRow(QVBoxLayout *root);
+    void updateTimingLabel();
+    QCheckBox *m_queueCheck{nullptr};
+    QLabel *m_historyTitle{nullptr};
+    QListWidget *m_historyList{nullptr};
+    QWidget *m_timingRow{nullptr};
+    QComboBox *m_timingKind{nullptr};
+    QPushButton *m_timingStartBtn{nullptr};
+    QLabel *m_timingLabel{nullptr};
+    QPushButton *m_timingPauseBtn{nullptr};
+    QSpinBox *m_timingRating{nullptr};
+    QPushButton *m_timingFinishBtn{nullptr};
+    QTimer *m_timingClock{nullptr};
+    QElapsedTimer m_timingElapsed;
+    qint64 m_timingAccumulatedMs{0};
+    bool m_timingActive{false};
+    bool m_timingPaused{false};
+    QString m_lastActivityCategory;
+    QElapsedTimer m_lastActivityAt;
+    int m_activityHeartbeatSec{30};
 };
 
 } // namespace BangOnPro

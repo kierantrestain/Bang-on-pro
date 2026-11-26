@@ -25,10 +25,12 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QListWidgetItem>
+#include <QMenu>
 #include <QPlainTextEdit>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QSizePolicy>
+#include <QSpinBox>
 #include <QSplitter>
 #include <QTimer>
 #include <QTreeWidget>
@@ -61,6 +63,55 @@ constexpr AgentRow kAgents[] = {
 };
 enum Col { ColAgent = 0, ColStatus, ColConfidence, ColOps, ColEngine, ColSummary };
 constexpr int kIdRole = Qt::UserRole + 1;
+constexpr int kJobDirRole = Qt::UserRole + 2;
+constexpr int kQueueIdRole = Qt::UserRole + 3;
+constexpr int kQueueStatusRole = Qt::UserRole + 4;
+
+QString minutesSeconds(double seconds)
+{
+    const int s = qMax(0, qRound(seconds));
+    return QStringLiteral("%1:%2").arg(s / 60).arg(s % 60, 2, 10, QLatin1Char('0'));
+}
+
+QString plainStatus(const QString &status)
+{
+    static const QHash<QString, QString> words = {
+        {QStringLiteral("queued"), QStringLiteral("Queued")},
+        {QStringLiteral("interrupted"), QStringLiteral("Interrupted · resumes next")},
+        {QStringLiteral("running"), QStringLiteral("Running")},
+        {QStringLiteral("completed"), QStringLiteral("Done")},
+        {QStringLiteral("needs_attention"), QStringLiteral("Needs attention")},
+        {QStringLiteral("failed"), QStringLiteral("Failed")},
+        {QStringLiteral("cancelled"), QStringLiteral("Cancelled")},
+        {QStringLiteral("draft_ready"), QStringLiteral("Draft ready")},
+        {QStringLiteral("awaiting_review"), QStringLiteral("Needs approval")},
+        {QStringLiteral("completed_with_errors"), QStringLiteral("Done with errors")},
+        {QStringLiteral("blocked_insufficient_storage"), QStringLiteral("Not enough space")},
+        {QStringLiteral("needs_clarification"), QStringLiteral("Needs a clearer brief")},
+        {QStringLiteral("planned_manual"), QStringLiteral("Planned")},
+    };
+    return words.value(status, QString(status).replace(QLatin1Char('_'), QLatin1Char(' ')));
+}
+
+TallyState historyTally(const QString &status)
+{
+    if (status == QLatin1String("running")) {
+        return TallyState::Running;
+    }
+    if (status == QLatin1String("failed") || status.startsWith(QLatin1String("blocked")) || status == QLatin1String("completed_with_errors")) {
+        return TallyState::Failed;
+    }
+    if (status == QLatin1String("draft_ready") || status == QLatin1String("completed")) {
+        return TallyState::Done;
+    }
+    if (status == QLatin1String("cancelled")) {
+        return TallyState::Skipped;
+    }
+    if (status == QLatin1String("queued") || status == QLatin1String("planned_manual")) {
+        return TallyState::Idle;
+    }
+    return TallyState::Review;
+}
 
 QString statusLabel(const QString &status, const QString &decision, bool stale)
 {
@@ -211,7 +262,11 @@ void AgentControlCentre::buildUi()
     m_budgetSpin->setDecimals(2);
     m_budgetSpin->setToolTip(tr("Spending limit for external models in this job. 0 keeps everything local."));
     budgetLabel->setBuddy(m_budgetSpin);
+    m_queueCheck = new QCheckBox(tr("Queue"), m_setupSection);
+    m_queueCheck->setObjectName(QStringLiteral("acc_queue"));
+    m_queueCheck->setToolTip(tr("Add to the production queue instead of starting now. Queued productions run one after another."));
     opts->addWidget(m_exportCheck);
+    opts->addWidget(m_queueCheck);
     opts->addStretch(1);
     opts->addWidget(budgetLabel);
     opts->addWidget(m_budgetSpin);
@@ -245,6 +300,7 @@ void AgentControlCentre::buildUi()
     runRow->addWidget(m_cancelBtn);
     runRow->addWidget(m_resumeBtn);
     root->addLayout(runRow);
+    buildTimingRow(root);
 
     // 3. Agents — tally, name (tick to enable for the next job), state, confidence, operations, engine, result.
     auto *split = new QSplitter(Qt::Vertical, this);
@@ -336,6 +392,19 @@ void AgentControlCentre::buildUi()
     draftRow->addWidget(m_openDraftBtn, 0, 1);
     draftRow->addWidget(m_promoteBtn, 1, 0, 1, 2);
     lowerLay->addLayout(draftRow);
+    // 5. Queue and history — compact list; double-click opens a job, right-click manages a queued one.
+    m_historyTitle = new QLabel(tr("Queue and history"), lower);
+    m_historyTitle->setObjectName(QStringLiteral("acc_history_title"));
+    setTextRole(m_historyTitle, "section");
+    m_historyList = new QListWidget(lower);
+    m_historyList->setObjectName(QStringLiteral("acc_history"));
+    m_historyList->setAccessibleName(tr("Production queue and recent jobs"));
+    m_historyList->setToolTip(tr("Double-click to open a production. Right-click a queued production to cancel or remove it."));
+    m_historyList->setContextMenuPolicy(Qt::CustomContextMenu);
+    m_historyList->setMaximumHeight(5 * M::kRowHeight + M::kSpace2);
+    m_historyList->setTextElideMode(Qt::ElideRight);
+    lowerLay->addWidget(m_historyTitle);
+    lowerLay->addWidget(m_historyList);
     split->addWidget(m_agentTree);
     split->addWidget(lower);
     split->setStretchFactor(0, 3);
@@ -357,7 +426,68 @@ void AgentControlCentre::buildUi()
         m_newJobBtn->setVisible(false);
         m_modeCombo->setFocus();
     });
-    connect(m_startBtn, &QPushButton::clicked, this, [this]() { Q_EMIT startJobRequested(buildRunArguments({})); });
+    connect(m_startBtn, &QPushButton::clicked, this, [this]() {
+        noteActivity(QStringLiteral("setup"));
+        if (queueSelected()) {
+            Q_EMIT queueJobRequested(buildRunArguments({}));
+        } else {
+            Q_EMIT startJobRequested(buildRunArguments({}));
+        }
+    });
+    connect(m_queueCheck, &QCheckBox::toggled, this, [this](bool queued) {
+        m_startBtn->setText(queued ? tr("Add to queue") : tr("Start production"));
+        updateActionStates();
+    });
+    // Timed sessions: configuring is setup, inspecting is review, rejecting or rerunning is correction,
+    // saving the approved draft is approval (editing elsewhere in the editor is reported by the integration).
+    const auto setupActivity = [this]() { noteActivity(QStringLiteral("setup")); };
+    connect(m_modeCombo, QOverload<int>::of(&QComboBox::activated), this, setupActivity);
+    connect(m_profileCombo, QOverload<int>::of(&QComboBox::activated), this, setupActivity);
+    connect(m_seriesEdit, &QLineEdit::textEdited, this, setupActivity);
+    connect(m_episodeEdit, &QLineEdit::textEdited, this, setupActivity);
+    connect(m_briefEdit, &QPlainTextEdit::textChanged, this, [this]() {
+        if (m_briefEdit->hasFocus()) {
+            noteActivity(QStringLiteral("setup"));
+        }
+    });
+    connect(m_agentTree, &QTreeWidget::itemClicked, this, [this]() { noteActivity(m_jobDir.isEmpty() ? QStringLiteral("setup") : QStringLiteral("review")); });
+    connect(m_reviewList, &QListWidget::itemClicked, this, [this](QListWidgetItem *item) {
+        noteActivity(QStringLiteral("review"));
+        if (item) {
+            selectAgent(item->data(kIdRole).toString());
+        }
+    });
+    connect(m_acceptBtn, &QPushButton::clicked, this, [this]() { noteActivity(QStringLiteral("review")); });
+    connect(m_rejectBtn, &QPushButton::clicked, this, [this]() { noteActivity(QStringLiteral("correction")); });
+    connect(m_rerunBtn, &QPushButton::clicked, this, [this]() { noteActivity(QStringLiteral("correction")); });
+    connect(m_reviewBtn, &QPushButton::clicked, this, [this]() { noteActivity(QStringLiteral("review")); });
+    connect(m_openDraftBtn, &QPushButton::clicked, this, [this]() { noteActivity(QStringLiteral("review")); });
+    connect(m_promoteBtn, &QPushButton::clicked, this, [this]() { noteActivity(QStringLiteral("approval")); });
+    connect(m_historyList, &QListWidget::itemActivated, this, [this](QListWidgetItem *item) {
+        const QString dir = item ? item->data(kJobDirRole).toString() : QString();
+        if (!dir.isEmpty() && QFileInfo::exists(QDir(dir).filePath(QStringLiteral("job.json")))) {
+            Q_EMIT historyJobActivated(dir);
+        }
+    });
+    connect(m_historyList, &QListWidget::customContextMenuRequested, this, [this](const QPoint &pos) {
+        QListWidgetItem *item = m_historyList->itemAt(pos);
+        const QString queueId = item ? item->data(kQueueIdRole).toString() : QString();
+        if (queueId.isEmpty()) {
+            return;
+        }
+        const QString status = item->data(kQueueStatusRole).toString();
+        QMenu menu(this);
+        QAction *cancel = menu.addAction(tr("Cancel"));
+        cancel->setEnabled(status == QLatin1String("queued") || status == QLatin1String("interrupted") || status == QLatin1String("running"));
+        QAction *remove = menu.addAction(tr("Remove from list"));
+        remove->setEnabled(status != QLatin1String("running"));
+        QAction *chosen = menu.exec(m_historyList->viewport()->mapToGlobal(pos));
+        if (chosen == cancel) {
+            Q_EMIT queueEntryActionRequested(queueId, QStringLiteral("cancel"));
+        } else if (chosen == remove) {
+            Q_EMIT queueEntryActionRequested(queueId, QStringLiteral("remove"));
+        }
+    });
     connect(m_cancelBtn, &QPushButton::clicked, this, [this]() {
         if (!m_jobDir.isEmpty()) {
             Q_EMIT cancelJobRequested(m_jobDir);
@@ -399,6 +529,195 @@ void AgentControlCentre::buildUi()
         }
     });
     connect(m_agentTree, &QTreeWidget::itemSelectionChanged, this, &AgentControlCentre::updateActionStates);
+}
+
+void AgentControlCentre::buildTimingRow(QVBoxLayout *root)
+{
+    using M = StudioMetrics;
+    // Timed editing session for the 60-85 % measurement: one quiet control until a session is open.
+    m_timingRow = new QWidget(this);
+    m_timingRow->setObjectName(QStringLiteral("acc_timing"));
+    auto *row = new QHBoxLayout(m_timingRow);
+    row->setContentsMargins(0, 0, 0, 0);
+    row->setSpacing(M::kSpace2);
+    m_timingKind = new QComboBox(m_timingRow);
+    m_timingKind->setObjectName(QStringLiteral("acc_timing_kind"));
+    m_timingKind->addItem(tr("Agent-assisted"), QStringLiteral("agent_assisted"));
+    m_timingKind->addItem(tr("Manual baseline"), QStringLiteral("manual_baseline"));
+    m_timingKind->setToolTip(tr("Manual baseline: you edit this deliverable without the agents. Agent-assisted: you review and finish the agents' draft."));
+    m_timingStartBtn = new QPushButton(tr("Start timing"), m_timingRow);
+    m_timingStartBtn->setObjectName(QStringLiteral("acc_timing_start"));
+    m_timingStartBtn->setToolTip(tr("Time your work on this deliverable. Machine processing is recorded separately."));
+    setRole(m_timingStartBtn, "quiet");
+    m_timingLabel = new QLabel(m_timingRow);
+    m_timingLabel->setObjectName(QStringLiteral("acc_timing_label"));
+    setTextRole(m_timingLabel, "meta");
+    m_timingPauseBtn = new QPushButton(tr("Pause"), m_timingRow);
+    m_timingPauseBtn->setObjectName(QStringLiteral("acc_timing_pause"));
+    setRole(m_timingPauseBtn, "quiet");
+    m_timingRating = new QSpinBox(m_timingRow);
+    m_timingRating->setObjectName(QStringLiteral("acc_timing_rating"));
+    m_timingRating->setRange(1, 5);
+    m_timingRating->setValue(4);
+    m_timingRating->setPrefix(tr("Quality "));
+    m_timingRating->setToolTip(tr("Your quality rating for the finished deliverable, 1 to 5"));
+    m_timingFinishBtn = new QPushButton(tr("Finish"), m_timingRow);
+    m_timingFinishBtn->setObjectName(QStringLiteral("acc_timing_finish"));
+    m_timingFinishBtn->setToolTip(tr("Stop timing and save the session with your quality rating"));
+    row->addWidget(m_timingKind);
+    row->addWidget(m_timingStartBtn);
+    row->addWidget(m_timingLabel, 1);
+    row->addWidget(m_timingPauseBtn);
+    row->addWidget(m_timingRating);
+    row->addWidget(m_timingFinishBtn);
+    root->addWidget(m_timingRow);
+    m_timingClock = new QTimer(this);
+    m_timingClock->setInterval(1000);
+    connect(m_timingClock, &QTimer::timeout, this, &AgentControlCentre::updateTimingLabel);
+    connect(m_timingStartBtn, &QPushButton::clicked, this, [this]() { Q_EMIT timingStartRequested(m_timingKind->currentData().toString(), timingDeliverable()); });
+    connect(m_timingPauseBtn, &QPushButton::clicked, this, [this]() { Q_EMIT timingPauseToggled(!m_timingPaused); });
+    connect(m_timingFinishBtn, &QPushButton::clicked, this, [this]() { Q_EMIT timingFinishRequested(m_timingRating->value()); });
+    setTimingActive(false);
+}
+
+void AgentControlCentre::setTimingActive(bool active, bool paused)
+{
+    if (active && !m_timingActive) {
+        m_timingAccumulatedMs = 0;
+        m_lastActivityCategory.clear();
+    }
+    if (m_timingActive && !m_timingPaused && m_timingElapsed.isValid()) {
+        m_timingAccumulatedMs += m_timingElapsed.elapsed();
+    }
+    m_timingActive = active;
+    m_timingPaused = active && paused;
+    if (m_timingActive && !m_timingPaused) {
+        m_timingElapsed.start();
+        m_timingClock->start();
+    } else {
+        m_timingElapsed.invalidate();
+        m_timingClock->stop();
+    }
+    m_timingKind->setVisible(!active);
+    m_timingStartBtn->setVisible(!active);
+    m_timingLabel->setVisible(active);
+    m_timingPauseBtn->setVisible(active);
+    m_timingRating->setVisible(active);
+    m_timingFinishBtn->setVisible(active);
+    m_timingPauseBtn->setText(m_timingPaused ? tr("Resume") : tr("Pause"));
+    updateTimingLabel();
+}
+
+void AgentControlCentre::updateTimingLabel()
+{
+    const qint64 ms = m_timingAccumulatedMs + (m_timingElapsed.isValid() ? m_timingElapsed.elapsed() : 0);
+    const QString kind = m_timingKind->currentData().toString() == QLatin1String("manual_baseline") ? tr("manual") : tr("assisted");
+    m_timingLabel->setText(m_timingPaused ? tr("Paused · %1 · %2").arg(kind, minutesSeconds(ms / 1000.0)) : tr("Timing · %1 · %2").arg(kind, minutesSeconds(ms / 1000.0)));
+}
+
+bool AgentControlCentre::timingActive() const
+{
+    return m_timingActive;
+}
+
+bool AgentControlCentre::timingPaused() const
+{
+    return m_timingPaused;
+}
+
+QString AgentControlCentre::timingDeliverable() const
+{
+    const QString episode = m_episodeEdit->text().trimmed();
+    const QString series = m_seriesEdit->text().trimmed();
+    if (!episode.isEmpty()) {
+        return series.isEmpty() ? episode : series + QStringLiteral(" · ") + episode;
+    }
+    if (!series.isEmpty()) {
+        return series;
+    }
+    return m_jobMetaLabel->text() == tr("No job") ? QString() : m_jobMetaLabel->text();
+}
+
+void AgentControlCentre::setActivityHeartbeatSec(int seconds)
+{
+    m_activityHeartbeatSec = qMax(0, seconds);
+}
+
+void AgentControlCentre::noteActivity(const QString &category)
+{
+    if (!m_timingActive || m_timingPaused) {
+        return;
+    }
+    const bool due = !m_lastActivityAt.isValid() || m_lastActivityAt.elapsed() >= qint64(m_activityHeartbeatSec) * 1000;
+    if (category == m_lastActivityCategory && !due) {
+        return;
+    }
+    m_lastActivityCategory = category;
+    m_lastActivityAt.start();
+    Q_EMIT measurementActivity(category);
+}
+
+bool AgentControlCentre::queueSelected() const
+{
+    return m_queueCheck->isChecked();
+}
+
+void AgentControlCentre::setQueueSelected(bool queued)
+{
+    m_queueCheck->setChecked(queued);
+}
+
+void AgentControlCentre::addCustomProfile(const QString &profileId, const QString &displayName)
+{
+    if (profileId.isEmpty() || m_profileCombo->findData(profileId) >= 0) {
+        return;
+    }
+    m_profileCombo->addItem(displayName.isEmpty() ? profileId : displayName, profileId);
+}
+
+void AgentControlCentre::loadHistory(const QJsonObject &payload)
+{
+    m_historyList->clear();
+    QStringList shownDirs;
+    // Active queue entries first (waiting, interrupted or running), then the most recent jobs.
+    for (const QJsonValue &v : payload.value(QStringLiteral("queue")).toArray()) {
+        const QJsonObject e = v.toObject();
+        const QString status = e.value(QStringLiteral("status")).toString();
+        if (status != QLatin1String("queued") && status != QLatin1String("interrupted") && status != QLatin1String("running")) {
+            continue;
+        }
+        auto *row = new QListWidgetItem(tallyIcon(historyTally(status)),
+                                        QStringLiteral("%1 · %2").arg(e.value(QStringLiteral("label")).toString(), plainStatus(status)), m_historyList);
+        row->setData(kQueueIdRole, e.value(QStringLiteral("queue_id")).toString());
+        row->setData(kQueueStatusRole, status);
+        row->setData(kJobDirRole, e.value(QStringLiteral("job_dir")).toString());
+        row->setToolTip(QStringLiteral("%1 · priority %2").arg(e.value(QStringLiteral("job_id")).toString()).arg(e.value(QStringLiteral("priority")).toInt()));
+        shownDirs << e.value(QStringLiteral("job_dir")).toString();
+    }
+    for (const QJsonValue &v : payload.value(QStringLiteral("jobs")).toArray()) {
+        const QJsonObject j = v.toObject();
+        const QString dir = j.value(QStringLiteral("job_dir")).toString();
+        if (shownDirs.contains(dir)) {
+            continue;
+        }
+        const QString status = j.value(QStringLiteral("status")).toString();
+        QString label = j.value(QStringLiteral("episode_title")).toString();
+        if (label.isEmpty()) {
+            label = j.value(QStringLiteral("job_id")).toString();
+        }
+        auto *row = new QListWidgetItem(tallyIcon(historyTally(status)), QStringLiteral("%1 · %2").arg(label, plainStatus(status)), m_historyList);
+        row->setData(kJobDirRole, dir);
+        const QJsonValue machine = j.value(QStringLiteral("processing_elapsed_sec"));
+        row->setToolTip(QStringLiteral("%1 · %2 · machine %3")
+                            .arg(j.value(QStringLiteral("job_id")).toString(), j.value(QStringLiteral("profile_id")).toString(),
+                                 machine.isDouble() ? minutesSeconds(machine.toDouble()) : tr("not recorded")));
+    }
+    m_historyTitle->setText(m_historyList->count() > 0 ? tr("Queue and history · %1").arg(m_historyList->count()) : tr("Queue and history"));
+}
+
+int AgentControlCentre::historyCount() const
+{
+    return m_historyList->count();
 }
 
 QStringList AgentControlCentre::buildRunArguments(const QStringList &inputs) const
@@ -558,9 +877,20 @@ void AgentControlCentre::loadJobStatus(const QJsonObject &doc)
             row->setData(kIdRole, it->data(ColAgent, kIdRole));
         }
         if (!err.isEmpty()) {
-            auto *row = new QListWidgetItem(tallyIcon(TallyState::Failed), QStringLiteral("%1 · %2").arg(it->text(ColAgent), err), m_reviewList);
+            // V1.2.2: say what to do, in plain words; the raw error stays in the tooltip.
+            const QJsonObject help = a.value(QStringLiteral("help")).toObject();
+            const QString text = help.isEmpty() ? err : QStringLiteral("%1. %2").arg(help.value(QStringLiteral("title")).toString(), help.value(QStringLiteral("fix")).toString());
+            auto *row = new QListWidgetItem(tallyIcon(TallyState::Failed), QStringLiteral("%1 · %2").arg(it->text(ColAgent), text), m_reviewList);
             row->setData(kIdRole, it->data(ColAgent, kIdRole));
+            row->setToolTip(err);
         }
+    }
+    const QJsonObject jobHelp = doc.value(QStringLiteral("error_help")).toObject();
+    if (!jobHelp.isEmpty()) {
+        auto *row = new QListWidgetItem(tallyIcon(TallyState::Failed),
+                                        QStringLiteral("%1. %2").arg(jobHelp.value(QStringLiteral("title")).toString(), jobHelp.value(QStringLiteral("fix")).toString()),
+                                        m_reviewList);
+        row->setToolTip(doc.value(QStringLiteral("error")).toString());
     }
     m_reviewTitle->setText(m_reviewList->count() > 0 ? tr("Review · %1").arg(m_reviewList->count()) : tr("Review"));
     m_progress->setValue(qRound(doc.value(QStringLiteral("progress")).toDouble() * 100.0));
@@ -568,10 +898,13 @@ void AgentControlCentre::loadJobStatus(const QJsonObject &doc)
     const double cost = doc.value(QStringLiteral("budget")).toObject().value(QStringLiteral("spent_usd")).toDouble();
     m_jobMetaLabel->setText(doc.value(QStringLiteral("job_id")).toString());
     if (m_jobStatus != QLatin1String("running")) {
-        m_statusLabel->setText(tr("%1 · %2 of %3 agents · external $%4")
+        // Machine time is shown on its own; it is never counted as editor time.
+        const QJsonValue machine = doc.value(QStringLiteral("processing_elapsed_sec"));
+        m_statusLabel->setText(tr("%1 · %2 of %3 agents · machine %4 · external $%5")
                                    .arg(QString(m_jobStatus).replace(QLatin1Char('_'), QLatin1Char(' ')))
                                    .arg(done)
                                    .arg(active)
+                                   .arg(machine.isDouble() ? minutesSeconds(machine.toDouble()) : tr("–"))
                                    .arg(cost, 0, 'f', 2));
     }
     updateActionStates();
@@ -667,7 +1000,8 @@ void AgentControlCentre::updateActionStates()
     m_rerunBtn->setEnabled(hasJob && !running && hasAgent);
     m_acceptBtn->setEnabled(hasJob && !running && hasAgent);
     m_rejectBtn->setEnabled(hasJob && !running && hasAgent);
-    m_startBtn->setEnabled(!running);
+    // Queueing is allowed while a production runs; starting another one is not.
+    m_startBtn->setEnabled(!running || m_queueCheck->isChecked());
     const bool draft = hasJob && !running && !m_draftProject.isEmpty();
     m_reviewBtn->setEnabled(draft);
     m_openDraftBtn->setEnabled(draft && QFileInfo::exists(m_draftProject));

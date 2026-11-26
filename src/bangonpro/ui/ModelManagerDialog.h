@@ -12,6 +12,8 @@
 #include <QStringList>
 
 class QLabel;
+class QLineEdit;
+class QListWidget;
 class QProcess;
 class QProgressBar;
 class QPushButton;
@@ -96,6 +98,61 @@ private:
 
     QPointer<QProcess> m_activeProcess;
     bool m_busy = false;
+};
+
+/**
+ * @brief V1.2.2 first-launch and on-demand System check (with cache maintenance).
+ *
+ * Renders the department `readiness` report: every check in plain words with a
+ * tally lamp and, when something needs doing, the fix. Lets the editor choose the
+ * folder for productions and the cache (an external SSD works), open the Model
+ * Manager, prune or clear the analysis cache, export diagnostics and run the check
+ * again. The dialog only displays and asks; the integration runs the checks.
+ * Kept beside the Model Manager it opens so both share one translation unit.
+ */
+class SystemCheckDialog : public QDialog
+{
+    Q_OBJECT
+
+public:
+    explicit SystemCheckDialog(QWidget *parent = nullptr);
+
+    /** @brief Show a readiness report (`python -m bangonpro.ai_engine.department readiness`). */
+    bool loadReport(const QJsonObject &report);
+    /** @brief "ready", "attention", "blocked" or empty before the first report. */
+    QString overallStatus() const;
+    int itemCount() const;
+    /** @brief Row text of one check by id (e.g. "tool_ffmpeg"), or empty. */
+    QString itemText(const QString &itemId) const;
+    void setStorageFolder(const QString &folder);
+    QString storageFolder() const;
+    void setBusy(bool busy, const QString &text = QString());
+    /** @brief Trigger the fix named by a report item's fix_action (also on double-click). */
+    void triggerFixAction(const QString &fixAction);
+
+Q_SIGNALS:
+    void recheckRequested();
+    void modelManagerRequested();
+    void storageFolderChosen(const QString &folder);
+    void cacheActionRequested(const QString &action);
+    void exportDiagnosticsRequested();
+
+private:
+    void chooseFolder();
+    void updatePrimary();
+
+    QLabel *m_overallLabel = nullptr;
+    QListWidget *m_items = nullptr;
+    QLineEdit *m_folderEdit = nullptr;
+    QPushButton *m_folderBtn = nullptr;
+    QLabel *m_cacheLabel = nullptr;
+    QPushButton *m_pruneBtn = nullptr;
+    QPushButton *m_clearBtn = nullptr;
+    QPushButton *m_modelsBtn = nullptr;
+    QPushButton *m_diagnosticsBtn = nullptr;
+    QPushButton *m_recheckBtn = nullptr;
+    QPushButton *m_doneBtn = nullptr;
+    QString m_overall;
 };
 
 } // namespace BangOnPro

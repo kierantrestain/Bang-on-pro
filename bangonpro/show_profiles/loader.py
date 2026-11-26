@@ -24,6 +24,22 @@ def get_profiles_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
+def default_custom_profiles_dir() -> Path:
+    """Where editors' custom profiles live (``$BANGONPRO_PROFILES_DIR`` overrides)."""
+    import os
+
+    env = os.environ.get("BANGONPRO_PROFILES_DIR")
+    if env:
+        return Path(env).expanduser().resolve()
+    return (Path.home() / ".local" / "share" / "bangonpro" / "profiles").resolve()
+
+
+def user_profile_dirs() -> list[Path]:
+    """Custom profile folders searched after the built-in profiles (only existing ones)."""
+    d = default_custom_profiles_dir()
+    return [d] if d.is_dir() else []
+
+
 def get_show_profile_schema_path() -> Path:
     """Return path to ``bangonpro/schemas/show_profile_v1.schema.json``."""
     return Path(__file__).resolve().parent.parent / "schemas" / "show_profile_v1.schema.json"
@@ -653,7 +669,8 @@ def save_custom_profile(profile: dict[str, Any], dest_path: str | Path) -> Path:
     """Validate a custom Show Profile strictly against schema and write it to disk."""
     validated = validate_show_profile(profile)
     target = Path(dest_path).expanduser()
-    if target.is_dir():
+    # A folder that does not exist yet (no .json suffix) is a folder, not a file name.
+    if target.is_dir() or (not target.exists() and target.suffix.lower() != ".json"):
         target = target / f"{validated['profile_id']}.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(validated, indent=2) + "\n", encoding="utf-8")
