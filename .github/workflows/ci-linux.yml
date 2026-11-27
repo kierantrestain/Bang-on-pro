@@ -104,6 +104,59 @@ jobs:
           path: reports/qa/
           retention-days: 14
 
+  longform-youtube-journey:
+    name: V1.7 Long-Form YouTube Production Journey (10 min, 3 cameras, ASR, melt export)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install MLT, FFmpeg, frei0r, espeak-ng & Xvfb tooling
+        run: |
+          APT_OPTS=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::ForceIPv4=true)
+          sudo apt-get "${APT_OPTS[@]}" update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get "${APT_OPTS[@]}" install -y --no-install-recommends \
+            melt \
+            ffmpeg \
+            frei0r-plugins \
+            espeak-ng \
+            xvfb
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-bangonpro.lock
+
+      - name: Install locked Bang On Pro Python dependencies + faster-whisper (bundled tier1 ASR runtime)
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -r requirements-bangonpro.lock "faster-whisper>=1.0.3,<2.0.0"
+
+      - name: Run long-form editing, captions, revision & export journey
+        run: |
+          mkdir -p reports/longform
+          SDL_AUDIODRIVER=dummy \
+          QT_QPA_PLATFORM=offscreen \
+          BANGONPRO_CACHE_DIR="${RUNNER_TEMP}/bop_longform_cache" \
+          BANGONPRO_PREFS_DIR="${RUNNER_TEMP}/bop_longform_prefs" \
+            python3 tests/bangonpro/run_v17_longform.py \
+            --install-asr \
+            --output reports/longform/longform_journey.json \
+            --work-dir "${RUNNER_TEMP}/bop_longform_work" \
+            --model-dir "${RUNNER_TEMP}/bop_longform_models"
+
+      - name: Upload long-form journey evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bangonpro-linux-longform-journey
+          path: reports/longform/
+          retention-days: 30
+          if-no-files-found: warn
+
   cpp-build-and-ctest:
     name: Linux C++ Build (Qt5/KF5/MLT) + CTest + Full Suite
     runs-on: ubuntu-24.04
