@@ -476,6 +476,31 @@ def main(argv: list[str] | None = None) -> int:
         failures.append(f"speech on correct camera {ev['speech_on_correct_camera_pct']}% < 80%")
     if ev["qc_errors"]:
         failures.append(f"{ev['qc_errors']} QC errors in the draft")
+    # Diagnostics an editor would need (and CI logs show): QC errors by code, the speech evidence that
+    # kept any dead air, and the sync model. The footage has no recording interruptions, so any
+    # per-camera sync segment is a false stop/restart that maps shots to the wrong source time.
+    st_json = json.loads((job.dir / "draft" / "analysis_state.json").read_text(encoding="utf-8"))
+    qc_err = [i for i in st_json["qc_report"]["issues"] if i["severity"] == "error"]
+    codes: dict[str, int] = {}
+    for i in qc_err:
+        codes[i.get("code", "?")] = codes.get(i.get("code", "?"), 0) + 1
+    sr = st_json.get("sync_result") or {}
+    segs = {c: len(v) for c, v in (sr.get("segment_offsets") or {}).items() if v}
+    left = [d for d in ev["dead_air"] if not d["ok"]]
+    why = []
+    for d in left[:6]:
+        a0, b0 = d["span"]
+        segs_in = [{"start": round(t["start_sec"], 2), "end": round(t["end_sec"], 2), "speaker": t.get("speaker_id"), "text": (t.get("text") or "")[:60],
+                    "words_in_gap": [(w.get("word"), round(float(w["start_sec"]), 2), round(float(w["end_sec"]), 2)) for w in (t.get("words") or [])
+                                     if float(w["end_sec"]) > a0 and float(w["start_sec"]) < b0][:6]}
+                   for t in st_json.get("transcript_segments", []) if t["end_sec"] > a0 and t["start_sec"] < b0]
+        acts = [(round(float(x["start_sec"]), 2), round(float(x["end_sec"]), 2), x.get("kind")) for x in (st_json.get("metadata", {}).get("nonspeech_activity") or [])
+                if float(x["end_sec"]) > a0 and float(x["start_sec"]) < b0]
+        why.append({"span": d["span"], "remaining_sec": d["remaining_sec"], "transcript": segs_in, "nonspeech_activity": acts})
+    result["diagnostics"] = {"qc_errors_by_code": codes, "qc_error_samples": [i.get("message") for i in qc_err[:5]], "sync_segments": segs,
+                             "sync_offsets_sec": sr.get("offsets_sec"), "dead_air_left": why}
+    if segs:
+        failures.append(f"false sync segments (no recording interruption in the footage): {segs}")
 
     shots = shot_rows(job)
     program_sec = shots[-1]["timeline_out_sec"] if shots else 0.0
@@ -555,7 +580,7 @@ def main(argv: list[str] | None = None) -> int:
     out.write_text(json.dumps(result, indent=2, default=str) + "\n", encoding="utf-8")
     summary = {k: result[k] for k in ("ok", "failures")} | {"production_sec": result["production"]["wall_sec"], "export": {k: result["export"][k] for k in ("duration_sec", "render_sec", "markers")},
                                                          "editorial_fixes": ev["corrective_fixes_needed"], "fixes_by_type": ev["fixes_by_type"], "captions": {k: caps.get(k) for k in ("present", "cues", "cue_time_in_speech_pct", "script_word_match_pct", "asr_neural")},
-                                                         "memory": result["memory"]}
+                                                         "memory": result["memory"], "diagnostics": result.get("diagnostics")}
     print(json.dumps(summary, indent=2, default=str))
     return 0 if result["ok"] else 1
 

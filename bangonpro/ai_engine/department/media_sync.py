@@ -512,10 +512,70 @@ def estimate_drift_for_target(
     return fit_target(camera_id, meas, ref_env, tgt_env, p), tgt_env
 
 
+def _span_match(mr: np.ndarray, mt: np.ndarray, env_rate: float, t0: float, t1: float, model: tuple[float, float], win_sec: float = 2.0, max_windows: int = 24) -> float:
+    """Mean modulation correlation of master span [t0, t1] against the target under ``model`` (offset, slope)."""
+    a, b = model
+    win = max(4, round(win_sec * env_rate))
+    starts = np.linspace(t0, max(t0, t1 - win_sec), num=max(1, min(max_windows, int((t1 - t0) / win_sec) or 1)))
+    vals = []
+    for ts in starts:
+        i0, j0 = round(ts * env_rate), round((ts + a + b * ts) * env_rate)
+        if i0 < 0 or j0 < 0 or i0 + win > mr.size or j0 + win > mt.size:
+            continue
+        x, y = mr[i0 : i0 + win], mt[j0 : j0 + win]
+        xs, ys = x - x.mean(), y - y.mean()
+        den = float(np.sqrt(np.sum(xs * xs) * np.sum(ys * ys)))
+        if den > 1e-12:
+            vals.append(float(np.sum(xs * ys) / den))
+    return float(np.mean(vals)) if vals else 0.0
+
+
+def _spurious_segments(meas: list[WindowMeasurement], a: np.ndarray, b: float, lab: np.ndarray, inl: np.ndarray,
+                       ref_env: np.ndarray, tgt_env: np.ndarray, env_rate: float) -> set[int]:
+    """Segments that are aliases of repeated content rather than a real stop/restart of the device.
+
+    A segment is spurious when it would play the file backwards relative to the segment before it
+    (impossible for one continuous file), or when the previous segment's alignment explains its span
+    at least 90% as well as its own alignment: the device never stopped, the content repeats (a sting,
+    a jingle, a recurring phrase). A real restart misaligns the previous model, whose match collapses.
+    """
+    n = int(lab.max()) + 1 if lab.size else 0
+    if n < 2:
+        return set()
+    mr, mt = _modulation(ref_env, env_rate), _modulation(tgt_env, env_rate)
+    dur = mt.size / env_rate
+    spans = []
+    for s in range(n):
+        ts = [meas[int(i)].master_sec for i, ss in zip(inl, lab, strict=True) if int(ss) == s]
+        spans.append((min(ts), max(ts)))
+    order = sorted(range(n), key=lambda s: spans[s][0])
+    keep, drop = order[0], set()
+    for s in order[1:]:
+        t0, t1 = spans[s]
+        prev_end_src = spans[keep][1] + a[keep] + b * spans[keep][1]
+        backwards = t0 + a[s] + b * t0 < prev_end_src - 0.5
+        c0, c1 = t0 + a[keep] + b * t0, t1 + a[keep] + b * t1
+        cont = _span_match(mr, mt, env_rate, t0, t1, (float(a[keep]), b)) if (c0 >= 0.0 and c1 <= dur) else 0.0
+        own = _span_match(mr, mt, env_rate, t0, t1, (float(a[s]), b))
+        if backwards or (own > 0.0 and cont >= 0.9 * own):
+            drop.add(s)
+        else:
+            keep = s
+    return drop
+
+
 def fit_target(camera_id: str, meas: list[WindowMeasurement], ref_env: np.ndarray, tgt_env: np.ndarray, p: SyncParams) -> DriftFit:
     """Cheap stage: thresholds, robust regression, segments and breakpoints from cached measurements."""
     meas = classify_windows(meas, p)
     a, b, lab, b_se, inl = fit_drift_and_segments(meas, p)
+    for _ in range(4):
+        spurious = _spurious_segments(meas, a, b, lab, inl, ref_env, tgt_env, p.env_rate_hz)
+        if not spurious:
+            break
+        for i, s in zip(inl, lab, strict=True):
+            if int(s) in spurious:
+                meas[int(i)].status = "outlier"
+        a, b, lab, b_se, inl = fit_drift_and_segments(meas, p)
     fit = DriftFit(camera_id=camera_id, offset_sec=0.0, drift_ppm=0.0, drift_ppm_stderr=0.0, n_windows=len(meas))
     if inl.size == 0:
         fit.review.append(f"{camera_id}: no window aligned with confidence; sync could not be measured across the recording")
