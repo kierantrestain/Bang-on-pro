@@ -49,7 +49,7 @@ jobs:
   build-macos-arm64:
     name: Build & Package BangOnPro-arm64.dmg (macos-15)
     runs-on: macos-15
-    timeout-minutes: 90
+    timeout-minutes: 150
     env:
       CRAFT_ROOT: ${{ github.workspace }}/CraftRoot
       CRAFT_TARGET: macos-arm-clang
