@@ -506,6 +506,16 @@ relocate_macho_deps() {
             local dep
             while IFS= read -r dep; do
                 [[ -n "${dep}" ]] || continue
+                # A dependency referenced by its absolute build-time path inside this bundle (pip-built
+                # extensions link sibling libraries this way) becomes @loader_path-relative.
+                if [[ "${dep}" == "${app_bundle}/"* ]]; then
+                    if [[ -e "${dep}" ]]; then
+                        install_name_tool -change "${dep}" "@loader_path/$(bangonpro_relpath "$(dirname "${target}")" "${dep}")" "${target}" 2>/dev/null || true
+                    else
+                        warn "In-bundle dependency '${dep}' referenced by '${target}' does not exist"
+                    fi
+                    continue
+                fi
                 # Skip macOS system libraries and relative loader/executable paths
                 case "${dep}" in
                     /System/Library/*|/usr/lib/*|@executable_path/*|@loader_path/*)
@@ -537,7 +547,12 @@ relocate_macho_deps() {
                             fi
                         done
                         if [[ -n "${fw_cand}" ]]; then
-                            cp -R "${fw_cand}" "${frameworks_dir}/${fw_bundle_name}"
+                            if bangonpro_framework_needs_minimal_copy "${fw_bundle_name}"; then
+                                bangonpro_bundle_minimal_framework "${fw_cand}" "${frameworks_dir}/${fw_bundle_name}" "${rpath_rel}" || \
+                                    die "Unable to bundle ${fw_bundle_name} (linked as ${dep}) as a minimal framework."
+                            else
+                                cp -R "${fw_cand}" "${frameworks_dir}/${fw_bundle_name}"
+                            fi
                             chmod -R u+w "${frameworks_dir}/${fw_bundle_name}" 2>/dev/null || true
                             if [[ -f "${frameworks_dir}/${rpath_rel}" ]]; then
                                 install_name_tool -id "@rpath/${rpath_rel}" "${frameworks_dir}/${rpath_rel}" 2>/dev/null || true
@@ -615,7 +630,7 @@ relocate_macho_deps() {
                 fi
 
                 install_name_tool -change "${dep}" "@rpath/${dep_base}" "${target}" 2>/dev/null || true
-            done < <(otool -L "${target}" 2>/dev/null | tail -n +2 | awk '{print $1}')
+            done < <(otool -L "${target}" 2>/dev/null | bangonpro_otool_deps_from_text)
         done < "${queue_file}"
 
         mv -f "${next_queue}" "${queue_file}"
@@ -1126,7 +1141,7 @@ audit_no_leaked_dylib_paths() {
         fi
 
         local bad_deps
-        bad_deps="$(printf '%s\n' "${otool_l_out}" | tail -n +2 | awk '{print $1}' | grep -E "${leak_regex}" || true)"
+        bad_deps="$(printf '%s\n' "${otool_l_out}" | bangonpro_otool_deps_from_text | grep -E "${leak_regex}" || true)"
         if [[ -n "${bad_deps}" ]]; then
             printf 'LEAKED DYLIB PATH in %s:\n%s\n' "${bin}" "${bad_deps}"
             leaked=1

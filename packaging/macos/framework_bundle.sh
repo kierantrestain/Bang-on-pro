@@ -58,3 +58,35 @@ EOF
     ln -sfn "Versions/Current/${bin_name}" "${dest}/${bin_name}"
     ln -sfn "Versions/Current/Resources" "${dest}/Resources"
 }
+
+# bangonpro_otool_deps_from_text
+# Reads `otool -L` output on stdin and prints each load command path, one per line, in full.
+# The bundle is "Bang On Pro.app": splitting on whitespace (awk '{print $1}') truncated every
+# in-bundle path at the first space, so such references could be neither resolved nor rewritten.
+bangonpro_otool_deps_from_text() {
+    local line
+    while IFS= read -r line; do
+        # "<file>:" / "<file> (architecture arm64):" headers are unindented; load commands are indented
+        [[ "${line}" == [[:space:]]* ]] || continue
+        line="${line#"${line%%[![:space:]]*}"}"
+        [[ -n "${line}" ]] || continue
+        line="${line% (compatibility version*}"
+        line="${line% (current version*}"
+        printf '%s\n' "${line}"
+    done
+}
+
+# bangonpro_relpath FROM_DIR TO_PATH -> relative path from directory FROM_DIR to TO_PATH (both absolute).
+bangonpro_relpath() {
+    local from="${1%/}" to="$2" common up=""
+    common="${from}"
+    while [[ "${to}" != "${common}/"* && "${common}" != "/" && -n "${common}" ]]; do
+        common="$(dirname "${common}")"
+        up="../${up}"
+    done
+    if [[ "${common}" == "/" ]]; then
+        printf '%s%s\n' "${up}" "${to#/}"
+    else
+        printf '%s%s\n' "${up}" "${to#"${common}/"}"
+    fi
+}

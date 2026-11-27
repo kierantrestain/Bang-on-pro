@@ -243,3 +243,43 @@ def test_qt_frameworks_are_still_copied_whole() -> None:
         assert _run_fw('bangonpro_framework_needs_minimal_copy "$1"', name).returncode != 0
     text = BUILD_SCRIPT.read_text(encoding="utf-8")
     assert 'source "${SCRIPT_DIR}/framework_bundle.sh"' in text and "bangonpro_bundle_minimal_framework" in text
+
+
+# ----------------------------------------------------------------------------- otool parsing / relative deps
+OTOOL_SAMPLE = """/Users/runner/w/dist/macos-arm64/Bang On Pro.app/Contents/Resources/python-env/lib/python3.12/site-packages/opentimelineio/_otio.cpython-312-darwin.so (architecture arm64):
+\t/Users/runner/w/dist/macos-arm64/Bang On Pro.app/Contents/Resources/python-env/lib/python3.12/site-packages/opentimelineio/libopentimelineio.dylib (compatibility version 0.0.0, current version 0.18.1)
+\t@rpath/libopentime.dylib (compatibility version 0.0.0, current version 0.18.1)
+\t/usr/lib/libc++.1.dylib (compatibility version 1.0.0, current version 1800.101.0)
+"""
+
+
+def test_otool_deps_keep_paths_with_spaces_whole() -> None:
+    res = _run_fw('bangonpro_otool_deps_from_text <<< "$1"', OTOOL_SAMPLE)
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.splitlines() == [
+        "/Users/runner/w/dist/macos-arm64/Bang On Pro.app/Contents/Resources/python-env/lib/python3.12/site-packages/opentimelineio/libopentimelineio.dylib",
+        "@rpath/libopentime.dylib",
+        "/usr/lib/libc++.1.dylib",
+    ]
+
+
+def test_in_bundle_absolute_deps_become_loader_path_relative() -> None:
+    app = "/Users/runner/w/dist/macos-arm64/Bang On Pro.app"
+    cases = {
+        (f"{app}/Contents/Resources/python-env/lib/python3.12/site-packages/opentimelineio",
+         f"{app}/Contents/Resources/python-env/lib/python3.12/site-packages/opentimelineio/libopentime.dylib"): "libopentime.dylib",
+        (f"{app}/Contents/Resources/python-env/lib/python3.12/site-packages/google/_upb",
+         f"{app}/Contents/Frameworks/libprotobuf.dylib"): "../../../../../../../Frameworks/libprotobuf.dylib",
+        (f"{app}/Contents/MacOS", f"{app}/Contents/Frameworks/QtCore.framework/Versions/A/QtCore"): "../Frameworks/QtCore.framework/Versions/A/QtCore",
+    }
+    for (frm, to), want in cases.items():
+        res = _run_fw('bangonpro_relpath "$1" "$2"', frm, to)
+        assert res.returncode == 0 and res.stdout.strip() == want, (frm, to, res.stdout, res.stderr)
+        assert os.path.normpath(os.path.join(frm, want)) == to
+
+
+def test_relocator_and_audit_use_space_safe_otool_parsing() -> None:
+    text = BUILD_SCRIPT.read_text(encoding="utf-8")
+    assert "awk '{print $1}'" not in text.split("audit_bundle_security_hygiene()")[0].split("relocate_macho_deps()")[1]
+    assert text.count("bangonpro_otool_deps_from_text") >= 2
+    assert '@loader_path/$(bangonpro_relpath' in text
