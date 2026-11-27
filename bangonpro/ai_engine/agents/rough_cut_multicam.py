@@ -12,6 +12,8 @@ SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
 
 from __future__ import annotations
 
+import math
+
 import logging
 from collections.abc import Callable
 from typing import Any
@@ -803,13 +805,23 @@ def run_rough_cut_multicam_agent(
     fps = state.fps
     shots: list[EditShot] = []
     timeline_cursor_frame = 0
+    prev_raw_out: float | None = None
+    prev_out_frame = 0
 
     for idx, sp in enumerate(planned_raw_shots, start=1):
-        m_out = float(sp["end"])
-        # Snap the cut to the master frame grid before mapping it into each camera's clock, so the
-        # picture and the dialogue of a shot start on the same master frame.
-        m_in = state.sec_to_frame(float(sp["start"])) / fps
-        desired_frames = max(1, state.sec_to_frame(m_out) - state.sec_to_frame(m_in))
+        # Frame-accurate cut on the master clock, decided once and then mapped into each camera's
+        # clock, so a shot's picture and dialogue start on the same master frame. Rounding is outward
+        # (in-point down, out-point up) so a planned span - a kept pause, a speech turn - never loses
+        # a frame; a shot that continues straight on from the previous one reuses its boundary frame.
+        raw_in, raw_out = float(sp["start"]), float(sp["end"])
+        if prev_raw_out is not None and abs(raw_in - prev_raw_out) < 1e-6:
+            m_in_frame = prev_out_frame
+        else:
+            m_in_frame = max(0, math.floor(raw_in * fps + 1e-6))
+        m_out_frame = max(m_in_frame + 1, math.ceil(raw_out * fps - 1e-6))
+        prev_raw_out = raw_out
+        m_in = m_in_frame / fps
+        desired_frames = m_out_frame - m_in_frame
 
         cam_id = sp["camera_id"]
         v_asset = state.media_assets[cam_id]
@@ -862,13 +874,14 @@ def run_rough_cut_multicam_agent(
             timeline_in_frame=tl_in_frame,
             timeline_out_frame=tl_out_frame,
             master_sync_in_sec=round(m_in, 4),
-            master_sync_out_sec=round(m_out, 4),
+            master_sync_out_sec=round(m_in + dur_frames / fps, 4),
             speaker_id=sp["speaker_id"],
             reason=sp["reason"],
             confidence=float(sp["confidence"]),
             needs_review=bool(sp["needs_review"]),
         )
         shots.append(shot)
+        prev_out_frame = m_in_frame + dur_frames
 
     state.rough_cut_shots = shots
     state.metadata["master_audio_source_id"] = audio_fallback_cam
