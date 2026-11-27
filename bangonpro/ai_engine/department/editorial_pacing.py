@@ -255,7 +255,11 @@ def classify_gap(
                 reasons.append(f"non-speech {ev.get('kind_hint', 'activity')} on the mics")
                 return "reaction_beat", reasons
     if rules.get("protect_question_pauses", True) and prev is not None and prev.is_neural_inference:
-        if et.is_question_text(prev.text):
+        # The beat after a question is for the answer, or a short rhetorical pause. A long silence
+        # after which the asker simply carries on (nobody answered) is dead air (V1.7 long-form
+        # journey: 5 s after "...first channel tomorrow?" before the same host resumed kept 1.6 s).
+        answered = nxt is None or nxt.speaker_id != prev.speaker_id or (gap[1] - gap[0]) <= TURN_BEAT_MAX_SEC
+        if answered and et.is_question_text(prev.text):
             reasons.append(f"after question by {prev.speaker_id}: '{et.last_sentence(prev.text)[-60:]}'")
             return "after_question", reasons
     if rules.get("protect_punchline_pauses", True) and nxt is not None and (nxt.end_sec - nxt.start_sec) <= 6.0:

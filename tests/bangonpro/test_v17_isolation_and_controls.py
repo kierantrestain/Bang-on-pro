@@ -647,3 +647,26 @@ def test_project_index_keeps_protected_pause_kind() -> None:
     pauses = [e for e in idx["events"] if e["type"] == "protected_pause"]
     assert pauses == [{"type": "protected_pause", "start_sec": 9.0, "end_sec": 10.2, "evidence": "pause classification", "kind": "reflective"}]
 
+
+
+def test_question_pause_is_protected_only_when_answered_or_short() -> None:
+    """Long-form journey (real Whisper): 5 s of silence after the host's question, then the same host
+    resumed with a new segment; the pause was protected as an 'answer beat' and kept 1.6 s of dead air."""
+    from types import SimpleNamespace
+
+    from bangonpro.ai_engine.department.editorial_pacing import classify_gap
+    from bangonpro.ai_engine.state import TranscriptSegment
+
+    def seg(sid: str, a: float, b: float, spk: str, text: str) -> TranscriptSegment:
+        return TranscriptSegment(sid, a, b, spk, f"cam_{spk.lower()}", text, 0.9, False, -20.0, is_neural_inference=True,
+                                 words=[{"word": text.split()[-1], "start_sec": b - 0.3, "end_sec": b}])
+
+    q = seg("q", 40.0, 45.0, "Host", "What would you tell someone starting their first channel tomorrow?")
+    st = lambda nxt: SimpleNamespace(transcript_segments=[q, nxt], metadata={})  # noqa: E731
+    answer = seg("a", 46.2, 50.0, "Guest", "Start before you feel ready.")
+    resume_long = seg("r", 50.0, 55.0, "Host", "Welcome back to the studio.")
+    resume_short = seg("s", 46.2, 50.0, "Host", "Consistency. That is the answer.")
+    assert classify_gap((45.0, 46.2), st(answer), [], {})[0] == "after_question"        # answered
+    assert classify_gap((45.0, 46.2), st(resume_short), [], {})[0] == "after_question"  # rhetorical beat
+    kind, _ = classify_gap((45.0, 50.0), st(resume_long), [], {})
+    assert kind == "dead_air", kind                                                      # unanswered, long
