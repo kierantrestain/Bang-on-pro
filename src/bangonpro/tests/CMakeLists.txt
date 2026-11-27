@@ -190,3 +190,47 @@ target_link_libraries(bangonpro_test_agent_control_centre PRIVATE
     Qt${QT_MAJOR_VERSION}::Test
 )
 add_test(NAME bangonpro_test_agent_control_centre COMMAND bangonpro_test_agent_control_centre)
+
+# 7. V1.7 Unified Effects Library, Intrinsic Transform & Paste Attributes Tests
+add_executable(bangonpro_test_effects_and_controls
+    ${CMAKE_CURRENT_SOURCE_DIR}/../effects_browser/PremierePresetBrowser.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../effects_browser/UnifiedEffectsPanel.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../effects_browser/IntrinsicTransformWidget.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../effects_browser/PasteAttributesDialog.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_effects_and_controls.cpp
+)
+set_target_properties(bangonpro_test_effects_and_controls PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+    AUTOMOC ON
+)
+target_include_directories(bangonpro_test_effects_and_controls PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${CMAKE_CURRENT_SOURCE_DIR}/../effects_browser
+)
+target_compile_definitions(bangonpro_test_effects_and_controls PRIVATE
+    BANGONPRO_STANDALONE_TEST
+    QT_NO_CAST_FROM_ASCII
+    QT_NO_CAST_TO_ASCII
+    QT_NO_URL_CAST_FROM_STRING
+    QT_NO_KEYWORDS
+)
+target_link_libraries(bangonpro_test_effects_and_controls PRIVATE
+    Qt${QT_MAJOR_VERSION}::Core
+    Qt${QT_MAJOR_VERSION}::Widgets
+    Qt${QT_MAJOR_VERSION}::Test
+)
+add_test(NAME bangonpro_test_effects_and_controls COMMAND bangonpro_test_effects_and_controls)
+
+# Aggregate target so macOS/Linux build scripts compile every Bang On Pro C++ test suite in one step
+add_custom_target(bangonpro_all_tests
+    DEPENDS
+        bangonpro_test_timeline_command_engine
+        bangonpro_test_ai_assistant_dock
+        bangonpro_test_premiere_preset_browser
+        bangonpro_test_pro_workspace
+        bangonpro_test_roto_studio
+        bangonpro_test_agent_control_centre
+        bangonpro_test_effects_and_controls
+)

@@ -17,6 +17,7 @@
 #include "transitions/view/mixstackview.hpp"
 #include "transitions/view/transitionstackview.hpp"
 
+#include "bangonpro/effects_browser/IntrinsicTransformWidget.h"
 #include "view/assetparameterview.hpp"
 
 #include <KColorScheme>
@@ -28,6 +29,7 @@
 #include <QApplication>
 #include <QComboBox>
 #include <QFontDatabase>
+#include <QLabel>
 #include <QMenu>
 #include <QScrollArea>
 #include <QScrollBar>
@@ -45,6 +47,13 @@ AssetPanel::AssetPanel(QWidget *parent)
     , m_effectStackWidget(new EffectStackView(this))
 {
     auto *buttonToolbar = new QToolBar(this);
+    m_targetBadge = new QLabel(this);
+    m_targetBadge->setObjectName(QStringLiteral("assetTargetBadge"));
+    m_targetBadge->setStyleSheet(QStringLiteral("QLabel#assetTargetBadge { font-weight: 600; font-size: 10px; padding: 1px 6px; margin-right: 4px; "
+                                                "border-radius: 3px; background-color: #2A2A2E; color: #EDEDED; }"));
+    m_targetBadgeAction = buttonToolbar->addWidget(m_targetBadge);
+    m_targetBadgeAction->setVisible(false);
+
     m_titleAction = buttonToolbar->addWidget(m_assetTitle);
     int size = style()->pixelMetric(QStyle::PM_SmallIconSize);
     QSize iconSize(size, size);
@@ -147,11 +156,52 @@ AssetPanel::AssetPanel(QWidget *parent)
     connect(m_timelineButton, &KDualAction::activeChangedByUser, this, &AssetPanel::showKeyframes);
     buttonToolbar->addAction(m_timelineButton);
 
+    m_copyAttributesButton = new QToolButton(this);
+    m_copyAttributesButton->setObjectName(QStringLiteral("assetCopyAttributesBtn"));
+    m_copyAttributesButton->setIcon(QIcon::fromTheme(QStringLiteral("edit-copy")));
+    m_copyAttributesButton->setToolTip(i18n("Copy Attributes"));
+    m_copyAttributesButton->setAutoRaise(true);
+    connect(m_copyAttributesButton, &QToolButton::clicked, this, &AssetPanel::copyAttributesRequested);
+    m_copyAttributesAction = buttonToolbar->addWidget(m_copyAttributesButton);
+    m_copyAttributesAction->setVisible(false);
+
+    m_pasteAttributesButton = new QToolButton(this);
+    m_pasteAttributesButton->setObjectName(QStringLiteral("assetPasteAttributesBtn"));
+    m_pasteAttributesButton->setIcon(QIcon::fromTheme(QStringLiteral("edit-paste")));
+    m_pasteAttributesButton->setToolTip(i18n("Paste Attributes…"));
+    m_pasteAttributesButton->setAutoRaise(true);
+    connect(m_pasteAttributesButton, &QToolButton::clicked, this, &AssetPanel::pasteAttributesRequested);
+    m_pasteAttributesAction = buttonToolbar->addWidget(m_pasteAttributesButton);
+    m_pasteAttributesAction->setVisible(false);
+
     m_lay->addWidget(buttonToolbar);
     m_lay->setContentsMargins(0, 0, 0, 0);
     m_lay->setSpacing(0);
+    m_container->setObjectName(QStringLiteral("assetPanelContainer"));
+    m_container->setStyleSheet(QStringLiteral("QWidget#assetPanelContainer { background-color: #141416; }"));
     auto *lay = new QVBoxLayout(m_container);
     lay->setContentsMargins(0, 0, 0, 0);
+
+    // Clean empty-state placeholder shown when no clip/track/composition is selected
+    m_emptyStateWidget = new QWidget(m_container);
+    m_emptyStateWidget->setObjectName(QStringLiteral("assetPanelEmptyState"));
+    m_emptyStateWidget->setStyleSheet(QStringLiteral("QWidget#assetPanelEmptyState { background-color: #141416; }"));
+    auto *emptyLay = new QVBoxLayout(m_emptyStateWidget);
+    emptyLay->setContentsMargins(16, 32, 16, 32);
+    auto *emptyLabel = new QLabel(i18n("Select a clip, track, or composition to inspect Motion, Transform, and Effects."), m_emptyStateWidget);
+    emptyLabel->setAlignment(Qt::AlignCenter);
+    emptyLabel->setWordWrap(true);
+    emptyLabel->setStyleSheet(QStringLiteral("color: #A1A1AA; background: transparent; font-size: 12px;"));
+    emptyLay->addStretch(1);
+    emptyLay->addWidget(emptyLabel);
+    emptyLay->addStretch(1);
+    lay->addWidget(m_emptyStateWidget);
+
+    // Pinned collapsible Motion / Transform card (lazily materializes qtblend on first edit)
+    m_intrinsicTransform = new BangOnPro::IntrinsicTransformWidget(m_container);
+    m_intrinsicTransform->setVisible(false);
+    lay->addWidget(m_intrinsicTransform);
+
     lay->addWidget(m_transitionWidget);
     lay->addWidget(m_mixWidget);
     lay->addWidget(m_effectStackWidget);
@@ -171,12 +221,22 @@ AssetPanel::AssetPanel(QWidget *parent)
     m_transitionWidget->setVisible(false);
     m_mixWidget->setVisible(false);
     m_effectStackWidget->setVisible(false);
+    m_emptyStateWidget->setVisible(true);
     updatePalette();
+    connect(m_intrinsicTransform, &BangOnPro::IntrinsicTransformWidget::seekToPos, this, [this](int frame) {
+        const ObjectId owner = m_effectStackWidget->stackOwner();
+        if (owner.type == KdenliveObjectType::TimelineClip) {
+            Q_EMIT seekToPos(frame - pCore->getItemIn(owner) + pCore->getItemPosition(owner));
+        } else {
+            Q_EMIT seekToPos(frame);
+        }
+    });
     connect(m_effectStackWidget, &EffectStackView::checkScrollBar, this, &AssetPanel::slotCheckWheelEventFilter);
     connect(m_effectStackWidget, &EffectStackView::scrollView, this, &AssetPanel::scrollTo);
     connect(m_effectStackWidget, &EffectStackView::checkDragScrolling, this, &AssetPanel::checkDragScroll);
     connect(m_effectStackWidget, &EffectStackView::seekToPos, this, &AssetPanel::seekToPos);
     connect(m_effectStackWidget, &EffectStackView::reloadEffect, this, &AssetPanel::reloadEffect);
+    connect(m_effectStackWidget, &EffectStackView::effectDroppedOnStack, this, &AssetPanel::effectDroppedOnStack);
     connect(m_transitionWidget, &TransitionStackView::seekToTransPos, this, &AssetPanel::seekToPos);
     connect(m_mixWidget, &MixStackView::seekToTransPos, this, &AssetPanel::seekToPos);
     connect(m_effectStackWidget, &EffectStackView::updateEnabledState, this,
@@ -197,6 +257,9 @@ void AssetPanel::showTransition(int tid, const std::shared_ptr<AssetParameterMod
         return;
     }
     clear();
+    m_emptyStateWidget->setVisible(false);
+    m_targetBadge->setText(i18n("COMP"));
+    m_targetBadgeAction->setVisible(true);
     m_switchCompoButton->setCurrentIndex(m_switchCompoButton->findData(transitionModel->getAssetId()));
     m_switchAction->setVisible(true);
     m_titleAction->setVisible(false);
@@ -228,6 +291,9 @@ void AssetPanel::showMix(int cid, const std::shared_ptr<AssetParameterModel> &tr
         }
     }
     clear();
+    m_emptyStateWidget->setVisible(false);
+    m_targetBadge->setText(i18n("MIX"));
+    m_targetBadgeAction->setVisible(true);
     // There is only 1 audio composition, so hide switch combobox
     m_switchAction->setVisible(transitionModel->getAssetId() != QLatin1String("mix"));
     m_titleAction->setVisible(false);
@@ -261,35 +327,52 @@ void AssetPanel::showEffectStack(const QString &itemName, const std::shared_ptr<
         return;
     }
     clear();
+    m_emptyStateWidget->setVisible(false);
     QString title;
+    QString badgeText;
     bool showSplit = false;
     bool enableKeyframes = false;
     switch (id.type) {
     case KdenliveObjectType::TimelineClip:
         title = i18n("%1 effects", itemName);
+        badgeText = i18n("CLIP");
         showSplit = true;
         enableKeyframes = true;
         break;
     case KdenliveObjectType::TimelineComposition:
         title = i18n("%1 parameters", itemName);
+        badgeText = i18n("COMP");
         enableKeyframes = true;
         break;
     case KdenliveObjectType::TimelineTrack:
         title = i18n("Track %1 effects", itemName);
+        badgeText = i18n("TRACK");
         // TODO: track keyframes
         // enableKeyframes = true;
         break;
     case KdenliveObjectType::BinClip:
         title = i18n("Bin %1 effects", itemName);
+        badgeText = i18n("BIN");
         showSplit = true;
+        break;
+    case KdenliveObjectType::Master:
+        title = itemName;
+        badgeText = i18n("MASTER");
         break;
     default:
         title = itemName;
+        badgeText = i18n("FX");
         break;
     }
+    m_targetBadge->setText(badgeText);
+    m_targetBadgeAction->setVisible(!badgeText.isEmpty());
     m_assetTitle->setText(title);
     m_titleAction->setVisible(true);
     m_applyEffectGroups->setVisible(true);
+    m_copyAttributesAction->setVisible(id.type == KdenliveObjectType::TimelineClip || id.type == KdenliveObjectType::BinClip ||
+                                       id.type == KdenliveObjectType::TimelineTrack);
+    m_pasteAttributesAction->setVisible(id.type == KdenliveObjectType::TimelineClip || id.type == KdenliveObjectType::BinClip ||
+                                        id.type == KdenliveObjectType::TimelineTrack);
     m_splitButton->setVisible(showSplit);
     m_saveEffectStack->setEnabled(true);
     m_enableStackButton->setVisible(id.type != KdenliveObjectType::TimelineComposition);
@@ -307,6 +390,24 @@ void AssetPanel::showEffectStack(const QString &itemName, const std::shared_ptr<
     m_timelineButton->setActive(showKeyframes);
     // Disable built stack until properly implemented
     // m_switchBuiltStack->setVisible(true);
+
+    // Show pinned Motion / Transform card for video-capable clips (lazy qtblend materialization)
+    const bool isVideoItem =
+        (id.type == KdenliveObjectType::TimelineClip || id.type == KdenliveObjectType::BinClip) && pCore->getItemState(id) != PlaylistState::AudioOnly;
+    if (isVideoItem && m_intrinsicTransform) {
+        int currentFrame = 0;
+        if (id.type == KdenliveObjectType::TimelineClip) {
+            currentFrame = qMax(0, pCore->getMonitorPosition() - pCore->getItemPosition(id) + pCore->getItemIn(id));
+        } else if (id.type == KdenliveObjectType::BinClip && pCore->getMonitor(Kdenlive::ClipMonitor)) {
+            currentFrame = pCore->getMonitor(Kdenlive::ClipMonitor)->position();
+        }
+        m_intrinsicTransform->setModel(effectsModel, frameSize, currentFrame);
+        m_intrinsicTransform->setVisible(true);
+    } else if (m_intrinsicTransform) {
+        m_intrinsicTransform->unsetModel();
+        m_intrinsicTransform->setVisible(false);
+    }
+
     m_effectStackWidget->setVisible(true);
     m_effectStackWidget->setModel(effectsModel, frameSize);
 }
@@ -341,6 +442,13 @@ void AssetPanel::clear()
         processSplitEffect(false);
     }
     m_switchAction->setVisible(false);
+    m_targetBadgeAction->setVisible(false);
+    m_copyAttributesAction->setVisible(false);
+    m_pasteAttributesAction->setVisible(false);
+    if (m_intrinsicTransform) {
+        m_intrinsicTransform->setVisible(false);
+        m_intrinsicTransform->unsetModel();
+    }
     m_transitionWidget->setVisible(false);
     m_transitionWidget->unsetModel();
     m_mixWidget->setVisible(false);
@@ -352,6 +460,9 @@ void AssetPanel::clear()
     m_switchBuiltStack->setVisible(false);
     m_effectStackWidget->unsetModel();
     m_assetTitle->clear();
+    if (m_emptyStateWidget) {
+        m_emptyStateWidget->setVisible(true);
+    }
 }
 
 void AssetPanel::updatePalette()
@@ -595,6 +706,10 @@ void AssetPanel::updateAssetPosition(int itemId, const QUuid uuid)
     if (m_effectStackWidget->isVisible()) {
         ObjectId id(KdenliveObjectType::TimelineClip, itemId, uuid);
         if (m_effectStackWidget->stackOwner() == id) {
+            if (m_intrinsicTransform && m_intrinsicTransform->isVisible()) {
+                const int clipFrame = qMax(0, pCore->getMonitorPosition() - pCore->getItemPosition(id) + pCore->getItemIn(id));
+                m_intrinsicTransform->setCurrentFrame(clipFrame);
+            }
             Q_EMIT pCore->getMonitor(Kdenlive::ProjectMonitor)->seekPosition(pCore->getMonitorPosition());
         }
     } else if (m_transitionWidget->isVisible()) {

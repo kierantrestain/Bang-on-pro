@@ -9,6 +9,7 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QJsonArray>
@@ -332,15 +333,18 @@ private Q_SLOTS:
         acc.loadJobStatus(sampleJob(QStringLiteral("draft_ready")));
         QVERIFY(!done->isHidden());
         QVERIFY(acc.agentStatus(QStringLiteral("colourist")).startsWith(QStringLiteral("Done")));
-        // Setup collapses while reviewing; "New production" brings it back.
+        // Setup collapses while reviewing; "New production" detaches and brings it back.
+        auto *reviewTitle = acc.findChild<QLabel *>(QStringLiteral("acc_review_title"));
+        QVERIFY(reviewTitle && reviewTitle->text().contains(QStringLiteral("1")));
         auto *setup = acc.findChild<QWidget *>(QStringLiteral("acc_setup"));
         auto *newJob = acc.findChild<QPushButton *>(QStringLiteral("acc_new_job"));
         QVERIFY(setup && newJob);
         QVERIFY(setup->isHidden());
+        QSignalSpy newProd(&acc, &AgentControlCentre::newProductionRequested);
         click(newJob);
         QVERIFY(!setup->isHidden());
-        auto *reviewTitle = acc.findChild<QLabel *>(QStringLiteral("acc_review_title"));
-        QVERIFY(reviewTitle && reviewTitle->text().contains(QStringLiteral("1")));
+        QVERIFY(acc.activeJobDir().isEmpty());
+        QCOMPARE(newProd.count(), 1);
     }
 
     void recoversInterruptedJob()
@@ -612,6 +616,173 @@ private Q_SLOTS:
         QVERIFY(dlg.loadReport(blocked));
         QVERIFY(recheck->isEnabled());
         QVERIFY(done->property("bangOnProPrimary").toBool() && !recheck->property("bangOnProPrimary").toBool());
+    }
+
+    // ---- V1.7 project isolation, lifecycle controls, setup options, telemetry ----
+    void resetForProjectClearsActiveJobHistoryAndReturnsToSetup()
+    {
+        QTemporaryDir tmp;
+        AgentControlCentre acc;
+        showAsDock(acc);
+        acc.setProjectContext(QStringLiteral("Project A"), {QStringLiteral("Seq A1")}, 0);
+        acc.setActiveJobDir(tmp.path());
+        acc.loadJobStatus(sampleJob(QStringLiteral("draft_ready")));
+        acc.setQcMarkersVisible(true);
+        const QJsonObject job{{QStringLiteral("job_id"), QStringLiteral("job_a")},
+                              {QStringLiteral("job_dir"), tmp.path()},
+                              {QStringLiteral("status"), QStringLiteral("draft_ready")}};
+        acc.loadHistory(QJsonObject{{QStringLiteral("jobs"), QJsonArray{job}}});
+        QVERIFY(acc.completionVisible());
+        QCOMPARE(acc.historyCount(), 1);
+        QVERIFY(acc.reviewItemCount() > 0);
+        QVERIFY(acc.qcMarkersVisible());
+
+        acc.resetForProject(QStringLiteral("uuid-proj-b"), QStringLiteral("Project B"), {QStringLiteral("Seq B1"), QStringLiteral("Seq B2")}, 1);
+
+        QCOMPARE(acc.activeProjectUuid(), QStringLiteral("uuid-proj-b"));
+        QVERIFY(acc.activeJobDir().isEmpty());
+        QVERIFY(acc.jobStatus().isEmpty());
+        QCOMPARE(acc.historyCount(), 0);
+        QCOMPARE(acc.reviewItemCount(), 0);
+        QVERIFY(!acc.qcMarkersVisible());
+        QVERIFY(acc.projectContextText().contains(QStringLiteral("Project B")));
+        QVERIFY(acc.projectContextText().contains(QStringLiteral("Seq B2")));
+        QVERIFY(!acc.completionVisible());
+        QVERIFY(!acc.findChild<QWidget *>(QStringLiteral("acc_setup"))->isHidden());
+        QVERIFY(acc.findChild<QWidget *>(QStringLiteral("acc_done"))->isHidden());
+        QVERIFY(acc.findChild<QWidget *>(QStringLiteral("acc_run"))->isHidden());
+    }
+
+    void lifecycleButtonsPauseRetryDiscardAndNewFromRun()
+    {
+        QTemporaryDir tmp;
+        AgentControlCentre acc;
+        showAsDock(acc);
+        acc.setActiveJobDir(tmp.path());
+        acc.setWorkerProcessRunning(true);
+        acc.loadJobStatus(sampleJob(QStringLiteral("running")));
+
+        auto *pauseBtn = acc.findChild<QPushButton *>(QStringLiteral("acc_pause"));
+        auto *retryBtn = acc.findChild<QPushButton *>(QStringLiteral("acc_retry"));
+        auto *discardBtn = acc.findChild<QPushButton *>(QStringLiteral("acc_discard"));
+        auto *newFromRun = acc.findChild<QPushButton *>(QStringLiteral("acc_new_from_run"));
+        auto *resumeBtn = acc.findChild<QPushButton *>(QStringLiteral("acc_resume"));
+        QVERIFY(pauseBtn && retryBtn && discardBtn && newFromRun && resumeBtn);
+
+        QVERIFY(!pauseBtn->isHidden() && pauseBtn->isEnabled());
+        QVERIFY(retryBtn->isHidden());
+        QVERIFY(discardBtn->isHidden());
+        QVERIFY(newFromRun->isHidden());
+
+        QSignalSpy pauseSpy(&acc, &AgentControlCentre::pauseJobRequested);
+        click(pauseBtn);
+        QCOMPARE(pauseSpy.count(), 1);
+        QCOMPARE(pauseSpy.first().at(0).toString(), tmp.path());
+
+        // Paused state: Resume, Discard, and New production available; Pause hidden.
+        acc.setWorkerProcessRunning(false);
+        acc.loadJobStatus(sampleJob(QStringLiteral("paused")));
+        QVERIFY(pauseBtn->isHidden());
+        QVERIFY(!resumeBtn->isHidden() && resumeBtn->isEnabled());
+        QVERIFY(retryBtn->isHidden());
+        QVERIFY(!discardBtn->isHidden() && discardBtn->isEnabled());
+        QVERIFY(!newFromRun->isHidden() && newFromRun->isEnabled());
+        QVERIFY(acc.statusText().contains(QStringLiteral("Paused")));
+
+        // Failed state: Retry, Discard, Resume, and New production all available.
+        acc.loadJobStatus(sampleJob(QStringLiteral("failed")));
+        QVERIFY(!retryBtn->isHidden() && retryBtn->isEnabled());
+        QVERIFY(!discardBtn->isHidden() && discardBtn->isEnabled());
+        QVERIFY(!newFromRun->isHidden() && newFromRun->isEnabled());
+
+        QSignalSpy retrySpy(&acc, &AgentControlCentre::retryJobRequested);
+        QSignalSpy discardSpy(&acc, &AgentControlCentre::discardJobRequested);
+        QSignalSpy newProdSpy(&acc, &AgentControlCentre::newProductionRequested);
+        click(retryBtn);
+        click(discardBtn);
+        QCOMPARE(retrySpy.count(), 1);
+        QCOMPARE(retrySpy.first().at(0).toString(), tmp.path());
+        QCOMPARE(discardSpy.count(), 1);
+        QCOMPARE(discardSpy.first().at(0).toString(), tmp.path());
+
+        // New production from run view never traps the user on a failed run.
+        click(newFromRun);
+        QCOMPARE(newProdSpy.count(), 1);
+        QVERIFY(acc.activeJobDir().isEmpty());
+        QVERIFY(!acc.findChild<QWidget *>(QStringLiteral("acc_setup"))->isHidden());
+    }
+
+    void setupControlsMediaSourceOutputFormatAndTargetDuration()
+    {
+        AgentControlCentre acc;
+        QVERIFY(acc.minimumWidth() <= 280);
+        auto *mediaSrc = acc.findChild<QComboBox *>(QStringLiteral("acc_media_source"));
+        auto *outFmt = acc.findChild<QComboBox *>(QStringLiteral("acc_output_format"));
+        auto *targetDur = acc.findChild<QSpinBox *>(QStringLiteral("acc_target_duration"));
+        QVERIFY(mediaSrc && outFmt && targetDur);
+
+        // Default selections append none of the optional V1.7 CLI flags.
+        QCOMPARE(acc.selectedMediaSource(), QStringLiteral("sequence"));
+        QCOMPARE(acc.selectedOutputFormat(), QStringLiteral("match"));
+        QCOMPARE(acc.targetDurationMinutes(), 0);
+        const QStringList defaultArgs = acc.buildRunArguments({QStringLiteral("/m/a.mp4")});
+        QVERIFY(!defaultArgs.contains(QStringLiteral("--aspect-ratio")));
+        QVERIFY(!defaultArgs.contains(QStringLiteral("--target-duration-sec")));
+        QVERIFY(!defaultArgs.contains(QStringLiteral("--media-source")));
+
+        // Explicit selections emit corresponding CLI flags before --inputs.
+        acc.setSelectedMediaSource(QStringLiteral("selected_bin"));
+        acc.setSelectedOutputFormat(QStringLiteral("9:16"));
+        acc.setTargetDurationMinutes(5);
+        const QStringList args = acc.buildRunArguments({QStringLiteral("/m/a.mp4")});
+        const int arIdx = args.indexOf(QStringLiteral("--aspect-ratio"));
+        QVERIFY(arIdx > 0);
+        QCOMPARE(args.at(arIdx + 1), QStringLiteral("9:16"));
+        const int tdIdx = args.indexOf(QStringLiteral("--target-duration-sec"));
+        QVERIFY(tdIdx > 0);
+        QCOMPARE(args.at(tdIdx + 1), QStringLiteral("300"));
+        const int msIdx = args.indexOf(QStringLiteral("--media-source"));
+        QVERIFY(msIdx > 0);
+        QCOMPARE(args.at(msIdx + 1), QStringLiteral("selected_bin"));
+        QCOMPARE(args.last(), QStringLiteral("/m/a.mp4"));
+    }
+
+    void liveTelemetryElapsedResourceAndComputeTierBadge()
+    {
+        QTemporaryDir tmp;
+        AgentControlCentre acc;
+        acc.setActiveJobDir(tmp.path());
+        acc.setWorkerProcessRunning(true);
+
+        // 1. Local deterministic + live elapsed + resource usage
+        QJsonObject detJob = sampleJob(QStringLiteral("running"));
+        detJob.insert(QStringLiteral("started_at_utc"), QDateTime::currentDateTimeUtc().addSecs(-65).toString(Qt::ISODateWithMs));
+        detJob.insert(QStringLiteral("reasoning"), QJsonObject{{QStringLiteral("mode"), QStringLiteral("local")}, {QStringLiteral("calls"), 0}});
+        detJob.insert(QStringLiteral("resource_usage"), QJsonObject{{QStringLiteral("rss_mb"), 184.4}, {QStringLiteral("cpu_time_sec"), 12.6}});
+        acc.loadJobStatus(detJob);
+        QCOMPARE(acc.engineBadgeText(), QStringLiteral("Local deterministic"));
+        QVERIFY(acc.resourceText().contains(QStringLiteral("RAM 184 MB")));
+        QVERIFY(acc.resourceText().contains(QStringLiteral("CPU 12.6s")));
+        QVERIFY(acc.elapsedText().contains(QLatin1Char(':')));
+
+        // 2. Local neural
+        QJsonObject neuralJob = detJob;
+        QJsonObject agents = neuralJob.value(QStringLiteral("agents")).toObject();
+        QJsonObject ei = agents.value(QStringLiteral("editorial_intelligence")).toObject();
+        ei.insert(QStringLiteral("neural_inference"), true);
+        agents.insert(QStringLiteral("editorial_intelligence"), ei);
+        neuralJob.insert(QStringLiteral("agents"), agents);
+        acc.loadJobStatus(neuralJob);
+        QCOMPARE(acc.engineBadgeText(), QStringLiteral("Local neural"));
+
+        // 3. Subscription AI + finished final duration
+        QJsonObject subJob = sampleJob(QStringLiteral("draft_ready"));
+        subJob.insert(QStringLiteral("processing_elapsed_sec"), 92.0);
+        subJob.insert(QStringLiteral("reasoning"), QJsonObject{{QStringLiteral("mode"), QStringLiteral("subscription")}, {QStringLiteral("calls"), 2}});
+        acc.setWorkerProcessRunning(false);
+        acc.loadJobStatus(subJob);
+        QCOMPARE(acc.engineBadgeText(), QStringLiteral("Subscription AI"));
+        QCOMPARE(acc.elapsedText(), QStringLiteral("1:32"));
     }
 };
 

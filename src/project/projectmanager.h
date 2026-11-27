@@ -244,6 +244,7 @@ private Q_SLOTS:
 
 Q_SIGNALS:
     void docOpened(KdenliveDoc *document);
+    void docAboutToClose(KdenliveDoc *document);
 
 protected:
     /** @brief Update the timeline according to the MLT XML */

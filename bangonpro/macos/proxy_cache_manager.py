@@ -17,10 +17,16 @@ import subprocess
 import tempfile
 import threading
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX fallback
+    fcntl = None  # type: ignore[assignment]
 
 from .hardware_profiles import (
     HardwareCapabilities,
@@ -330,41 +336,109 @@ class CacheBudgetManager:
         self.render_cache_dir = self.root_dir / "render_cache"
         self.models_dir = self.root_dir / "models"
         self.manifest_path = self.root_dir / "cache_manifest.json"
+        self.manifest_lock_path = self.root_dir / "cache_manifest.lock"
 
         self.proxies_dir.mkdir(parents=True, exist_ok=True)
         self.render_cache_dir.mkdir(parents=True, exist_ok=True)
         self.models_dir.mkdir(parents=True, exist_ok=True)
 
+        self._thread_lock = threading.RLock()
+        self._lock_depth = 0
+        self._lock_fd: int | None = None
+        self._last_enforce_ts: float = 0.0
+
         self._protected_dirs: tuple[Path, ...] = tuple(Path(p).resolve() for p in self.config.protected_dirs)
         self._manifest: dict[str, Any] = self._load_manifest()
 
-    def _load_manifest(self) -> dict[str, Any]:
-        if self.manifest_path.is_file():
+    @contextmanager
+    def _manifest_lock(self) -> Iterator[None]:
+        """Re-entrant thread + cross-process advisory flock guard around manifest I/O."""
+        with self._thread_lock:
+            self._lock_depth += 1
             try:
-                data = json.loads(self.manifest_path.read_text(encoding="utf-8"))
-                if isinstance(data, dict) and "entries" in data and "models" in data:
-                    return data
-            except (OSError, json.JSONDecodeError):
-                pass
-        return {"schema_version": "1.0", "entries": {}, "models": {}}
+                if self._lock_depth == 1:
+                    self.root_dir.mkdir(parents=True, exist_ok=True)
+                    fd = os.open(
+                        str(self.manifest_lock_path),
+                        os.O_CREAT | os.O_RDWR,
+                        0o600,
+                    )
+                    try:
+                        os.chmod(self.manifest_lock_path, 0o600)
+                    except OSError:
+                        pass
+                    if fcntl is not None:
+                        fcntl.flock(fd, fcntl.LOCK_EX)
+                    self._lock_fd = fd
+                yield
+            finally:
+                self._lock_depth -= 1
+                if self._lock_depth == 0 and self._lock_fd is not None:
+                    lock_fd = self._lock_fd
+                    self._lock_fd = None
+                    try:
+                        if fcntl is not None:
+                            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                    finally:
+                        os.close(lock_fd)
+
+    def _backup_corrupt_manifest(self) -> Path | None:
+        """Preserve an unreadable or corrupt cache_manifest.json before resetting."""
+        if not self.manifest_path.is_file():
+            return None
+        ts = int(time.time())
+        backup = self.root_dir / f"cache_manifest.json.corrupt.{ts}"
+        counter = 0
+        while backup.exists():
+            counter += 1
+            backup = self.root_dir / f"cache_manifest.json.corrupt.{ts}_{counter}"
+        try:
+            self.manifest_path.replace(backup)
+            return backup
+        except OSError:
+            try:
+                shutil.copy2(self.manifest_path, backup)
+                return backup
+            except OSError:
+                return None
+
+    def _load_manifest(self) -> dict[str, Any]:
+        with self._manifest_lock():
+            if self.manifest_path.is_file():
+                try:
+                    data = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+                    if isinstance(data, dict) and isinstance(data.get("entries"), dict) and isinstance(data.get("models"), dict):
+                        return data
+                    # Valid JSON but invalid manifest schema — preserve before reset.
+                    self._backup_corrupt_manifest()
+                except json.JSONDecodeError:
+                    self._backup_corrupt_manifest()
+                except OSError:
+                    pass
+            return {"schema_version": "1.0", "entries": {}, "models": {}}
 
     def _save_manifest(self) -> None:
-        self.root_dir.mkdir(parents=True, exist_ok=True)
-        fd, tmp_name = tempfile.mkstemp(
-            dir=str(self.root_dir),
-            prefix=".cache_manifest.",
-            suffix=".tmp",
-        )
-        tmp_path = Path(tmp_name)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.write(json.dumps(self._manifest, indent=2, sort_keys=True))
-                fh.flush()
-                os.fsync(fh.fileno())
-            tmp_path.replace(self.manifest_path)
-        except BaseException:
-            tmp_path.unlink(missing_ok=True)
-            raise
+        with self._manifest_lock():
+            self.root_dir.mkdir(parents=True, exist_ok=True)
+            fd, tmp_name = tempfile.mkstemp(
+                dir=str(self.root_dir),
+                prefix=".cache_manifest.",
+                suffix=".tmp",
+            )
+            tmp_path = Path(tmp_name)
+            try:
+                try:
+                    os.fchmod(fd, 0o600)
+                except (AttributeError, OSError):
+                    pass
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(json.dumps(self._manifest, indent=2, sort_keys=True))
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                tmp_path.replace(self.manifest_path)
+            except BaseException:
+                tmp_path.unlink(missing_ok=True)
+                raise
 
     @staticmethod
     def _is_within_dir(target: Path, parent: Path) -> bool:
@@ -413,29 +487,32 @@ class CacheBudgetManager:
 
         resolved = path.resolve()
         ts = float(last_access_ts) if last_access_ts is not None else time.time()
-        self._manifest["entries"][str(resolved)] = {
-            "category": category,
-            "pinned": bool(pinned),
-            "last_access_ts": ts,
-            "size_bytes": resolved.stat().st_size,
-        }
-        self._save_manifest()
+        with self._manifest_lock():
+            self._manifest["entries"][str(resolved)] = {
+                "category": category,
+                "pinned": bool(pinned),
+                "last_access_ts": ts,
+                "size_bytes": resolved.stat().st_size,
+            }
+            self._save_manifest()
 
     def touch_entry(self, file_path: str | Path, access_ts: float | None = None) -> None:
         """Update LRU access timestamp for an existing managed cache entry."""
         resolved = str(Path(file_path).resolve())
-        if resolved in self._manifest["entries"]:
-            self._manifest["entries"][resolved]["last_access_ts"] = (
-                float(access_ts) if access_ts is not None else time.time()
-            )
-            self._save_manifest()
+        with self._manifest_lock():
+            if resolved in self._manifest["entries"]:
+                self._manifest["entries"][resolved]["last_access_ts"] = (
+                    float(access_ts) if access_ts is not None else time.time()
+                )
+                self._save_manifest()
 
     def pin_entry(self, file_path: str | Path, pinned: bool = True) -> None:
         """Pin or unpin a cache entry to protect active project proxies from eviction."""
         resolved = str(Path(file_path).resolve())
-        if resolved in self._manifest["entries"]:
-            self._manifest["entries"][resolved]["pinned"] = bool(pinned)
-            self._save_manifest()
+        with self._manifest_lock():
+            if resolved in self._manifest["entries"]:
+                self._manifest["entries"][resolved]["pinned"] = bool(pinned)
+                self._save_manifest()
 
     def register_model_artifact(
         self,
@@ -518,6 +595,35 @@ class CacheBudgetManager:
     def models_usage_bytes(self) -> int:
         return self._path_size_bytes(self.models_dir)
 
+    def tracked_cache_bytes(self) -> int:
+        """Return sum of manifest-tracked cache entry sizes without traversing the filesystem."""
+        return sum(
+            int(meta.get("size_bytes", 0))
+            for meta in self._manifest.get("entries", {}).values()
+            if isinstance(meta, dict)
+        )
+
+    def maybe_enforce_cache_budget(
+        self,
+        *,
+        min_interval_sec: float = 30.0,
+        high_water_ratio: float = 0.85,
+    ) -> EvictionReport | None:
+        """Throttled cache budget enforcement avoiding redundant rglob() scans on rapid proxy generation.
+
+        Runs ``enforce_cache_budget()`` immediately if tracked bytes approach or exceed
+        ``high_water_ratio * max_cache_bytes`` or if at least ``min_interval_sec`` has elapsed
+        since the last full scan.
+        """
+        max_cache = self.config.max_cache_bytes
+        now = time.monotonic()
+        tracked = self.tracked_cache_bytes()
+        near_budget = max_cache <= 0 or tracked >= int(max_cache * high_water_ratio)
+        interval_elapsed = self._last_enforce_ts <= 0.0 or (now - self._last_enforce_ts) >= min_interval_sec
+        if near_budget or interval_elapsed:
+            return self.enforce_cache_budget()
+        return None
+
     def enforce_cache_budget(self) -> EvictionReport:
         """Evict least-recently-used unpinned temporary proxy/render files to fit max_cache_gb.
 
@@ -526,65 +632,67 @@ class CacheBudgetManager:
         max_cache = self.config.max_cache_bytes
         max_models = self.config.max_models_bytes
 
-        files, protected_skipped = self._scan_evictable_cache_files()
-        entries = self._manifest.get("entries", {})
+        with self._manifest_lock():
+            files, protected_skipped = self._scan_evictable_cache_files()
+            entries = self._manifest.get("entries", {})
 
-        records: list[tuple[float, str, Path, int, bool]] = []
-        total_bytes = 0
-        for fpath in files:
-            resolved_str = str(fpath.resolve())
-            stat = fpath.stat()
-            size = stat.st_size
-            total_bytes += size
-            meta = entries.get(resolved_str, {})
-            pinned = bool(meta.get("pinned", False))
-            last_access = float(meta.get("last_access_ts", stat.st_mtime))
-            records.append((last_access, resolved_str, fpath, size, pinned))
+            records: list[tuple[float, str, Path, int, bool]] = []
+            total_bytes = 0
+            for fpath in files:
+                resolved_str = str(fpath.resolve())
+                stat = fpath.stat()
+                size = stat.st_size
+                total_bytes += size
+                meta = entries.get(resolved_str, {})
+                pinned = bool(meta.get("pinned", False))
+                last_access = float(meta.get("last_access_ts", stat.st_mtime))
+                records.append((last_access, resolved_str, fpath, size, pinned))
 
-        # True LRU order: oldest access timestamp first
-        records.sort(key=lambda item: (item[0], item[1]))
+            # True LRU order: oldest access timestamp first
+            records.sort(key=lambda item: (item[0], item[1]))
 
-        evicted_files: list[str] = []
-        freed_bytes = 0
+            evicted_files: list[str] = []
+            freed_bytes = 0
 
-        for _, resolved_str, fpath, size, pinned in records:
-            if total_bytes <= max_cache:
-                break
-            if pinned:
-                protected_skipped.append(resolved_str)
-                continue
-            if self.is_protected_path(fpath):
-                protected_skipped.append(resolved_str)
-                continue
-            try:
-                fpath.unlink()
-                evicted_files.append(resolved_str)
-                freed_bytes += size
-                total_bytes -= size
-                entries.pop(resolved_str, None)
-            except OSError:
-                protected_skipped.append(resolved_str)
+            for _, resolved_str, fpath, size, pinned in records:
+                if total_bytes <= max_cache:
+                    break
+                if pinned:
+                    protected_skipped.append(resolved_str)
+                    continue
+                if self.is_protected_path(fpath):
+                    protected_skipped.append(resolved_str)
+                    continue
+                try:
+                    fpath.unlink()
+                    evicted_files.append(resolved_str)
+                    freed_bytes += size
+                    total_bytes -= size
+                    entries.pop(resolved_str, None)
+                except OSError:
+                    protected_skipped.append(resolved_str)
 
-        # Prune stale manifest entries
-        for key in list(entries.keys()):
-            if not Path(key).exists():
-                entries.pop(key, None)
+            # Prune stale manifest entries
+            for key in list(entries.keys()):
+                if not Path(key).exists():
+                    entries.pop(key, None)
 
-        self._save_manifest()
+            self._save_manifest()
+            self._last_enforce_ts = time.monotonic()
 
-        models_bytes = self.models_usage_bytes()
-        models_over = max(0, models_bytes - max_models)
+            models_bytes = self.models_usage_bytes()
+            models_over = max(0, models_bytes - max_models)
 
-        return EvictionReport(
-            evicted_files=evicted_files,
-            freed_bytes=freed_bytes,
-            remaining_cache_bytes=total_bytes,
-            remaining_models_bytes=models_bytes,
-            max_cache_bytes=max_cache,
-            max_models_bytes=max_models,
-            protected_skipped=protected_skipped,
-            models_over_budget_bytes=models_over,
-        )
+            return EvictionReport(
+                evicted_files=evicted_files,
+                freed_bytes=freed_bytes,
+                remaining_cache_bytes=total_bytes,
+                remaining_models_bytes=models_bytes,
+                max_cache_bytes=max_cache,
+                max_models_bytes=max_models,
+                protected_skipped=protected_skipped,
+                models_over_budget_bytes=models_over,
+            )
 
     def get_model_eviction_candidates(self) -> list[dict[str, Any]]:
         """Return unpinned AI model artifacts ordered LRU if model storage exceeds max_models_gb."""
@@ -772,7 +880,7 @@ def generate_proxy(
         raise
 
     cache_manager.register_cache_entry(proxy_path, category="proxies")
-    cache_manager.enforce_cache_budget()
+    cache_manager.maybe_enforce_cache_budget()
 
     return ProxyResult(
         source_path=str(src),
@@ -920,13 +1028,14 @@ class StorageAndModelManager(CacheBudgetManager):
 
         resolved = path.resolve()
         ts = float(last_access_ts) if last_access_ts is not None else time.time()
-        self._manifest["entries"][str(resolved)] = {
-            "category": category,
-            "pinned": bool(pinned),
-            "last_access_ts": ts,
-            "size_bytes": resolved.stat().st_size,
-        }
-        self._save_manifest()
+        with self._manifest_lock():
+            self._manifest["entries"][str(resolved)] = {
+                "category": category,
+                "pinned": bool(pinned),
+                "last_access_ts": ts,
+                "size_bytes": resolved.stat().st_size,
+            }
+            self._save_manifest()
 
     def _scan_evictable_cache_files(self) -> tuple[list[Path], list[str]]:
         evictable: list[Path] = []

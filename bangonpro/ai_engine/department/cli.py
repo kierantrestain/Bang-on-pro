@@ -105,7 +105,12 @@ def _add_job_args(r: argparse.ArgumentParser) -> None:
     r.add_argument("--job-root", default=DEFAULT_JOB_ROOT)
     r.add_argument("--job-id", default=None)
     r.add_argument("--project-id", default=None)
+    r.add_argument("--project-uuid", default=None)
+    r.add_argument("--project-name", default=None)
+    r.add_argument("--project-path", default=None)
     r.add_argument("--sequence-id", default=None)
+    r.add_argument("--sequence-uuid", default=None)
+    r.add_argument("--sequence-name", default=None)
     r.add_argument("--kdenlive-project", default=None)
     r.add_argument("--project-state", default=None)
     r.add_argument("--export", action="store_true")
@@ -119,6 +124,9 @@ def _add_job_args(r: argparse.ArgumentParser) -> None:
     r.add_argument("--disable", nargs="*", default=[])
     r.add_argument("--edit-type", choices=("first_cut", "full_edit", "social_clips", "custom"), default=None,
                    help="The Production panel's choice: what to make (recorded with the job; social_clips also asks for vertical clips)")
+    r.add_argument("--aspect-ratio", default=None, help="Requested output aspect ratio (e.g. 16:9, 9:16, 1:1)")
+    r.add_argument("--target-duration-sec", type=float, default=None, help="Optional target cut duration in seconds")
+    r.add_argument("--media-source", default=None, help="Selected media source (sequence, selected_bin, project_bin, files)")
 
 
 def _options_from_args(a: argparse.Namespace) -> JobOptions:
@@ -133,6 +141,9 @@ def _options_from_args(a: argparse.Namespace) -> JobOptions:
         prefs_root=a.prefs_root,
         enabled_overrides=_parse_overrides(a.enable, a.disable),
         edit_type=getattr(a, "edit_type", None),
+        aspect_ratio=getattr(a, "aspect_ratio", None),
+        target_duration_sec=getattr(a, "target_duration_sec", None),
+        media_source=getattr(a, "media_source", None),
     )
 
 
@@ -151,7 +162,10 @@ def build_parser() -> argparse.ArgumentParser:
     _add_job_args(r)
     r.add_argument("--plan-only", action="store_true")
 
-    for name in ("status", "resume", "cancel", "summary", "rebuild"):
+    pl = sub.add_parser("plan", help="Create a production job plan without executing agents")
+    _add_job_args(pl)
+
+    for name in ("status", "resume", "cancel", "pause", "discard", "summary", "rebuild"):
         q = sub.add_parser(name)
         q.add_argument("job_dir")
 
@@ -275,6 +289,7 @@ def build_parser() -> argparse.ArgumentParser:
     for name in ("list", "status"):
         ql_ = qsub.add_parser(name)
         ql_.add_argument("--queue-root", default=None)
+        ql_.add_argument("--project-uuid", default=None)
     qr = qsub.add_parser("run", help="Run queued productions one after another")
     qr.add_argument("--queue-root", default=None)
     qr.add_argument("--max-jobs", type=int, default=None)
@@ -292,6 +307,7 @@ def build_parser() -> argparse.ArgumentParser:
     hi.add_argument("--job-root", default=DEFAULT_JOB_ROOT)
     hi.add_argument("--queue-root", default=None)
     hi.add_argument("--limit", type=int, default=30)
+    hi.add_argument("--project-uuid", default=None)
 
     pf = sub.add_parser("profile", help="Show profiles: list, show, create from a base, validate")
     pf.add_argument("action", choices=("list", "show", "create", "validate"))
@@ -444,8 +460,20 @@ def _cmd_queue(a: argparse.Namespace) -> int:
         opts = _options_from_args(a)
         options = {k: v for k, v in vars(opts).items() if k not in ("provider_config", "mode")}
         spec = {"brief": a.brief, "inputs": a.inputs or None, "profile": a.profile, "mode": a.mode, "options": options}
-        for key, val in (("kdenlive_project", a.kdenlive_project), ("project_id", a.project_id), ("sequence_id", a.sequence_id)):
-            if val:
+        for key, val in (
+            ("kdenlive_project", a.kdenlive_project),
+            ("project_id", a.project_id),
+            ("project_uuid", a.project_uuid),
+            ("project_name", a.project_name),
+            ("project_path", a.project_path),
+            ("sequence_id", a.sequence_id),
+            ("sequence_uuid", a.sequence_uuid),
+            ("sequence_name", a.sequence_name),
+            ("aspect_ratio", a.aspect_ratio),
+            ("target_duration_sec", a.target_duration_sec),
+            ("media_source", a.media_source),
+        ):
+            if val is not None and val != "":
                 spec[key] = val
         return _emit({"queued": q.add(spec, priority=a.priority)})
     if c == "series":
@@ -455,7 +483,7 @@ def _cmd_queue(a: argparse.Namespace) -> int:
         entries = q.add_series(profile=a.profile, series_id=a.series, episodes=episodes, mode=a.mode, brief=a.brief, options={"export_video": bool(a.export)}, priority=a.priority)
         return _emit({"series_batch_id": entries[0]["series_batch_id"], "queued": entries})
     if c in ("list", "status"):
-        return _emit(q.status())
+        return _emit(q.status(project_uuid=getattr(a, "project_uuid", None)))
     if c == "run":
         kwargs = {"max_jobs": a.max_jobs}
         if a.stale_after_sec is not None:
@@ -557,7 +585,7 @@ def _cmd_job(a: argparse.Namespace) -> int:
     job = ProductionJob(a.job_dir)
     if not job.doc:
         return _fail(FileNotFoundError(f"No production job at {a.job_dir}"))
-    if a.cmd in ("status", "summary", "cancel"):
+    if a.cmd in ("status", "summary", "cancel", "pause", "discard"):
         return _cmd_job_owned(a, job)
     # Everything that changes the job owns it first: a second process can never run it twice.
     with worker_session(job.dir, command=a.cmd):
@@ -576,6 +604,10 @@ def _cmd_job_owned(a: argparse.Namespace, job: ProductionJob) -> int:
         if not alive:
             job.reconcile()  # nothing is running: record the cancellation now
         return _emit({"cancel_requested": True, "worker_alive": alive, "status": job.doc.get("status")})
+    if a.cmd == "pause":
+        return _emit(ProductionJob.pause(job.dir))
+    if a.cmd == "discard":
+        return _emit(ProductionJob.discard(job.dir))
     if a.cmd == "resume":
         job.resume()
     elif a.cmd == "rebuild":
@@ -612,12 +644,26 @@ def _cmd_job_owned(a: argparse.Namespace, job: ProductionJob) -> int:
 def _dispatch(a: argparse.Namespace) -> int:
     if a.cmd == "agents":
         return _emit({"agents": capability_matrix(), "modes": list(AUTOMATION_MODES)})
-    if a.cmd == "run":
+    if a.cmd in ("run", "plan"):
         job = ProductionJob.create(
-            job_root=a.job_root, brief=a.brief, inputs=a.inputs or None, profile_ref=a.profile, mode=a.mode, options=_options_from_args(a),
-            project_id=a.project_id, sequence_id=a.sequence_id, kdenlive_project=a.kdenlive_project, project_state=a.project_state, job_id=a.job_id,
+            job_root=a.job_root,
+            brief=a.brief,
+            inputs=a.inputs or None,
+            profile_ref=a.profile,
+            mode=a.mode,
+            options=_options_from_args(a),
+            project_id=a.project_id,
+            project_uuid=a.project_uuid,
+            project_name=a.project_name,
+            project_path=a.project_path,
+            sequence_id=a.sequence_id,
+            sequence_uuid=a.sequence_uuid,
+            sequence_name=a.sequence_name,
+            kdenlive_project=a.kdenlive_project,
+            project_state=a.project_state,
+            job_id=a.job_id,
         )
-        if a.plan_only:
+        if a.cmd == "plan" or getattr(a, "plan_only", False):
             job.doc["plan_only"] = True
             job._save(force=True)
         else:
@@ -655,8 +701,9 @@ def _dispatch(a: argparse.Namespace) -> int:
     if a.cmd == "queue":
         return _cmd_queue(a)
     if a.cmd == "history":
-        payload: dict[str, Any] = {"jobs": job_history(a.job_root, limit=a.limit)}
-        payload["queue"] = JobQueue(a.queue_root).entries() if a.queue_root else []
+        proj_filter = getattr(a, "project_uuid", None)
+        payload: dict[str, Any] = {"jobs": job_history(a.job_root, limit=a.limit, project_uuid=proj_filter)}
+        payload["queue"] = JobQueue(a.queue_root).entries(project_uuid=proj_filter) if a.queue_root else []
         return _emit(payload)
     if a.cmd == "profile":
         return _cmd_profile(a)

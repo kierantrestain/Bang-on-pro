@@ -107,6 +107,7 @@ private Q_SLOTS:
     void refresh(const QModelIndex &topLeft, const QModelIndex &bottomRight, const QVector<int> &roles);
     void slotAdjustDelegate(const std::shared_ptr<EffectItemModel> &effectModel, int height);
     void slotDeleteEffect(const std::shared_ptr<EffectItemModel> &effect);
+    void slotDuplicateEffect(const std::shared_ptr<EffectItemModel> &effect);
     void loadEffects();
     void updateTreeHeight();
     void slotFocusEffect();
@@ -133,4 +134,5 @@ Q_SIGNALS:
     void scrollView(QRect);
     void checkDragScrolling();
     void updateEffectsGroupesInstances();
+    void effectDroppedOnStack();
 };

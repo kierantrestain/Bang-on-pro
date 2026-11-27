@@ -953,16 +953,18 @@ def test_macos_craft_config_blueprint_and_ci_self_contained_packaging() -> None:
     for key in cp["BlueprintSettings"]:
         assert "." in key, f"CraftMaster requires blueprint.option in [BlueprintSettings], got {key!r}"
 
-    # Verify craft_blueprint.py imports offline, uses version 1.0.0 & Craft master libs/qt/* names
+    # Verify craft_blueprint.py imports offline, uses version 1.7.0 & Craft master libs/qt/* names
     bp_path = PACKAGING_MACOS_DIR / "craft_blueprint.py"
     spec = importlib.util.spec_from_file_location("bangonpro_craft_blueprint", bp_path)
     assert spec is not None and spec.loader is not None
     bp_mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(bp_mod)
-    assert bp_mod.BANGONPRO_VERSION == "1.0.0"
+    assert bp_mod.BANGONPRO_VERSION == "1.7.0"
 
     si = bp_mod.subinfo()
     si.setTargets()
+    assert "v1.7.0" in si.svnTargets
+    assert "bangonpro/v1.7-release" in si.svnTargets["v1.7.0"]
     si.setDependencies()
     deps = set(si.runtimeDependencies.keys())
     for required_dep in (
@@ -1010,7 +1012,54 @@ def test_macos_craft_config_blueprint_and_ci_self_contained_packaging() -> None:
     assert "packaging/macos/CraftConfig.ini" in wf_text
     assert "--branch qt6" not in wf_text, "Broken CraftBootstrap --branch qt6 must not be used"
     assert "draft: false" in wf_text, "Versioned tag releases must publish non-draft releases"
-    assert 'default: "1.6.0-beta.1"' in wf_text
+    assert 'default: "1.7.0"' in wf_text
     assert "verify_packaged_dmg" in build_sh_text
     assert "benchmark_results.json" in wf_text
+
+
+def test_v17_macos_packaging_relocation_videotoolbox_and_plist_hygiene() -> None:
+    """Verify V1.7.0 python-env Mach-O relocation/audit, VideoToolbox profiles, and Qt6 Info.plist hygiene."""
+    build_sh_text = (PACKAGING_MACOS_DIR / "build_macos_arm64.sh").read_text(encoding="utf-8")
+    assert 'APP_VERSION="${BANGONPRO_VERSION:-1.7.0}"' in build_sh_text
+
+    # Confirm python-env is both relocated and audited for leaked host/Homebrew paths
+    reloc_start = build_sh_text.index("relocate_macho_deps()")
+    reloc_end = build_sh_text.index("copy_plugin_dir_if_exists()")
+    reloc_body = build_sh_text[reloc_start:reloc_end]
+    assert "Contents/Resources/python-env" in reloc_body
+
+    audit_start = build_sh_text.index("audit_no_leaked_dylib_paths()")
+    audit_end = build_sh_text.index("audit_bundle_security_hygiene()")
+    audit_body = build_sh_text[audit_start:audit_end]
+    assert "Contents/Resources/python-env" in audit_body
+    assert "/opt/homebrew" in audit_body
+    assert "/usr/local/" in audit_body
+    assert "/Users/" in audit_body
+
+    # Verify Info.plist.in omits deprecated Qt5 QT_AUTO_SCREEN_SCALE_FACTOR
+    plist_text = (PACKAGING_MACOS_DIR / "Info.plist.in").read_text(encoding="utf-8")
+    assert "QT_AUTO_SCREEN_SCALE_FACTOR" not in plist_text
+
+    # Verify encodingprofiles.rc VideoToolbox profiles are valid for FFmpeg/MLT
+    enc_rc = REPO_ROOT / "data" / "encodingprofiles.rc"
+    assert enc_rc.is_file(), "data/encodingprofiles.rc missing"
+    enc_text = enc_rc.read_text(encoding="utf-8")
+    x264_vt_lines = [line for line in enc_text.splitlines() if line.startswith("x264-videotoolbox=")]
+    assert len(x264_vt_lines) == 1
+    x264_vt = x264_vt_lines[0]
+    assert "-vf scale=%width:-2" in x264_vt
+    assert "-allow_sw 1" in x264_vt
+    assert "-realtime 1" in x264_vt
+    assert "-acodec aac" in x264_vt
+    assert "-qp 26" not in x264_vt
+    assert "-acodec ac3" not in x264_vt
+
+    h264_vt_lines = [line for line in enc_text.splitlines() if line.startswith("h264-videotoolbox=")]
+    assert len(h264_vt_lines) == 1
+    h264_vt = h264_vt_lines[0]
+    assert "c:v=h264_videotoolbox" in h264_vt
+    assert "vb=12M" in h264_vt
+    assert "allow_sw=1" in h264_vt
+    assert "preset=fast" not in h264_vt
+
 

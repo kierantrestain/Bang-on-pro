@@ -1520,14 +1520,17 @@ void TimelineController::addAsset(const QVariantMap &data)
         if (effectSelection.isEmpty()) {
             QString effectName = EffectsRepository::get()->getName(effect);
             pCore->displayMessage(i18n("Cannot add effect %1 to selected clip", effectName), ErrorMessage, 500);
-        } else if (KdenliveSettings::seekonaddeffect() && effectSelection.count() == 1) {
-            // Move timeline cursor inside clip if it is not
+        } else {
             int cid = effectSelection.first().toInt();
-            int in = m_model->getClipPosition(cid);
-            int out = in + m_model->getClipPlaytime(cid);
-            int position = pCore->getMonitorPosition();
-            if (position < in || position > out) {
-                Q_EMIT seeked(in);
+            notifyEffectApplied(cid, effect);
+            if (KdenliveSettings::seekonaddeffect() && effectSelection.count() == 1) {
+                // Move timeline cursor inside clip if it is not
+                int in = m_model->getClipPosition(cid);
+                int out = in + m_model->getClipPlaytime(cid);
+                int position = pCore->getMonitorPosition();
+                if (position < in || position > out) {
+                    Q_EMIT seeked(in);
+                }
             }
         }
     } else {
@@ -2066,8 +2069,11 @@ void TimelineController::addEffectToCurrentClip(const QStringList &effectData)
         if (effectData.count() >= 4) {
             QString effectString = effectData.at(1) + QStringLiteral("-") + effectData.at(2) + QStringLiteral("-") + effectData.at(3);
             m_model->copyClipEffect(activeClips.first(), effectString);
+            notifyEffectApplied(activeClips.first(), effectData.constFirst());
         } else {
-            m_model->addClipEffect(activeClips.first(), effectData.constFirst());
+            if (!m_model->addClipEffect(activeClips.first(), effectData.constFirst()).isEmpty()) {
+                notifyEffectApplied(activeClips.first(), effectData.constFirst());
+            }
         }
     }
 }
@@ -3269,14 +3275,25 @@ void TimelineController::addEffectToClip(const QString &assetId, int clipId)
             return;
         }
     }
-    if (m_model->addClipEffect(clipId, assetId).size() > 0 && KdenliveSettings::seekonaddeffect()) {
-        // Move timeline cursor inside clip if it is not
-        int in = m_model->getClipPosition(clipId);
-        int out = in + m_model->getClipPlaytime(clipId);
-        int position = pCore->getMonitorPosition();
-        if (position < in || position > out) {
-            Q_EMIT seeked(in);
+    if (m_model->addClipEffect(clipId, assetId).size() > 0) {
+        notifyEffectApplied(clipId, assetId);
+        if (KdenliveSettings::seekonaddeffect()) {
+            // Move timeline cursor inside clip if it is not
+            int in = m_model->getClipPosition(clipId);
+            int out = in + m_model->getClipPlaytime(clipId);
+            int position = pCore->getMonitorPosition();
+            if (position < in || position > out) {
+                Q_EMIT seeked(in);
+            }
         }
+    }
+}
+
+void TimelineController::notifyEffectApplied(int clipId, const QString &effectId)
+{
+    if (clipId > -1) {
+        showAsset(clipId);
+        Q_EMIT effectAppliedToClip(clipId, effectId);
     }
 }
 

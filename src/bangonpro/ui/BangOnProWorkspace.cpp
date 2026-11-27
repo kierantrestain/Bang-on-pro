@@ -558,16 +558,16 @@ bool applyWorkspace(QMainWindow *mainWindow, WorkspaceMode mode, const Workspace
     switch (mode) {
     case WorkspaceMode::Edit: {
         // Premiere Pro / DaVinci Resolve practical editing layout:
-        // Project Bin & Effects top-left, Source Monitor top-center, Program Monitor top-right, full-width Timeline bottom.
+        // Project Bin & Unified Effects top-left, Source Monitor + Effect Controls top-center,
+        // Program Monitor top-right, full-width Timeline bottom.
         // AI Assistant docked and collapsed/hidden so manual editing stays unobstructed.
-        dockTopStudioColumns(
-            mainWindow,
-            {
-                {{d.projectBin, d.effectStack, d.effectList, d.premiereBrowser, d.compositionList, d.undoHistory}, d.projectBin, 320},
-                {{d.clipMonitor}, d.clipMonitor, 520},
-                {{d.projectMonitor}, d.projectMonitor, 600},
-            },
-            visibleDocks, arrangedCount);
+        dockTopStudioColumns(mainWindow,
+                             {
+                                 {{d.projectBin, d.effectList, d.compositionList, d.undoHistory}, d.projectBin, 320},
+                                 {{d.clipMonitor, d.effectStack}, d.clipMonitor != nullptr ? d.clipMonitor : d.effectStack, 520},
+                                 {{d.projectMonitor}, d.projectMonitor, 600},
+                             },
+                             visibleDocks, arrangedCount);
 
         if (d.aiAssistant != nullptr) {
             d.aiAssistant->setAllowedAreas(Qt::AllDockWidgetAreas);
@@ -637,17 +637,17 @@ bool applyWorkspace(QMainWindow *mainWindow, WorkspaceMode mode, const Workspace
     }
 
     case WorkspaceMode::Effects: {
-        // Native Effects & Bin left, Program/Clip Monitor center, Premiere Presets Browser (64+ presets) & Effect Stack right, full-width Timeline bottom.
+        // Unified Effects Library & Bin left, Program/Clip Monitor center, Effect Controls (raised on top) & Premiere Presets right, full-width Timeline
+        // bottom.
         QDockWidget *preferredLeft = d.effectList != nullptr ? d.effectList : d.projectBin;
-        QDockWidget *preferredRight = d.premiereBrowser != nullptr ? d.premiereBrowser : d.effectStack;
-        dockTopStudioColumns(
-            mainWindow,
-            {
-                {{d.effectList, d.compositionList, d.projectBin}, preferredLeft, 260},
-                {{d.projectMonitor, d.clipMonitor}, d.projectMonitor, 520},
-                {{d.premiereBrowser, d.effectStack}, preferredRight, 640},
-            },
-            visibleDocks, arrangedCount);
+        QDockWidget *preferredRight = d.effectStack != nullptr ? d.effectStack : d.premiereBrowser;
+        dockTopStudioColumns(mainWindow,
+                             {
+                                 {{d.effectList, d.compositionList, d.projectBin}, preferredLeft, 300},
+                                 {{d.projectMonitor, d.clipMonitor}, d.projectMonitor, 540},
+                                 {{d.effectStack, d.premiereBrowser}, preferredRight, 580},
+                             },
+                             visibleDocks, arrangedCount);
         break;
     }
 

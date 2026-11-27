@@ -38,17 +38,81 @@ SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
 #include <QCoreApplication>
 #include <QDesktopServices>
 #include <QDir>
+#include <QFileInfo>
 #include <QImageReader>
 #include <QInputDialog>
 #include <QQuickStyle>
 #include <locale>
 #ifdef Q_OS_MAC
+#include <sys/sysctl.h>
 #include <xlocale.h>
 #endif
+#ifdef Q_OS_UNIX
+#include <cerrno>
+#include <csignal>
+#include <unistd.h>
+#endif
+
+namespace {
+
+unsigned audioThumbCacheSizeBytes()
+{
+    quint64 memBytes = 0;
+#if defined(Q_OS_MAC)
+    uint64_t hwMem = 0;
+    size_t len = sizeof(hwMem);
+    if (sysctlbyname("hw.memsize", &hwMem, &len, nullptr, 0) == 0 && hwMem > 0) {
+        memBytes = static_cast<quint64>(hwMem);
+    }
+#elif defined(Q_OS_UNIX)
+    const long pages = sysconf(_SC_PHYS_PAGES);
+    const long pageSize = sysconf(_SC_PAGESIZE);
+    if (pages > 0 && pageSize > 0) {
+        memBytes = static_cast<quint64>(pages) * static_cast<quint64>(pageSize);
+    }
+#endif
+    const quint64 kGiB = 1024ULL * 1024ULL * 1024ULL;
+    if (memBytes >= 16ULL * kGiB) {
+        return 32U * 1024U * 1024U; // 32 MB on >= 16 GB systems
+    }
+    if (memBytes >= 8ULL * kGiB) {
+        return 16U * 1024U * 1024U; // 16 MB on >= 8 GB systems
+    }
+    return 4U * 1024U * 1024U; // 4 MB floor on constrained systems
+}
+
+#ifdef Q_OS_UNIX
+bool isStartupLockPidAlive(qint64 pid)
+{
+    if (pid <= 0) {
+        return false;
+    }
+    if (::kill(static_cast<pid_t>(pid), 0) == 0) {
+        return true;
+    }
+    return errno == EPERM;
+}
+#endif
+
+void writeStartupLockPid(const QString &lockPath)
+{
+    QFile outFile(lockPath);
+    if (outFile.open(QFile::WriteOnly | QFile::Truncate)) {
+        outFile.write(QByteArray::number(QCoreApplication::applicationPid()));
+        outFile.write("\n", 1);
+        outFile.flush();
+        outFile.close();
+#ifdef Q_OS_UNIX
+        QFile::setPermissions(lockPath, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+#endif
+    }
+}
+
+} // namespace
 
 std::unique_ptr<Core> Core::m_self;
 Core::Core(LinuxPackageType packageType)
-    : audioThumbCache(QStringLiteral("audioCache"), 2000000)
+    : audioThumbCache(QStringLiteral("audioCache"), audioThumbCacheSizeBytes())
     , taskManager(this)
     , m_packageType(packageType)
     , m_capture(new MediaCapture(this))
@@ -108,32 +172,49 @@ bool Core::build(LinuxPackageType packageType, bool testMode)
 
     if (!testMode) {
         // Check if we had a crash
-        QFile lockFile(QDir::temp().absoluteFilePath(QStringLiteral("kdenlivelock")));
-        if (lockFile.exists()) {
-            // a previous instance crashed, propose some actions
-            if (KdenliveSettings::gpu_accel()) {
-                // Propose to disable movit
-                if (KMessageBox::questionTwoActions(QApplication::activeWindow(),
-                                                    i18n("Kdenlive crashed on last startup.\nDo you want to disable experimental GPU processing (Movit) ?"), {},
-                                                    KGuiItem(i18n("Disable GPU processing")), KStandardGuiItem::cont()) == KMessageBox::PrimaryAction) {
-                    KdenliveSettings::setGpu_accel(false);
+        const QString lockPath = QDir::temp().absoluteFilePath(QStringLiteral("kdenlivelock"));
+        const QFileInfo lockInfo(lockPath);
+        QFile lockFile(lockPath);
+        if (lockInfo.exists() && !lockInfo.isSymLink()) {
+            bool anotherInstanceAlive = false;
+            if (lockFile.open(QFile::ReadOnly)) {
+                bool pidOk = false;
+                const qint64 storedPid = lockFile.read(64).trimmed().toLongLong(&pidOk);
+                lockFile.close();
+#ifdef Q_OS_UNIX
+                if (pidOk && storedPid > 0 && storedPid != QCoreApplication::applicationPid() && isStartupLockPidAlive(storedPid)) {
+                    anotherInstanceAlive = true;
                 }
-            } else {
-                // propose to delete config files
-                if (KMessageBox::questionTwoActions(QApplication::activeWindow(),
-                                                    i18n("Kdenlive crashed on last startup.\nDo you want to reset the configuration files ?"), {},
-                                                    KStandardGuiItem::reset(), KStandardGuiItem::cont()) == KMessageBox::PrimaryAction) {
-                    // Release startup crash lock file
-                    QFile lockFile(QDir::temp().absoluteFilePath(QStringLiteral("kdenlivelock")));
-                    lockFile.remove();
-                    return false;
-                }
+#else
+                Q_UNUSED(pidOk);
+                Q_UNUSED(storedPid);
+#endif
             }
-        } else {
-            // Create lock file
-            lockFile.open(QFile::WriteOnly);
-            lockFile.write(QByteArray());
-            lockFile.close();
+            if (!anotherInstanceAlive) {
+                // a previous instance crashed, propose some actions
+                if (KdenliveSettings::gpu_accel()) {
+                    // Propose to disable movit
+                    if (KMessageBox::questionTwoActions(QApplication::activeWindow(),
+                                                        i18n("Kdenlive crashed on last startup.\nDo you want to disable experimental GPU processing (Movit) ?"),
+                                                        {}, KGuiItem(i18n("Disable GPU processing")), KStandardGuiItem::cont()) == KMessageBox::PrimaryAction) {
+                        KdenliveSettings::setGpu_accel(false);
+                    }
+                } else {
+                    // propose to delete config files
+                    if (KMessageBox::questionTwoActions(QApplication::activeWindow(),
+                                                        i18n("Kdenlive crashed on last startup.\nDo you want to reset the configuration files ?"), {},
+                                                        KStandardGuiItem::reset(), KStandardGuiItem::cont()) == KMessageBox::PrimaryAction) {
+                        // Release startup crash lock file
+                        lockFile.remove();
+                        return false;
+                    }
+                }
+                // User chose to continue without resetting: record current PID in lock file.
+                writeStartupLockPid(lockPath);
+            }
+        } else if (!lockInfo.isSymLink()) {
+            // Create lock file with current PID
+            writeStartupLockPid(lockPath);
         }
     }
 

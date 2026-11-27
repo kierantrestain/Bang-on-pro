@@ -65,7 +65,6 @@ QProcessEnvironment buildSanitizedPythonEnvironment(const QString &pythonRoot)
         QStringLiteral("XDG_CACHE_HOME"),
         QStringLiteral("XDG_DATA_HOME"),
         QStringLiteral("XDG_CONFIG_HOME"),
-        QStringLiteral("DYLD_LIBRARY_PATH"),
         QStringLiteral("LD_LIBRARY_PATH"),
     };
     for (const QString &key : allowedVars) {
@@ -73,9 +72,9 @@ QProcessEnvironment buildSanitizedPythonEnvironment(const QString &pythonRoot)
             clean.insert(key, host.value(key));
         }
     }
-    const QString existingPyPath = host.value(QStringLiteral("PYTHONPATH"));
+    clean.insert(QStringLiteral("PYTHONNOUSERSITE"), QStringLiteral("1"));
     if (!pythonRoot.isEmpty()) {
-        clean.insert(QStringLiteral("PYTHONPATH"), existingPyPath.isEmpty() ? pythonRoot : pythonRoot + QDir::listSeparator() + existingPyPath);
+        clean.insert(QStringLiteral("PYTHONPATH"), pythonRoot);
     }
     return clean;
 }
@@ -130,8 +129,11 @@ ModelManagerDialog::~ModelManagerDialog()
     if (m_activeProcess) {
         m_activeProcess->disconnect(this);
         if (m_activeProcess->state() != QProcess::NotRunning) {
-            m_activeProcess->kill();
-            m_activeProcess->waitForFinished(1000);
+            m_activeProcess->terminate();
+            if (!m_activeProcess->waitForFinished(250)) {
+                m_activeProcess->kill();
+                m_activeProcess->waitForFinished(100);
+            }
         }
     }
 }
@@ -365,7 +367,7 @@ QProcess *ModelManagerDialog::spawnCli(const QStringList &args)
         m_statusLabel->setText(QStringLiteral("Python runtime or bangonpro package root is unavailable."));
         return nullptr;
     }
-    QStringList fullArgs{QStringLiteral("-m"), QStringLiteral("bangonpro.ai_engine.cli")};
+    QStringList fullArgs{QStringLiteral("-s"), QStringLiteral("-m"), QStringLiteral("bangonpro.ai_engine.cli")};
     if (!m_modelDirOverride.isEmpty()) {
         fullArgs << QStringLiteral("--model-dir") << m_modelDirOverride;
     }

@@ -464,6 +464,9 @@ bool ProjectManager::closeCurrentDocument(bool saveChanges, bool quit)
         }
         pCore->closing = true;
     }
+    if (m_project != nullptr) {
+        Q_EMIT docAboutToClose(m_project);
+    }
     // Abort clip loading if any
     Q_EMIT pCore->stopProgressTask();
     qApp->processEvents();

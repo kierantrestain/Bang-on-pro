@@ -141,6 +141,87 @@ resolve_python() {
     die "No Python 3 interpreter found in PATH or /opt/homebrew."
 }
 
+make_venv_relocatable() {
+    local venv_dir="$1"
+    local base_py="$2"
+    local venv_py="${venv_dir}/bin/python3"
+
+    # 1. Ensure bin/python3 is a real Mach-O binary copy (not a symlink to /opt/homebrew or host Python)
+    #    so build_macos_arm64.sh can relocate its Mach-O links into Contents/Frameworks/.
+    local bin_cand resolved_bin
+    for bin_cand in "${venv_dir}/bin/python3" "${venv_dir}/bin/python3.12"; do
+        if [[ -L "${bin_cand}" ]]; then
+            resolved_bin="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "${bin_cand}" 2>/dev/null || true)"
+            if [[ -n "${resolved_bin}" && -f "${resolved_bin}" ]]; then
+                rm -f "${bin_cand}"
+                cp -L -f "${resolved_bin}" "${bin_cand}"
+                chmod 755 "${bin_cand}"
+            fi
+        fi
+    done
+
+    # 2. On macOS, bundle the Python standard library + lib-dynload directly inside python-env/lib/pythonX.Y
+    #    so the .app runs on Macs without Homebrew Python 3.12 installed.
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+        local py_ver stdlib_dir platstdlib_dir target_lib_dir
+        py_ver="$("${base_py}" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+        stdlib_dir="$("${base_py}" -c 'import sysconfig; print(sysconfig.get_path("stdlib") or "")')"
+        platstdlib_dir="$("${base_py}" -c 'import sysconfig; print(sysconfig.get_path("platstdlib") or "")')"
+        target_lib_dir="${venv_dir}/lib/python${py_ver}"
+        mkdir -p "${target_lib_dir}"
+
+        if [[ -n "${stdlib_dir}" && -d "${stdlib_dir}" ]]; then
+            log "Bundling Python ${py_ver} stdlib from ${stdlib_dir} -> ${target_lib_dir}..."
+            local entry name
+            for entry in "${stdlib_dir}"/*; do
+                [[ -e "${entry}" ]] || continue
+                name="$(basename "${entry}")"
+                case "${name}" in
+                    site-packages|test|tests|idlelib|tkinter|turtledemo|ensurepip|__pycache__|config-*)
+                        continue
+                        ;;
+                esac
+                if [[ ! -e "${target_lib_dir}/${name}" ]]; then
+                    cp -RL "${entry}" "${target_lib_dir}/${name}"
+                fi
+            done
+        fi
+
+        if [[ -n "${platstdlib_dir}" && -d "${platstdlib_dir}/lib-dynload" && ! -d "${target_lib_dir}/lib-dynload" ]]; then
+            cp -RL "${platstdlib_dir}/lib-dynload" "${target_lib_dir}/lib-dynload"
+        fi
+
+        # Remove hardcoded host/Homebrew pyvenv.cfg so CPython resolves sys.prefix via
+        # the bundled lib/pythonX.Y landmark relative to Contents/Resources/python-env/bin/python3.
+        if [[ -f "${target_lib_dir}/os.py" && -f "${venv_dir}/pyvenv.cfg" ]]; then
+            rm -f "${venv_dir}/pyvenv.cfg"
+        fi
+    elif [[ -f "${venv_dir}/pyvenv.cfg" ]]; then
+        # Scrub build-host absolute command lines from pyvenv.cfg where safe
+        grep -vE '^(command|executable) *= *(/opt/homebrew|/usr/local|/Users/)' "${venv_dir}/pyvenv.cfg" > "${venv_dir}/pyvenv.cfg.tmp" || true
+        mv -f "${venv_dir}/pyvenv.cfg.tmp" "${venv_dir}/pyvenv.cfg"
+    fi
+
+    # 3. Rewrite absolute build-host shebangs in bin/ scripts to portable #!/usr/bin/env python3
+    local script_file first_line
+    for script_file in "${venv_dir}/bin"/*; do
+        [[ -f "${script_file}" && ! -L "${script_file}" ]] || continue
+        if file -b "${script_file}" 2>/dev/null | grep -qi "text"; then
+            first_line="$(head -n 1 "${script_file}" 2>/dev/null || true)"
+            if [[ "${first_line}" == "#!"*python* && "${first_line}" != "#!/usr/bin/env"* ]]; then
+                {
+                    printf '#!/usr/bin/env python3\n'
+                    tail -n +2 "${script_file}"
+                } > "${script_file}.reloc"
+                chmod --reference="${script_file}" "${script_file}.reloc" 2>/dev/null || chmod 755 "${script_file}.reloc"
+                mv -f "${script_file}.reloc" "${script_file}"
+            fi
+        fi
+    done
+
+    [[ -x "${venv_py}" ]] || die "Relocated Python binary missing or not executable: ${venv_py}"
+}
+
 main() {
     sanitize_runtime_env
     SCRATCH_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/bangonpro-pyvenv.XXXXXX")"
@@ -185,12 +266,14 @@ main() {
         esac
     fi
 
+    make_venv_relocatable "${VENV_DIR}" "${PYTHON_BIN}"
+
     # Strip cached bytecode & transient caches to minimize .app/.dmg footprint
     find "${VENV_DIR}" -type d -name "__pycache__" -prune -exec rm -rf {} + 2>/dev/null || true
     find "${VENV_DIR}" -type f \( -name "*.pyc" -o -name ".env" -o -name "*.p12" -o -name "*.p8" \) -delete 2>/dev/null || true
 
     # Verify core imports inside the self-contained environment (isolated from host site-packages)
-    "${venv_py}" -s -c "import numpy, scipy, defusedxml, jsonschema, yaml, PIL, opentimelineio, scenedetect; print('Core Python runtime OK')"
+    "${venv_py}" -s -c "import sys, numpy, scipy, defusedxml, jsonschema, yaml, PIL, opentimelineio, scenedetect; print('Core Python runtime OK:', sys.prefix)"
     log "Self-contained Python runtime ready at ${VENV_DIR}"
 }
 

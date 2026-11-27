@@ -72,6 +72,12 @@ public:
     /** @brief Reset all loaded transcript state. */
     void clear();
 
+    /** @brief Reset loaded transcript segments, search/filter state, and active path on project switch. */
+    void resetForProject();
+
+    /** @brief Path to the currently loaded transcript file, if loaded from disk. */
+    QString activeFilePath() const { return m_activeFilePath; }
+
     /** @brief Total loaded transcript segments. */
     int segmentCount() const;
 
@@ -163,6 +169,7 @@ private:
     QVector<TranscriptSegmentItem> m_segments;
     QMap<QString, QString> m_speakerRenames;
     QJsonObject m_sourceMetadata;
+    QString m_activeFilePath;
     int m_fpsNum = 25;
     int m_fpsDen = 1;
     double m_reviewThreshold = 0.72;

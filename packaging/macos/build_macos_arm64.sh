@@ -25,7 +25,7 @@ CRAFT_ROOT="${CRAFT_ROOT:-${HOME}/CraftRoot}"
 CRAFT_PREFIX=""
 APP_NAME="Bang On Pro"
 DMG_BASENAME="BangOnPro"
-APP_VERSION="${BANGONPRO_VERSION:-1.5.2}"
+APP_VERSION="${BANGONPRO_VERSION:-1.7.0}"
 MIN_MACOS="${MACOSX_DEPLOYMENT_TARGET:-13.0}"
 SIGN_IDENTITY="${APPLE_SIGNING_IDENTITY:-${MACOS_SIGNING_IDENTITY:-}}"
 NOTARY_PROFILE="${MACOS_NOTARY_PROFILE:-}"
@@ -73,7 +73,7 @@ Options:
   --output-dir <path>           Output directory for .app/.dmg/logs (default: ./dist/macos-arm64)
   --craft-root <path>           KDE Craft root or CraftMaster target prefix
                                 (auto-detects <root>/macos-arm-clang if present)
-  --version <ver>               Release version string (default: 1.5.2)
+  --version <ver>               Release version string (default: 1.7.0)
   --min-macos <ver>             MACOSX_DEPLOYMENT_TARGET (default: 13.0)
   --sign-identity <id>          Developer ID Application signing identity
                                 (omit to fall back cleanly to ad-hoc signing)
@@ -339,14 +339,23 @@ build_application() {
         fi
     done
     if [[ "${SKIP_TESTS}" -eq 0 ]]; then
-        build_targets+=(
-            bangonpro_test_timeline_command_engine
-            bangonpro_test_ai_assistant_dock
-            bangonpro_test_premiere_preset_browser
-            bangonpro_test_pro_workspace
-            bangonpro_test_roto_studio
-            bangonpro_test_agent_control_centre
-        )
+        if printf '%s\n' "${avail_targets}" | grep -qE "^bangonpro_all_tests:"; then
+            build_targets+=(bangonpro_all_tests)
+        else
+            local test_t
+            for test_t in \
+                bangonpro_test_timeline_command_engine \
+                bangonpro_test_ai_assistant_dock \
+                bangonpro_test_premiere_preset_browser \
+                bangonpro_test_pro_workspace \
+                bangonpro_test_roto_studio \
+                bangonpro_test_agent_control_centre \
+                bangonpro_test_effects_and_controls; do
+                if printf '%s\n' "${avail_targets}" | grep -qE "^${test_t}:"; then
+                    build_targets+=("${test_t}")
+                fi
+            done
+        fi
     fi
     log "Compiling ${build_targets[*]} with ${JOBS} parallel Ninja jobs..."
     cmake --build "${BUILD_DIR}" --target "${build_targets[@]}" --parallel "${JOBS}"
@@ -403,7 +412,7 @@ strip_external_rpaths() {
     while IFS= read -r bad_rpath; do
         [[ -n "${bad_rpath}" ]] || continue
         case "${bad_rpath}" in
-            /Users/*|/opt/homebrew*|/usr/local/Cellar*|"${CRAFT_ROOT}"*|"${BUILD_DIR}"*|"${STAGE_DIR}"*|"${REPO_ROOT}"*)
+            /Users/*|/opt/homebrew*|/usr/local/*|"${CRAFT_ROOT}"*|"${BUILD_DIR}"*|"${STAGE_DIR}"*|"${REPO_ROOT}"*)
                 install_name_tool -delete_rpath "${bad_rpath}" "${macho}" 2>/dev/null || true
                 ;;
         esac
@@ -421,10 +430,13 @@ relocate_macho_deps() {
     : > "${queue_file}"
     : > "${seen_file}"
 
-    # Seed queue with main executables, bundled tools, frameworks, plugins, and QML libraries
+    # Seed queue with main executables, bundled tools, frameworks, plugins, QML libraries, and bundled python-env
     local scan_roots=("${app_bundle}/Contents/MacOS" "${app_bundle}/Contents/Frameworks" "${app_bundle}/Contents/PlugIns")
     if [[ -d "${app_bundle}/Contents/Resources/qml" ]]; then
         scan_roots+=("${app_bundle}/Contents/Resources/qml")
+    fi
+    if [[ -d "${app_bundle}/Contents/Resources/python-env" ]]; then
+        scan_roots+=("${app_bundle}/Contents/Resources/python-env")
     fi
     find "${scan_roots[@]}" \
         -type f \( -perm -111 -o -name "*.dylib" -o -name "*.so" \) 2>/dev/null | \
@@ -475,6 +487,26 @@ relocate_macho_deps() {
                     ensure_rpath "${target}" "@loader_path/../../../Frameworks"
                     ensure_rpath "${target}" "@executable_path/../Frameworks"
                     ;;
+                "${app_bundle}/Contents/Resources/python-env/"*)
+                    if [[ "${target}" == *.dylib || "${target}" == *.so ]]; then
+                        install_name_tool -id "@rpath/$(basename "${target}")" "${target}" 2>/dev/null || true
+                    fi
+                    local rel_to_contents="${target#"${app_bundle}/Contents/"}"
+                    local dir_part
+                    dir_part="$(dirname "${rel_to_contents}")"
+                    local up_prefix="@loader_path"
+                    local seg
+                    local -a _segs=()
+                    IFS='/' read -r -a _segs <<< "${dir_part}"
+                    for seg in "${_segs[@]}"; do
+                        if [[ -n "${seg}" && "${seg}" != "." ]]; then
+                            up_prefix="${up_prefix}/.."
+                        fi
+                    done
+                    ensure_rpath "${target}" "${up_prefix}/Frameworks"
+                    ensure_rpath "${target}" "@loader_path"
+                    ensure_rpath "${target}" "@executable_path/../../../Frameworks"
+                    ;;
             esac
 
             local dep
@@ -502,6 +534,8 @@ relocate_macho_deps() {
                             "${CRAFT_PREFIX}/Frameworks" \
                             "${STAGE_DIR}/lib" \
                             "/opt/homebrew/opt/qt@6/lib" \
+                            "/opt/homebrew/opt/python@3.12/Frameworks" \
+                            "/opt/homebrew/Frameworks" \
                             "/opt/homebrew/lib"; do
                             if [[ -n "${fw_root}" && -d "${fw_root}/${fw_bundle_name}" ]]; then
                                 fw_cand="${fw_root}/${fw_bundle_name}"
@@ -549,6 +583,7 @@ relocate_macho_deps() {
                     fw_bundle_dir="$(printf '%s' "${dep}" | sed -E 's|(.*\.framework)/.*|\1|')"
                     if [[ ! -d "${frameworks_dir}/${fw_bundle_name}" && -d "${fw_bundle_dir}" ]]; then
                         cp -R "${fw_bundle_dir}" "${frameworks_dir}/${fw_bundle_name}"
+                        chmod -R u+w "${frameworks_dir}/${fw_bundle_name}" 2>/dev/null || true
                         if [[ -f "${frameworks_dir}/${fw_subpath}" ]]; then
                             chmod u+w "${frameworks_dir}/${fw_subpath}" 2>/dev/null || true
                             install_name_tool -id "@rpath/${fw_subpath}" "${frameworks_dir}/${fw_subpath}" 2>/dev/null || true
@@ -1064,8 +1099,11 @@ audit_no_leaked_dylib_paths() {
     if [[ -d "${app_bundle}/Contents/Resources/qml" ]]; then
         scan_roots+=("${app_bundle}/Contents/Resources/qml")
     fi
+    if [[ -d "${app_bundle}/Contents/Resources/python-env" ]]; then
+        scan_roots+=("${app_bundle}/Contents/Resources/python-env")
+    fi
 
-    local leak_regex='^(/Users/|/opt/homebrew|/usr/local/Cellar'
+    local leak_regex='^(/Users/|/opt/homebrew|/usr/local/'
     [[ -n "${CRAFT_ROOT}" ]] && leak_regex="${leak_regex}|${CRAFT_ROOT}"
     [[ -n "${BUILD_DIR}" ]] && leak_regex="${leak_regex}|${BUILD_DIR}"
     [[ -n "${STAGE_DIR}" ]] && leak_regex="${leak_regex}|${STAGE_DIR}"

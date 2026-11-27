@@ -459,6 +459,8 @@ public:
     Q_INVOKABLE void switchEnableState(std::unordered_set<int> selection = {});
     Q_INVOKABLE void addCompositionToClip(const QString &assetId, int clipId = -1, int offset = -1);
     Q_INVOKABLE void addEffectToClip(const QString &assetId, int clipId = -1);
+    /** @brief Reveal the clip's Effect Controls and notify MainWindow after an effect is applied or dropped. */
+    Q_INVOKABLE void notifyEffectApplied(int clipId, const QString &effectId);
     Q_INVOKABLE void setEffectsEnabled(int clipId, bool enabled);
 
     Q_INVOKABLE void requestClipCut(int clipId, int position);
@@ -860,4 +862,6 @@ Q_SIGNALS:
     void updateAssetPosition(int itemId, const QUuid uuid);
     void stopAudioRecord();
     void activeSubtitlePositionChanged();
+    /** @brief Emitted whenever an effect is applied or dropped onto a timeline clip so Effect Controls auto-reveals. */
+    void effectAppliedToClip(int clipId, const QString &effectId);
 };

@@ -15,6 +15,8 @@
 #include <QString>
 #include <QtGlobal>
 
+class QTimer;
+
 namespace BangOnPro {
 
 /**
@@ -34,6 +36,8 @@ class TimelineCommandServer : public QObject
 
 public:
     static constexpr qint64 kMaxPayloadBytes = 16 * 1024 * 1024; // 16 MiB
+    static constexpr int kMaxConcurrentClients = 8;
+    static constexpr int kClientIdleTimeoutMs = 60 * 1000; // 60 seconds
 
     explicit TimelineCommandServer(TimelineCommandEngine *engine, QObject *parent = nullptr);
     ~TimelineCommandServer() override;
@@ -66,12 +70,16 @@ private Q_SLOTS:
 private:
     QByteArray dispatchLine(const QByteArray &line);
     QByteArray handleRpcControlRequest(const QJsonObject &obj);
+    void startClientIdleTimer(QLocalSocket *client);
+    void resetClientIdleTimer(QLocalSocket *client);
+    void removeClientIdleTimer(QLocalSocket *client);
     static QByteArray makeErrorEnvelope(const QString &requestId, CommandStatus status, qint64 revision, const QString &message);
 
     TimelineCommandEngine *m_engine = nullptr;
     QLocalServer *m_server = nullptr;
     QString m_socketPath;
     QHash<QLocalSocket *, QByteArray> m_clientBuffers;
+    QHash<QLocalSocket *, QTimer *> m_clientIdleTimers;
     QSet<QLocalSocket *> m_rejectedClients;
 };
 

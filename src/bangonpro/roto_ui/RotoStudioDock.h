@@ -20,9 +20,11 @@ class QLabel;
 class QLineEdit;
 class QListWidget;
 class QPushButton;
+class QShowEvent;
 class QSlider;
 class QSpinBox;
 class QTabWidget;
+class QTimer;
 
 namespace BangOnPro {
 
@@ -80,14 +82,19 @@ class RotoStudioDock : public QWidget
     Q_OBJECT
 
 public:
+    static constexpr int kMaxCanvasUndoDepth = 50;
+
     explicit RotoStudioDock(QWidget *parent = nullptr);
     ~RotoStudioDock() override = default;
 
-    RotoMaskCanvasWidget *canvasWidget() const { return m_canvas; }
+    /** @brief Reset all project-bound frames, mattes, masks, 2D layers, storyboard shots, and undo stacks on project switch. */
+    void resetForProject();
+
+    RotoMaskCanvasWidget *canvasWidget() const;
     QTabWidget *tabWidget() const { return m_tabs; }
 
     // Mask management API
-    int maskCount() const { return m_masks.size(); }
+    int maskCount() const;
     QString addMaskLayer(const QString &name = QString());
     bool duplicateSelectedMask();
     bool removeSelectedMask();
@@ -103,7 +110,7 @@ public:
     QString segmentationBackendStatusText() const;
 
     // ArtCraft-adapted 2D Layer Composition API
-    int canvas2DLayerCount() const { return m_canvasLayers.size(); }
+    int canvas2DLayerCount() const;
     QString addCanvas2DLayer(const QString &name, const QString &kind = QStringLiteral("solid"),
                              const QString &imagePath = QString(), const QString &text = QString());
     bool moveSelectedCanvas2DLayer(int delta);
@@ -114,12 +121,15 @@ public:
     QJsonObject exportCanvas2DJson() const;
 
     // ArtCraft-adapted Storyboard API
-    int storyboardShotCount() const { return m_storyboardShots.size(); }
+    int storyboardShotCount() const;
     QString addStoryboardShot(const QString &title = QString(), double durationSec = 3.0,
                               const QString &dialogue = QString(), const QString &action = QString());
     bool deleteSelectedStoryboardShot();
     bool moveSelectedStoryboardShot(int delta);
     QJsonObject exportStoryboardJson() const;
+
+protected:
+    void showEvent(QShowEvent *event) override;
 
 Q_SIGNALS:
     void commitMaskToTimelineRequested(const QJsonObject &rotoSessionJson);
@@ -148,6 +158,8 @@ private:
     QWidget *buildCanvas2DTab();
     QWidget *buildStoryboardTab();
 
+    void ensureDefaultContentSeeded() const;
+    void seedDefaultContent();
     void refreshMaskList();
     void syncUiFromSelectedMask();
     void pushCanvas2DUndoSnapshot();
@@ -155,6 +167,9 @@ private:
     void refreshStoryboardList();
 
     QTabWidget *m_tabs = nullptr;
+    QTimer *m_maskListRefreshTimer = nullptr;
+    QTimer *m_layerListRefreshTimer = nullptr;
+    bool m_defaultContentSeeded = false;
 
     // Tab 1: Rotoscope & Mask
     RotoMaskCanvasWidget *m_canvas = nullptr;

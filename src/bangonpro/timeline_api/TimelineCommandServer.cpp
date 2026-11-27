@@ -21,6 +21,9 @@ namespace {
 constexpr qint64 kReadChunkBytes = 64 * 1024;
 } // namespace
 
+constexpr int TimelineCommandServer::kMaxConcurrentClients;
+constexpr int TimelineCommandServer::kClientIdleTimeoutMs;
+
 TimelineCommandServer::TimelineCommandServer(TimelineCommandEngine *engine, QObject *parent)
     : QObject(parent)
     , m_engine(engine)
@@ -79,7 +82,8 @@ bool TimelineCommandServer::start(const QString &socketPath, QString *errorMessa
     if (!m_server->listen(resolvedPath)) {
         // Recover cleanly from stale socket files left behind by a crashed prior instance,
         // while refusing to hijack a socket actively served by a live process.
-        if (m_server->serverError() == QAbstractSocket::AddressInUseError) {
+        // Avoid the 150ms blocking probe if no socket file exists on disk.
+        if (m_server->serverError() == QAbstractSocket::AddressInUseError && QFileInfo::exists(resolvedPath)) {
             QLocalSocket probe;
             probe.connectToServer(resolvedPath);
             if (probe.waitForConnected(150)) {
@@ -105,6 +109,15 @@ bool TimelineCommandServer::start(const QString &socketPath, QString *errorMessa
 
 void TimelineCommandServer::stop()
 {
+    const QList<QTimer *> idleTimers = m_clientIdleTimers.values();
+    for (QTimer *timer : idleTimers) {
+        if (timer != nullptr) {
+            timer->stop();
+            timer->deleteLater();
+        }
+    }
+    m_clientIdleTimers.clear();
+
     const QList<QLocalSocket *> clients = m_clientBuffers.keys();
     for (QLocalSocket *client : clients) {
         if (client != nullptr) {
@@ -155,7 +168,20 @@ void TimelineCommandServer::handleNewConnection()
         if (client == nullptr) {
             continue;
         }
+        if (m_clientBuffers.size() >= kMaxConcurrentClients) {
+            const QString errMsg = QStringLiteral("Too many concurrent IPC clients (limit: %1)").arg(kMaxConcurrentClients);
+            const QByteArray errPayload = makeErrorEnvelope(QString(), CommandStatus::ValidationError, m_engine ? m_engine->currentRevision() : 0, errMsg);
+            m_rejectedClients.insert(client);
+            connect(client, &QLocalSocket::disconnected, this, &TimelineCommandServer::handleClientDisconnected);
+            client->write(errPayload);
+            client->write("\n", 1);
+            client->flush();
+            Q_EMIT protocolError(errMsg);
+            QTimer::singleShot(100, client, &QLocalSocket::disconnectFromServer);
+            continue;
+        }
         m_clientBuffers.insert(client, QByteArray());
+        startClientIdleTimer(client);
         connect(client, &QLocalSocket::readyRead, this, &TimelineCommandServer::handleClientReadyRead);
         connect(client, &QLocalSocket::disconnected, this, &TimelineCommandServer::handleClientDisconnected);
 #if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
@@ -182,9 +208,12 @@ void TimelineCommandServer::handleClientReadyRead()
         return;
     }
 
+    resetClientIdleTimer(client);
+
     auto rejectOversized = [this, client]() {
         const QString errMsg = QStringLiteral("Payload exceeds maximum allowed size of %1 bytes").arg(kMaxPayloadBytes);
         const QByteArray errPayload = makeErrorEnvelope(QString(), CommandStatus::ValidationError, m_engine ? m_engine->currentRevision() : 0, errMsg);
+        removeClientIdleTimer(client);
         m_clientBuffers.remove(client);
         m_rejectedClients.insert(client);
         client->readAll();
@@ -242,10 +271,50 @@ void TimelineCommandServer::handleClientDisconnected()
     if (client == nullptr) {
         return;
     }
+    const bool wasAccepted = m_clientBuffers.contains(client);
+    removeClientIdleTimer(client);
     m_clientBuffers.remove(client);
     m_rejectedClients.remove(client);
     client->deleteLater();
-    Q_EMIT clientDisconnected();
+    if (wasAccepted) {
+        Q_EMIT clientDisconnected();
+    }
+}
+
+void TimelineCommandServer::startClientIdleTimer(QLocalSocket *client)
+{
+    if (client == nullptr) {
+        return;
+    }
+    removeClientIdleTimer(client);
+    auto *timer = new QTimer(this);
+    timer->setSingleShot(true);
+    timer->setInterval(kClientIdleTimeoutMs);
+    connect(timer, &QTimer::timeout, this, [this, client]() {
+        if (m_clientBuffers.contains(client)) {
+            Q_EMIT protocolError(QStringLiteral("Disconnected idle IPC client after %1 ms").arg(kClientIdleTimeoutMs));
+            client->disconnectFromServer();
+        }
+    });
+    m_clientIdleTimers.insert(client, timer);
+    timer->start();
+}
+
+void TimelineCommandServer::resetClientIdleTimer(QLocalSocket *client)
+{
+    QTimer *timer = m_clientIdleTimers.value(client, nullptr);
+    if (timer != nullptr) {
+        timer->start();
+    }
+}
+
+void TimelineCommandServer::removeClientIdleTimer(QLocalSocket *client)
+{
+    QTimer *timer = m_clientIdleTimers.take(client);
+    if (timer != nullptr) {
+        timer->stop();
+        timer->deleteLater();
+    }
 }
 
 void TimelineCommandServer::handleClientError(QLocalSocket::LocalSocketError socketError)

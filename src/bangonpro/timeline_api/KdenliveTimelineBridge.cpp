@@ -92,15 +92,38 @@ void KdenliveTimelineBridge::setTimelineOverride(std::shared_ptr<TimelineItemMod
     m_explicitTimeline = std::move(timeline);
 }
 
+void KdenliveTimelineBridge::clearAliases()
+{
+    m_mediaAliases.clear();
+    m_trackAliases.clear();
+    m_clipAliases.clear();
+    m_mediaAliasesBackup.clear();
+    m_trackAliasesBackup.clear();
+    m_clipAliasesBackup.clear();
+}
+
 QString KdenliveTimelineBridge::currentProjectId() const
 {
     if (!Core::self()) {
         return {};
     }
-    if (KdenliveDoc *doc = Core::self()->currentDoc(); doc != nullptr) {
+    KdenliveDoc *doc = Core::self()->currentDoc();
+    if (doc != nullptr) {
+        const QString bopUuid = doc->getDocumentProperty(QStringLiteral("bangonpro.project_uuid")).trimmed();
+        if (!bopUuid.isEmpty()) {
+            return bopUuid;
+        }
+        const QUuid docUuid = doc->uuid();
+        if (!docUuid.isNull()) {
+            return docUuid.toString(QUuid::WithoutBraces);
+        }
         const QString docId = doc->getDocumentProperty(QStringLiteral("documentid")).trimmed();
         if (!docId.isEmpty()) {
             return docId;
+        }
+        const QString prefixedDocId = doc->getDocumentProperty(QStringLiteral("kdenlive:docproperties.documentid")).trimmed();
+        if (!prefixedDocId.isEmpty()) {
+            return prefixedDocId;
         }
         const QString urlStr = doc->url().toLocalFile().trimmed();
         if (!urlStr.isEmpty()) {

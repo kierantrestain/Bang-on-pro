@@ -643,11 +643,20 @@ void KdenliveDoc::slotAutoSave(const QString &scene)
             KMessageBox::error(QApplication::activeWindow(), i18n("Cannot write to file %1, scene list is corrupted.", m_autosave->fileName()));
             return;
         }
-        m_autosave->resize(0);
-        if (m_autosave->write(scene.toUtf8()) < 0) {
-            pCore->displayMessage(i18n("Cannot create autosave file %1", m_autosave->fileName()), ErrorMessage);
+        const QString targetPath = m_autosave->fileName();
+        const QByteArray payload = scene.toUtf8();
+        // Close the file handle without releasing the KAutoSaveFile lock so QSaveFile can
+        // atomically replace targetPath without truncating an existing valid autosave on crash.
+        m_autosave->close();
+        QSaveFile atomicSave(targetPath);
+        if (!atomicSave.open(QIODevice::WriteOnly | QIODevice::Truncate) || atomicSave.write(payload) != payload.size() || !atomicSave.commit()) {
+            atomicSave.cancelWriting();
+            pCore->displayMessage(i18n("Cannot create autosave file %1", targetPath), ErrorMessage);
         }
-        m_autosave->flush();
+        // Reopen on the committed inode so subsequent resize(0)/remove() operations target the live file.
+        if (!m_autosave->open(QIODevice::ReadWrite)) {
+            qCDebug(KDENLIVE_LOG) << "WARNING; COULD NOT REOPEN AUTOSAVE FILE AFTER ATOMIC COMMIT:" << targetPath;
+        }
     }
 }
 
@@ -2231,13 +2240,22 @@ void KdenliveDoc::initProxySettings()
     QString params;
     QMap<QString, QString> values = group.entryMap();
     // Select best proxy profile depending on hw encoder support
-    if (!KdenliveSettings::supportedHWCodecs().isEmpty()) {
+    const QStringList hwCodecs = KdenliveSettings::supportedHWCodecs();
+    if (!hwCodecs.isEmpty()) {
         QString codecFormat = QStringLiteral("x264-");
-        codecFormat.append(KdenliveSettings::supportedHWCodecs().first().section(QLatin1Char('_'), 1));
+        codecFormat.append(hwCodecs.first().section(QLatin1Char('_'), 1));
         if (values.contains(codecFormat)) {
             params = values.value(codecFormat);
         }
     }
+#ifdef Q_OS_MAC
+    // On macOS prefer VideoToolbox H.264 proxies when available rather than falling back to heavy MJPEG.
+    if (params.isEmpty() && values.contains(QStringLiteral("x264-videotoolbox"))) {
+        if (hwCodecs.contains(QStringLiteral("h264_videotoolbox")) || hwCodecs.isEmpty()) {
+            params = values.value(QStringLiteral("x264-videotoolbox"));
+        }
+    }
+#endif
     if (params.isEmpty()) {
         params = values.value(QStringLiteral("MJPEG"));
     }

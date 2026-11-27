@@ -3,6 +3,6 @@
 SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
 """
 
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.7.0"
 
 __all__ = ["APP_VERSION"]

@@ -97,6 +97,7 @@ const QVector<PresetTriple> &presetDefinitions()
         {"edit_redo", "Editing", "Redo", "Ctrl+Shift+Z", "Ctrl+Shift+Z", "Ctrl+Shift+Z"},
         {"edit_copy", "Editing", "Copy", "Ctrl+C", "Ctrl+C", "Ctrl+C"},
         {"edit_paste", "Editing", "Paste", "Ctrl+V", "Ctrl+V", "Ctrl+V"},
+        {"paste_effects", "Editing", "Paste Attributes / Effects…", "Ctrl+Alt+V", "Alt+V", "Ctrl+Alt+V"},
 
         // Markers & Keyframes
         {"add_marker_guide_quickly", "Markers & Keyframes", "Add Marker / Guide", "M", "M", "*"},
@@ -112,6 +113,8 @@ const QVector<PresetTriple> &presetDefinitions()
         {"timeline_zoom_out", "View & Export", "Timeline Zoom Out (Alias)", "-", "Ctrl+-", "Ctrl+-"},
         {"zoom_fit", "View & Export", "Zoom to Fit Sequence", "\\", "Shift+Z", "Ctrl+F"},
         {"switch_monitor", "View & Export", "Switch Source / Program Monitor", "Shift+2", "Q", "T"},
+        {"effect_stack", "View & Export", "Show / Focus Effect Controls", "Shift+5", "", ""},
+        {"effect_list", "View & Export", "Show / Focus Effects Library", "Shift+7", "", ""},
         {"project_render", "View & Export", "Export / Render Media…", "Ctrl+M", "Ctrl+Shift+E", "Ctrl+Return"},
 
         // Bang On Pro Workspaces & AI Controls

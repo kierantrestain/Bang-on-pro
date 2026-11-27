@@ -90,7 +90,7 @@ void AudioLevelsTask::run()
     } else if (service.startsWith(QLatin1String("xml"))) {
         service = QStringLiteral("xml-nogl");
     }
-    const QString res = qstrdup(producer->get("resource"));
+    const QString res = QString::fromUtf8(producer->get("resource"));
     producer.reset();
     int frequency = binClip->audioInfo()->samplingRate();
     frequency = frequency <= 0 ? 48000 : frequency;

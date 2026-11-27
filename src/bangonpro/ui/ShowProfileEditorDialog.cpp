@@ -23,6 +23,7 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QSaveFile>
 #include <QSet>
 #include <QSpinBox>
 #include <QTabWidget>
@@ -648,7 +649,7 @@ bool ShowProfileEditorDialog::saveProfileToFile(const QString &filePath, QString
         return false;
     }
 
-    QFile file(filePath);
+    QSaveFile file(filePath);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
         if (errorMessage != nullptr) {
             *errorMessage = tr("Cannot write Show Profile JSON to %1").arg(filePath);
@@ -659,8 +660,15 @@ bool ShowProfileEditorDialog::saveProfileToFile(const QString &filePath, QString
     const QJsonDocument doc(buildProfileJson());
     const QByteArray bytes = doc.toJson(QJsonDocument::Indented);
     if (file.write(bytes) != bytes.size()) {
+        file.cancelWriting();
         if (errorMessage != nullptr) {
             *errorMessage = tr("Failed writing complete JSON payload to %1").arg(filePath);
+        }
+        return false;
+    }
+    if (!file.commit()) {
+        if (errorMessage != nullptr) {
+            *errorMessage = tr("Failed atomically committing Show Profile JSON to %1").arg(filePath);
         }
         return false;
     }

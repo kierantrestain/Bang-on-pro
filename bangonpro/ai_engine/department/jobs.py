@@ -26,6 +26,8 @@ import json
 import os
 import re
 import shutil
+import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -34,6 +36,11 @@ from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+try:
+    import resource as _resource
+except ImportError:  # pragma: no cover
+    _resource = None  # type: ignore[assignment]
 
 from bangonpro.ai_engine.agents.ingest_sync import (
     compute_file_sha256,
@@ -56,6 +63,8 @@ from bangonpro.ai_engine.department.cache import AnalysisCache
 from bangonpro.ai_engine.department.checkpoint import (
     deserialize_state,
     serialize_state,
+    verify_checkpoint_integrity,
+    write_checkpoint_atomic,
     write_json_atomic,
 )
 from bangonpro.ai_engine.department.errors import explain
@@ -98,11 +107,16 @@ from bangonpro.ai_engine.state import ProjectAnalysisState
 from bangonpro.show_profiles.loader import load_show_profile, user_profile_dirs
 
 JOB_SCHEMA_VERSION = "1.2"
+PAUSE_FILENAME = "PAUSE"
 TERMINAL_AGENT_STATES = frozenset({"completed", "skipped", "failed", "blocked", "rolled_back"})
 
 
 class ApprovalRequiredError(PermissionError):
     """Raised when an action needs explicit editor approval (replace edit / publish)."""
+
+
+class PipelinePausedError(Exception):
+    """Raised between stages when a cooperative PAUSE sentinel is present."""
 
 
 def _utc() -> str:
@@ -112,6 +126,81 @@ def _utc() -> str:
 def _utc_ms() -> str:
     """Millisecond precision: what Qt's ISODateWithMs parser reads exactly (the app's stall report)."""
     return datetime.now(UTC).isoformat(timespec="milliseconds")
+
+
+def _collect_resource_usage() -> dict[str, Any]:
+    """Lightweight stdlib-only memory (RSS MB) and CPU time telemetry."""
+    rss_mb = 0.0
+    cpu_sec = 0.0
+    if _resource is not None:
+        try:
+            ru = _resource.getrusage(_resource.RUSAGE_SELF)
+            cpu_sec = float(ru.ru_utime + ru.ru_stime)
+            if sys.platform == "darwin":
+                rss_mb = float(ru.ru_maxrss) / (1024.0 * 1024.0)
+            else:
+                rss_mb = float(ru.ru_maxrss) / 1024.0
+        except OSError:
+            pass
+    # Prefer live resident set size from /proc/self/statm on Linux when available.
+    try:
+        statm = Path("/proc/self/statm").read_text(encoding="utf-8").split()
+        if len(statm) >= 2:
+            page_size = os.sysconf("SC_PAGE_SIZE")
+            rss_mb = (int(statm[1]) * page_size) / (1024.0 * 1024.0)
+    except (OSError, ValueError, AttributeError):
+        pass
+    return {
+        "rss_mb": round(rss_mb, 2),
+        "cpu_time_sec": round(cpu_sec, 3),
+        "updated_at_utc": _utc(),
+    }
+
+
+def _write_bytes_atomic(target: Path, data: bytes) -> None:
+    """Write ``data`` to a unique sibling temp file, fsync, and atomically replace ``target``."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent))
+    tmp_path = Path(tmp_name)
+    closed = False
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        closed = True
+        os.replace(tmp_path, target)
+    except BaseException:
+        if not closed:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
+def _copy_file_atomic(src: Path, target: Path) -> None:
+    """Copy ``src`` to ``target`` via a unique sibling temp file + fsync + atomic replace."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent))
+    tmp_path = Path(tmp_name)
+    closed = False
+    try:
+        with open(src, "rb") as src_fh, os.fdopen(fd, "wb") as dst_fh:
+            shutil.copyfileobj(src_fh, dst_fh, length=1024 * 1024)
+            dst_fh.flush()
+            os.fsync(dst_fh.fileno())
+        closed = True
+        os.replace(tmp_path, target)
+    except BaseException:
+        if not closed:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 class FileCancellationToken(CancellationToken):
@@ -144,6 +233,7 @@ class ProductionJob:
         self.ckpt_dir = self.dir / "checkpoints"
         self.events_path = self.dir / "events.jsonl"
         self.cancel_path = self.dir / "CANCEL"
+        self.pause_path = self.dir / PAUSE_FILENAME
         self.draft_dir = self.dir / "draft"
         self.doc: dict[str, Any] = {}
         self.state: ProjectAnalysisState | None = None
@@ -164,7 +254,12 @@ class ProductionJob:
         mode: str = MODE_ASSISTED,
         options: JobOptions | None = None,
         project_id: str | None = None,
+        project_uuid: str | None = None,
+        project_name: str | None = None,
+        project_path: str | None = None,
         sequence_id: str | None = None,
+        sequence_uuid: str | None = None,
+        sequence_name: str | None = None,
         kdenlive_project: str | None = None,
         project_state: str | None = None,
         job_id: str | None = None,
@@ -220,9 +315,16 @@ class ProductionJob:
         intent = shape_intent_for_mode(interp.intent, mode, flags, n_video, opts.export_video)
         activation = compute_activation(intent, mode, flags, profile, n_inputs=len(cams), n_video=n_video, overrides=opts.enabled_overrides)
 
+        effective_project_id = project_id or project_uuid or context.project_id or f"bop_{uuid.uuid4().hex[:10]}"
+        effective_project_uuid = project_uuid or effective_project_id
+        effective_sequence_id = sequence_id or sequence_uuid or context.sequence_id or "seq_main"
+        effective_sequence_uuid = sequence_uuid or effective_sequence_id
+        effective_project_path = project_path or kdenlive_project
+        effective_project_name = project_name or (Path(effective_project_path).stem if effective_project_path else "")
+
         state = ProjectAnalysisState(
-            project_id=project_id or context.project_id or f"bop_{uuid.uuid4().hex[:10]}",
-            sequence_id=sequence_id or context.sequence_id or "seq_main",
+            project_id=effective_project_id,
+            sequence_id=effective_sequence_id,
             profile=profile,
             output_dir=str(job.draft_dir),
             instruction=brief,
@@ -282,7 +384,12 @@ class ProductionJob:
             "updated_at_utc": _utc(),
             "project": {
                 "project_id": state.project_id,
+                "project_uuid": effective_project_uuid,
+                "project_name": effective_project_name,
+                "project_path": effective_project_path,
                 "sequence_id": state.sequence_id,
+                "sequence_uuid": effective_sequence_uuid,
+                "sequence_name": sequence_name or "",
                 "base_revision": state.revision,
                 "source_kdenlive_project": kdenlive_project,
             },
@@ -327,6 +434,7 @@ class ProductionJob:
                 return
             self._last_write = now
             self.doc["updated_at_utc"] = _utc()
+            self.doc["resource_usage"] = _collect_resource_usage()
             if self.doc.get("agents"):
                 self.doc["stages"] = editor_stages(self.doc)
             write_json_atomic(self.job_path, self.doc)
@@ -339,18 +447,17 @@ class ProductionJob:
 
     def _checkpoint(self, idx: int, agent_id: str, state: ProjectAnalysisState) -> Path:
         path = self.ckpt_dir / f"{idx + 1:02d}_{agent_id}.json"
-        write_json_atomic(path, {"agent_index": idx, "agent_id": agent_id, "saved_at_utc": _utc(), "state": serialize_state(state)})
+        write_checkpoint_atomic(path, {"agent_index": idx, "agent_id": agent_id, "saved_at_utc": _utc(), "state": serialize_state(state)})
         self.doc.setdefault("checkpoints", []).append(str(path))
         return path
 
     def _valid_checkpoints(self) -> list[tuple[int, Path]]:
-        """Checkpoints that agree with job.json, in agent order.
+        """Checkpoints that agree with job.json and pass SHA-256 verification, in agent order.
 
-        A checkpoint is trusted only when its agent is recorded as completed (or it is the
-        initial state). This guards against two V1.2.1 defects: a worker killed between writing
-        an agent's checkpoint and recording the agent as completed (the agent then ran twice on
-        top of its own output), and checkpoints of later agents left behind by a rollback or an
-        interrupted rerun (a later CLI call silently restored the rolled-back edits).
+        A checkpoint is trusted only when its JSON parses cleanly, ``verify_checkpoint_integrity``
+        passes, and its agent is recorded as completed (or it is the initial state). This guards
+        against torn writes, tampered/corrupt checkpoints, workers killed between writing a
+        checkpoint and marking the agent completed, and leftover checkpoints after rollback/rerun.
         """
         out: list[tuple[int, Path]] = []
         agents = self.doc.get("agents", {})
@@ -359,6 +466,8 @@ class ProductionJob:
                 data = json.loads(p.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 continue  # torn write from an interrupted worker
+            if not verify_checkpoint_integrity(data):
+                continue  # corrupt or truncated checkpoint; skipped so resume re-runs cleanly
             aid, aidx = str(data.get("agent_id")), int(data.get("agent_index", -1))
             if aid == "initial" or agents.get(aid, {}).get("status") == "completed":
                 out.append((aidx, p))
@@ -418,15 +527,19 @@ class ProductionJob:
                 raise
 
     def _record_stop(self, exc: BaseException) -> None:
-        """The worker was asked to stop: cancelled when the editor asked, otherwise interrupted."""
+        """The worker was asked to stop: cancelled/paused when the editor asked, otherwise interrupted."""
         cancelled = self.cancel_path.exists()
-        state = "cancelled" if cancelled else "interrupted"
+        paused = not cancelled and self.pause_path.exists()
+        state = "cancelled" if cancelled else ("paused" if paused else "interrupted")
         for r in self.doc.get("agents", {}).values():
             if r.get("status") == "running":
                 r["status"] = state
         self.doc["status"] = state
         if cancelled:
             self.doc["cancel_reason"] = self.cancel_path.read_text(encoding="utf-8").strip() or "Cancelled"
+        elif paused:
+            self.doc["pause_reason"] = self.pause_path.read_text(encoding="utf-8").strip() or "Paused"
+            self.doc["paused_at_utc"] = _utc()
         else:
             self.doc["interruption"] = {"at_utc": _utc(), "stage": self._stage_name(), "reason": str(exc) or type(exc).__name__}
             self.doc["error_help"] = _interrupted_help()
@@ -489,17 +602,22 @@ class ProductionJob:
         elif status != "running":
             return False
         cancelled = self.cancel_path.exists()
-        state = "cancelled" if cancelled else "interrupted"
+        paused = not cancelled and self.pause_path.exists()
+        state = "cancelled" if cancelled else ("paused" if paused else "interrupted")
         stage = self._stage_name()
         for r in self.doc.get("agents", {}).values():
             if r.get("status") == "running":
                 r["status"] = state
         self.doc["status"] = state
-        self.doc["interruption"] = {"at_utc": _utc(), "stage": stage, "worker_pid": self.doc.get("worker_pid"), "reason": "worker process ended without recording a result"}
-        if not cancelled:
-            self.doc["error_help"] = _interrupted_help()
+        if paused:
+            self.doc["pause_reason"] = self.pause_path.read_text(encoding="utf-8").strip() or "Paused from Agent Control Centre"
+            self.doc["paused_at_utc"] = _utc()
+        else:
+            self.doc["interruption"] = {"at_utc": _utc(), "stage": stage, "worker_pid": self.doc.get("worker_pid"), "reason": "worker process ended without recording a result"}
+            if not cancelled:
+                self.doc["error_help"] = _interrupted_help()
         self.doc.pop("finalising", None)
-        self._event("executive", "worker_lost", {"stage": stage, "worker_pid": self.doc.get("worker_pid"), "recorded_as": state})
+        self._event("executive", "worker_lost" if not paused else "job_paused", {"stage": stage, "worker_pid": self.doc.get("worker_pid"), "recorded_as": state})
         self._save(force=True)
         return True
 
@@ -514,6 +632,8 @@ class ProductionJob:
         opts = self.options()
         if self.cancel_path.exists():
             self.cancel_path.unlink()
+        if self.pause_path.exists():
+            self.pause_path.unlink()
         token = FileCancellationToken(self.cancel_path)
         cache = AnalysisCache()
         if plan.get("needs_clarification") and self.doc["mode"] == MODE_ASSISTED:
@@ -540,13 +660,20 @@ class ProductionJob:
         self.doc["status"] = "running"
         self.doc["started_at_utc"] = self.doc.get("started_at_utc") or _utc()
         self.doc["worker_pid"] = os.getpid()
-        for stale in ("error", "error_help", "interruption", "failed_stage", "repeated_failure", "cancel_reason"):
+        for stale in ("error", "error_help", "interruption", "failed_stage", "repeated_failure", "cancel_reason", "pause_reason", "paused_at_utc"):
             self.doc.pop(stale, None)
         self.doc["last_progress_utc"] = _utc_ms()
         t_job = time.perf_counter()
         start_idx = AGENT_ORDER.index(start_agent) if start_agent else 0
         failed_or_blocked: set[str] = set()
         order = list(AGENT_ORDER)
+
+        def _check_pause(stage_hint: str) -> None:
+            token.check(stage_hint)
+            if self.pause_path.exists():
+                reason = self.pause_path.read_text(encoding="utf-8").strip() or "Paused from Agent Control Centre"
+                raise PipelinePausedError(reason)
+
         try:
             for idx, agent_id in enumerate(order):
                 rec = self.doc["agents"][agent_id]
@@ -557,6 +684,7 @@ class ProductionJob:
                     continue
                 if rec["status"] == "completed" and start_agent is None:
                     continue  # resume: keep finished work
+                _check_pause(f"before {agent_id}")
                 blockers = [d for d in AGENTS_BY_ID[agent_id].depends_on if d in failed_or_blocked]
                 if blockers:
                     rec["status"] = "blocked"
@@ -565,8 +693,22 @@ class ProductionJob:
                     continue
                 self._run_agent(idx, agent_id, st, token, cache, opts, plan, progress_callback, failed_or_blocked)
                 self._attach_help(agent_id)
-                _test_delay(token)
+                _check_pause(f"after {agent_id}")
+                _test_delay(token, self.pause_path)
+                _check_pause(f"after delay {agent_id}")
+            _check_pause("before finalise")
             self._finalise(st, time.perf_counter() - t_job, failed_or_blocked, token)
+        except PipelinePausedError as exc:
+            cur = self.doc.get("current_agent")
+            if cur and self.doc["agents"][cur].get("status") == "running":
+                self.doc["agents"][cur]["status"] = "paused"
+            self.doc.pop("finalising", None)
+            self.doc["status"] = "paused"
+            self.doc["pause_reason"] = str(exc)
+            self.doc["paused_at_utc"] = _utc()
+            self._add_processing_time(time.perf_counter() - t_job)
+            self._event(cur or "executive", "job_paused", {"reason": str(exc)})
+            self._save(force=True)
         except PipelineCancelledError as exc:
             cur = self.doc.get("current_agent")
             if cur and self.doc["agents"][cur].get("status") == "running":
@@ -998,18 +1140,77 @@ class ProductionJob:
         self.cancel_path.write_text(reason, encoding="utf-8")
         self._event("executive", "cancel_requested", {"reason": reason})
 
+    @classmethod
+    def pause(cls, job_dir: str | Path, *, reason: str = "Paused from Agent Control Centre") -> dict[str, Any]:
+        """Request a cooperative pause between stages; reconciles immediately if no worker is alive."""
+        job = cls(job_dir)
+        if not job.doc:
+            raise FileNotFoundError(f"No production job at {job_dir}")
+        job.pause_path.write_text(reason, encoding="utf-8")
+        job._event("executive", "pause_requested", {"reason": reason})
+        alive = job.worker_alive()
+        if not alive and job.doc.get("status") in ("running", "planned"):
+            try:
+                with worker_session(job.dir, command="pause"):
+                    job._reconcile_owned()
+            except JobBusyError:
+                alive = True
+        return {
+            "status": job.doc.get("status"),
+            "pause_requested": True,
+            "worker_alive": alive,
+            "job_dir": str(job.dir),
+        }
+
+    @classmethod
+    def discard(cls, job_dir: str | Path) -> dict[str, Any]:
+        """Safely delete a stopped job directory without ever touching source footage.
+
+        Refuses with :class:`JobBusyError` while a live worker holds ``worker.lock``.
+        """
+        raw = Path(job_dir).expanduser()
+        if raw.is_symlink():
+            raise PermissionError(f"Refusing to discard symlink path: {raw}")
+        target = raw.resolve()
+        if not target.is_dir() or not (target / "job.json").is_file():
+            raise ValueError(f"Not a valid production job directory (missing job.json): {target}")
+        if worker_alive(target):
+            raise JobBusyError("Cannot discard a production while its worker is still running. Pause or cancel it first.")
+        with worker_session(target, command="discard"):
+            # Verify no original source footage resides inside target before removal.
+            plan_path = target / "plan.json"
+            if plan_path.is_file():
+                try:
+                    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+                    for src_path in (plan.get("inputs") or {}).values():
+                        if src_path:
+                            sp = Path(str(src_path)).expanduser().resolve()
+                            if sp == target or sp.is_relative_to(target):
+                                raise PermissionError(f"Refusing to discard job directory containing source media: {sp}")
+                except (OSError, ValueError):
+                    pass
+            shutil.rmtree(target)
+        return {"status": "discarded", "job_dir": str(target)}
+
     def resume(self, progress_callback: Any = None) -> dict[str, Any]:
         """Continue from the last finished agent. Refuses (JobBusyError) while another worker owns the job.
 
-        Work of an agent that did not finish is discarded, not merged: only checkpoints of agents
-        recorded as completed are trusted, and their batches are the only ones kept, so a resumed
-        production never duplicates an edit.
+        Work of an agent that did not finish (or whose checkpoint failed integrity verification) is
+        discarded, not merged: only verified checkpoints of agents recorded as completed are trusted,
+        and their batches are the only ones kept, so a resumed production never duplicates an edit.
         """
         with worker_session(self.dir, command="resume"):
             self._reconcile_owned()
-            for r in self.doc["agents"].values():
-                if r["status"] in ("running", "cancelled", "failed", "blocked", "interrupted"):
+            self.pause_path.unlink(missing_ok=True)
+            valid = self._valid_checkpoints()
+            max_valid_idx = valid[-1][0] if valid else -1
+            for aid, r in self.doc["agents"].items():
+                aidx = AGENT_ORDER.index(aid) if aid in AGENT_ORDER else -1
+                if r["status"] in ("running", "cancelled", "failed", "blocked", "interrupted", "paused"):
                     r.update({"status": "pending", "error": None, "help": None})
+                elif r.get("active") and r["status"] == "completed" and aidx > max_valid_idx:
+                    # Checkpoint for this completed agent was corrupt/missing: re-run it cleanly.
+                    r.update({"status": "pending", "decision": None, "batches": [], "error": None, "help": None})
             kept = {rid for r in self.doc["agents"].values() if r.get("status") == "completed" for rid in r.get("batches", [])}
             orphans = [rid for rid in self.doc.get("batches", {}) if rid not in kept]
             for rid in orphans:
@@ -1210,12 +1411,15 @@ class ProductionJob:
         return self.doc
 
     def promote(self, target_path: str | Path, *, approve: bool = False) -> dict[str, Any]:
-        """Copy the draft project to ``target_path``; replacing an existing edit requires approval."""
+        """Copy the draft project atomically to ``target_path``; replacing an existing edit requires approval."""
         arts = self.rebuild_draft()
         src = arts.get("kdenlive_project")
         if not src:
             raise FileNotFoundError("Draft has no timeline to promote")
-        target = Path(target_path).expanduser().resolve()
+        raw_target = Path(target_path).expanduser()
+        if raw_target.is_symlink():
+            raise PermissionError(f"Refusing to promote to a symlink target: {raw_target}")
+        target = raw_target.resolve()
         sources = {Path(p).resolve() for p in (self.state or self._latest_state()).input_camera_files.values()}
         if target in sources or (target.exists() and any(s.exists() and os.path.samefile(target, s) for s in sources)):
             raise PermissionError("Refusing to overwrite original source media")
@@ -1224,9 +1428,8 @@ class ProductionJob:
             if not approve:
                 raise ApprovalRequiredError(f"'{target}' already exists; replacing an existing edit requires explicit approval (--approve)")
             backup = target.with_name(f"{target.name}.bak-{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}")
-            shutil.copy2(target, backup)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, target)
+            _copy_file_atomic(target, backup)
+        _copy_file_atomic(Path(src), target)
         rec = {"ts_utc": _utc(), "action": "promote_draft", "target": str(target), "replaced_existing": backup is not None, "backup": str(backup) if backup else None, "approved": bool(approve)}
         self.doc["approvals"].append(rec)
         self._event("executive", "draft_promoted", rec)
@@ -1290,21 +1493,33 @@ class ProductionJob:
         }
         if dry_run or not mapping:
             return result
-        for _, ckpt in self._valid_checkpoints():
-            data = json.loads(ckpt.read_text(encoding="utf-8"))
-            write_json_atomic(ckpt, _replace_paths(data, mapping))
-        write_json_atomic(self.plan_path, _replace_paths(self.plan, mapping))
-        self.state = self._latest_state()
+        # Validate all target project files up front before mutating any checkpoints or plan.json.
+        st_before = self.state or self._latest_state()
+        protected_sources = {Path(p).resolve() for p in st_before.input_camera_files.values()}
+        protected_sources.update(Path(p).resolve() for p in found.values())
+        validated_projects: list[Path] = []
         for project in project_files or []:
-            pf = Path(project).expanduser().resolve()
+            raw_pf = Path(project).expanduser()
+            if raw_pf.is_symlink():
+                raise PermissionError(f"Refusing to overwrite symlink project file: {raw_pf}")
+            pf = raw_pf.resolve()
             if not pf.is_file():
                 continue
+            if pf in protected_sources or any(s.exists() and os.path.samefile(pf, s) for s in protected_sources):
+                raise PermissionError(f"Refusing to overwrite original source media: {pf}")
+            validated_projects.append(pf)
+        for _, ckpt in self._valid_checkpoints():
+            data = json.loads(ckpt.read_text(encoding="utf-8"))
+            write_checkpoint_atomic(ckpt, _replace_paths(data, mapping))
+        write_json_atomic(self.plan_path, _replace_paths(self.plan, mapping))
+        self.state = self._latest_state()
+        for pf in validated_projects:
             text = pf.read_text(encoding="utf-8")
             updated = _sub_paths(text, {html.escape(old, quote=False): html.escape(new, quote=False) for old, new in mapping.items()})
             if updated != text:
                 backup = pf.with_name(f"{pf.name}.bak-{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}")
-                shutil.copy2(pf, backup)
-                pf.write_text(updated, encoding="utf-8")
+                _copy_file_atomic(pf, backup)
+                _write_bytes_atomic(pf, updated.encode("utf-8"))
                 result["projects_updated"].append({"project": str(pf), "backup": str(backup)})
         self.doc.setdefault("relinks", []).append({"ts_utc": _utc(), **{k: result[k] for k in ("relinked", "still_missing", "projects_updated")}})
         self._event("executive", "media_relinked", {"relinked": result["relinked"], "still_missing": result["still_missing"]})
@@ -1432,8 +1647,8 @@ def _replace_paths(value: Any, mapping: dict[str, str]) -> Any:
     return value
 
 
-def _test_delay(token: CancellationToken) -> None:
-    """Test-only slow motion (``BANGONPRO_TEST_AGENT_DELAY_SEC``) used to interrupt a worker mid-job."""
+def _test_delay(token: CancellationToken, pause_path: Path | None = None) -> None:
+    """Test-only slow motion (``BANGONPRO_TEST_AGENT_DELAY_SEC``) used to interrupt/pause a worker mid-job."""
     try:
         delay = float(os.environ.get("BANGONPRO_TEST_AGENT_DELAY_SEC") or 0.0)
     except ValueError:
@@ -1441,6 +1656,8 @@ def _test_delay(token: CancellationToken) -> None:
     end = time.monotonic() + max(0.0, min(delay, 60.0))
     while time.monotonic() < end:
         token.check("test delay")
+        if pause_path is not None and pause_path.exists():
+            return
         time.sleep(0.05)
 
 

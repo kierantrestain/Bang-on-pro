@@ -107,6 +107,7 @@ private Q_SLOTS:
     void enableHideKeyframes(bool enabled);
     void slotSwitch(bool expand);
     void slotDeleteEffect();
+    void slotDuplicateEffect();
     void slotEffectUp();
     void slotEffectDown();
     void slotCreateGroup();
@@ -140,6 +141,8 @@ private:
     QPixmap m_iconPix;
     TimecodeDisplay *m_inPos;
     TimecodeDisplay *m_outPos;
+    QToolButton *m_resetButton{nullptr};
+    QToolButton *m_duplicateButton{nullptr};
 
 protected:
     void mouseDoubleClickEvent(QMouseEvent *event) override;
@@ -159,6 +162,7 @@ Q_SIGNALS:
     void syncEffectsPos(int);
     void effectStateChanged(bool, int ix, MonitorSceneType effectNeedsMonitorScene);
     void deleteEffect(std::shared_ptr<EffectItemModel> effect);
+    void duplicateEffect(std::shared_ptr<EffectItemModel> effect);
     void moveEffect(int destRow, std::shared_ptr<EffectItemModel> effect);
     void checkMonitorPosition(int);
     void seekTimeline(int);

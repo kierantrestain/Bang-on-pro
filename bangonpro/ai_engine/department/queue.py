@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import socket
 import threading
 import time
@@ -46,7 +47,24 @@ ACTIVE_STATES = frozenset({"queued", "interrupted", "running"})
 # Job statuses that end a queue entry successfully (the draft waits for the editor).
 DONE_JOB_STATES = frozenset({"draft_ready", "awaiting_review", "planned_manual"})
 ATTENTION_JOB_STATES = frozenset({"completed_with_errors", "needs_clarification", "blocked_insufficient_storage"})
-SPEC_KEYS = ("brief", "inputs", "profile", "mode", "kdenlive_project", "project_id", "sequence_id", "options")
+SPEC_KEYS = (
+    "brief",
+    "inputs",
+    "profile",
+    "mode",
+    "kdenlive_project",
+    "project_id",
+    "project_uuid",
+    "project_name",
+    "project_path",
+    "sequence_id",
+    "sequence_uuid",
+    "sequence_name",
+    "aspect_ratio",
+    "target_duration_sec",
+    "media_source",
+    "options",
+)
 
 
 class QueueError(RuntimeError):
@@ -113,11 +131,24 @@ class JobQueue:
             os.close(fd)
 
     def _load(self) -> dict[str, Any]:
+        if not self.path.exists():
+            return {"schema_version": "1.0", "entries": []}
         try:
             doc = json.loads(self.path.read_text(encoding="utf-8"))
             if isinstance(doc, dict) and isinstance(doc.get("entries"), list):
                 return doc
-        except (OSError, ValueError):
+        except ValueError:
+            pass
+        except OSError:
+            return {"schema_version": "1.0", "entries": []}
+        # Preserve corrupt queue.json as a timestamped backup before resetting.
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        backup = self.path.with_name(f"{self.path.name}.corrupt.{stamp}")
+        if backup.exists():
+            backup = self.path.with_name(f"{self.path.name}.corrupt.{stamp}.{uuid.uuid4().hex[:6]}")
+        try:
+            shutil.copy2(self.path, backup)
+        except OSError:
             pass
         return {"schema_version": "1.0", "entries": []}
 
@@ -148,6 +179,9 @@ class JobQueue:
         if not spec.get("inputs") and not spec.get("kdenlive_project"):
             raise QueueError("A queued production needs source media (inputs) or a Kdenlive project")
         opts = dict(spec.get("options") or {})
+        for opt_key in ("aspect_ratio", "target_duration_sec", "media_source"):
+            if spec.get(opt_key) is not None and opt_key not in opts:
+                opts[opt_key] = spec[opt_key]
         from bangonpro.ai_engine.department.agents import JobOptions
 
         allowed = {f.name for f in fields(JobOptions)} - {"provider_config"}
@@ -155,10 +189,17 @@ class JobQueue:
         if bad:
             raise QueueError(f"Unknown job options: {', '.join(sorted(bad))}")
         qid = f"q_{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}_{uuid.uuid4().hex[:6]}"
+        proj_uuid = str(spec.get("project_uuid") or spec.get("project_id") or "")
+        seq_uuid = str(spec.get("sequence_uuid") or spec.get("sequence_id") or "")
         entry = {
             "queue_id": qid,
             "job_id": f"job_{qid[2:]}",
             "job_root": str(self.job_root),
+            "project_uuid": proj_uuid,
+            "project_id": str(spec.get("project_id") or proj_uuid),
+            "project_name": str(spec.get("project_name") or ""),
+            "sequence_uuid": seq_uuid,
+            "sequence_id": str(spec.get("sequence_id") or seq_uuid),
             "label": label or opts.get("episode_title") or spec.get("brief", "")[:60] or qid,
             "spec": {**spec, "options": opts},
             "priority": int(priority),
@@ -204,13 +245,33 @@ class JobQueue:
             out.append(self.add(spec, priority=priority, series_batch_id=batch, label=opts["episode_title"]))
         return out
 
-    def entries(self) -> list[dict[str, Any]]:
+    def entries(self, *, project_uuid: str | None = None) -> list[dict[str, Any]]:
         order = {s: i for i, s in enumerate(QUEUE_STATES)}
         items = self._load()["entries"]
+        if project_uuid:
+            items = [
+                e
+                for e in items
+                if (e.get("project_uuid") or (e.get("spec") or {}).get("project_uuid") or (e.get("spec") or {}).get("project_id")) == project_uuid
+            ]
         return sorted(items, key=lambda e: (order.get(e["status"], 9), -int(e.get("priority", 0)), e["added_at_utc"]))
 
     def get(self, queue_id: str) -> dict[str, Any]:
         return dict(self._find(self._load(), queue_id))
+
+    def _validate_job_dir_containment(self, raw_job_dir: str) -> Path:
+        """Ensure ``raw_job_dir`` resolves strictly inside an allowed jobs root (blocks traversal/symlinks)."""
+        raw = Path(raw_job_dir).expanduser()
+        if raw.is_symlink():
+            raise QueueError(f"Refusing to access symlink job directory: {raw}")
+        resolved = raw.resolve()
+        allowed_roots = [self.job_root.resolve()]
+        if self.root.resolve() not in allowed_roots:
+            allowed_roots.append((self.root / "jobs").resolve())
+        for allowed in allowed_roots:
+            if resolved != allowed and resolved.is_relative_to(allowed):
+                return resolved
+        raise QueueError(f"Refusing to write CANCEL outside allowed job root: {resolved}")
 
     def cancel(self, queue_id: str) -> dict[str, Any]:
         """Cancel a waiting entry, or ask the running job to stop at its next checkpoint."""
@@ -220,8 +281,12 @@ class JobQueue:
             if e["status"] in ("queued", "interrupted"):
                 e.update({"status": "cancelled", "finished_at_utc": _utc()})
             elif e["status"] == "running":
-                Path(e["job_dir"]).mkdir(parents=True, exist_ok=True)
-                (Path(e["job_dir"]) / "CANCEL").write_text("Cancelled from the production queue", encoding="utf-8")
+                job_dir = self._validate_job_dir_containment(str(e.get("job_dir") or ""))
+                job_dir.mkdir(parents=True, exist_ok=True)
+                cancel_file = job_dir / "CANCEL"
+                if cancel_file.is_symlink():
+                    raise QueueError(f"Refusing to write through symlink: {cancel_file}")
+                cancel_file.write_text("Cancelled from the production queue", encoding="utf-8")
                 e["cancel_requested"] = True
             else:
                 raise QueueError(f"'{queue_id}' is already {e['status']}")
@@ -348,6 +413,9 @@ class JobQueue:
         else:
             spec = entry["spec"]
             opts_raw = dict(spec.get("options") or {})
+            for opt_key in ("aspect_ratio", "target_duration_sec", "media_source"):
+                if spec.get(opt_key) is not None and opt_key not in opts_raw:
+                    opts_raw[opt_key] = spec[opt_key]
             mode = spec.get("mode") or "autonomous_first_cut"
             opts = JobOptions(**{**opts_raw, "mode": mode})
             job = ProductionJob.create(
@@ -358,7 +426,12 @@ class JobQueue:
                 mode=mode,
                 options=opts,
                 project_id=spec.get("project_id"),
+                project_uuid=spec.get("project_uuid") or entry.get("project_uuid") or None,
+                project_name=spec.get("project_name") or entry.get("project_name") or None,
+                project_path=spec.get("project_path"),
                 sequence_id=spec.get("sequence_id"),
+                sequence_uuid=spec.get("sequence_uuid") or entry.get("sequence_uuid") or None,
+                sequence_name=spec.get("sequence_name"),
                 kdenlive_project=spec.get("kdenlive_project"),
                 job_id=entry["job_id"],
             )
@@ -421,8 +494,8 @@ class JobQueue:
             self.release_worker_lock(token)
         return report
 
-    def status(self) -> dict[str, Any]:
-        entries = self.entries()
+    def status(self, *, project_uuid: str | None = None) -> dict[str, Any]:
+        entries = self.entries(project_uuid=project_uuid)
         return {
             "queue_root": str(self.root),
             "job_root": str(self.job_root),
@@ -439,7 +512,7 @@ def _job_status(job_dir: str | None) -> str | None:
         return None
 
 
-def job_history(job_root: str | Path, *, limit: int = 50) -> list[dict[str, Any]]:
+def job_history(job_root: str | Path, *, limit: int = 50, project_uuid: str | None = None) -> list[dict[str, Any]]:
     """Recent production jobs under ``job_root``, newest first (read-only)."""
     root = Path(job_root).expanduser()
     if not root.is_dir():
@@ -453,6 +526,14 @@ def job_history(job_root: str | Path, *, limit: int = 50) -> list[dict[str, Any]
             doc = json.loads(jp.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
+        proj = doc.get("project") or {}
+        p_id = str(proj.get("project_id") or "")
+        p_uuid = str(proj.get("project_uuid") or p_id)
+        p_name = str(proj.get("project_name") or "")
+        s_id = str(proj.get("sequence_id") or "")
+        s_uuid = str(proj.get("sequence_uuid") or s_id)
+        if project_uuid and p_uuid != project_uuid:
+            continue
         agents = doc.get("agents", {})
         if doc.get("status") == "running":
             from bangonpro.ai_engine.department.worker import worker_alive
@@ -463,6 +544,11 @@ def job_history(job_root: str | Path, *, limit: int = 50) -> list[dict[str, Any]
             {
                 "job_id": doc.get("job_id", d.name),
                 "job_dir": str(d.resolve()),
+                "project_uuid": p_uuid,
+                "project_id": p_id,
+                "project_name": p_name,
+                "sequence_uuid": s_uuid,
+                "sequence_id": s_id,
                 "status": doc.get("status"),
                 "mode": doc.get("mode"),
                 "profile_id": doc.get("profile_id"),

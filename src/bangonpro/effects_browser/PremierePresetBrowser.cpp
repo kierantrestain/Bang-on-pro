@@ -27,6 +27,7 @@
 #include <QSplitter>
 #include <QTabWidget>
 #include <QTextBrowser>
+#include <QTimer>
 #include <QTreeWidget>
 #include <QVBoxLayout>
 #include <algorithm>
@@ -52,10 +53,12 @@ class PresetTreeWidget : public QTreeWidget
 {
 public:
     using PayloadProvider = std::function<QByteArray(const QString &)>;
+    using EffectIdProvider = std::function<QString(const QString &)>;
 
-    explicit PresetTreeWidget(PayloadProvider provider, QWidget *parent = nullptr)
+    explicit PresetTreeWidget(PayloadProvider provider, EffectIdProvider effectIdProvider, QWidget *parent = nullptr)
         : QTreeWidget(parent)
         , m_payloadProvider(std::move(provider))
+        , m_effectIdProvider(std::move(effectIdProvider))
     {
         setDragEnabled(true);
         setDragDropMode(QAbstractItemView::DragOnly);
@@ -65,7 +68,7 @@ public:
     }
 
 protected:
-    QStringList mimeTypes() const override { return {QString::fromLatin1(PremierePresetBrowser::kPresetMimeType)}; }
+    QStringList mimeTypes() const override { return {QString::fromLatin1(PremierePresetBrowser::kPresetMimeType), QStringLiteral("kdenlive/effect")}; }
 
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
     QMimeData *mimeData(const QList<QTreeWidgetItem *> &items) const override
@@ -84,16 +87,24 @@ protected:
         }
         auto *mime = new QMimeData();
         mime->setData(QString::fromLatin1(PremierePresetBrowser::kPresetMimeType), m_payloadProvider(presetId));
+        if (m_effectIdProvider) {
+            const QString nativeEffectId = m_effectIdProvider(presetId);
+            if (!nativeEffectId.isEmpty()) {
+                mime->setData(QStringLiteral("kdenlive/effect"), nativeEffectId.toUtf8());
+            }
+        }
         mime->setText(presetId);
         return mime;
     }
 
 private:
     PayloadProvider m_payloadProvider;
+    EffectIdProvider m_effectIdProvider;
 };
 
-PremierePresetBrowser::PremierePresetBrowser(QWidget *parent)
+PremierePresetBrowser::PremierePresetBrowser(QWidget *parent, bool executableOnlyDefault)
     : QWidget(parent)
+    , m_executableOnlyDefault(executableOnlyDefault)
 {
     setObjectName(QStringLiteral("BangOnProPremierePresetBrowser"));
     setWindowTitle(QStringLiteral("Bang On Pro — Premiere Presets & Effects"));
@@ -137,10 +148,17 @@ void PremierePresetBrowser::buildUi()
     m_statusFilterCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
     m_statusFilterCombo->setMinimumContentsLength(8);
     m_statusFilterCombo->addItem(QStringLiteral("All Statuses"), QStringLiteral("all"));
+    m_statusFilterCombo->addItem(QStringLiteral("Executable Only"), QStringLiteral("executable"));
     m_statusFilterCombo->addItem(QStringLiteral("Exact Validated"), QStringLiteral("exact_validated"));
     m_statusFilterCombo->addItem(QStringLiteral("Approximated"), QStringLiteral("approximated"));
     m_statusFilterCombo->addItem(QStringLiteral("Missing Dependency"), QStringLiteral("missing_dependency"));
     m_statusFilterCombo->addItem(QStringLiteral("Unsupported"), QStringLiteral("unsupported"));
+    if (m_executableOnlyDefault) {
+        const int execIdx = m_statusFilterCombo->findData(QStringLiteral("executable"));
+        if (execIdx >= 0) {
+            m_statusFilterCombo->setCurrentIndex(execIdx);
+        }
+    }
 
     m_favoritesOnlyCheck = new QCheckBox(QStringLiteral("Favourites"), this);
     m_favoritesOnlyCheck->setToolTip(QStringLiteral("Show favourite presets only"));
@@ -153,7 +171,8 @@ void PremierePresetBrowser::buildUi()
     // Main splitter: preset table (top) + inspector & custom stacks (bottom)
     auto *splitter = new QSplitter(Qt::Vertical, this);
 
-    m_presetTree = new PresetTreeWidget([this](const QString &presetId) { return buildMimePayloadForPreset(presetId); }, splitter);
+    m_presetTree = new PresetTreeWidget([this](const QString &presetId) { return buildMimePayloadForPreset(presetId); },
+                                        [this](const QString &presetId) { return resolveDragEffectId(presetId); }, splitter);
     m_presetTree->setColumnCount(5);
     m_presetTree->setHeaderLabels(
         {QStringLiteral("Preset"), QStringLiteral("Pack"), QStringLiteral("Folder"), QStringLiteral("Status"), QStringLiteral("Fav")});
@@ -180,11 +199,16 @@ void PremierePresetBrowser::buildUi()
     m_saveStackBtn = new QPushButton(QStringLiteral("Save Stack…"), bottomPane);
     m_saveStackBtn->setToolTip(QStringLiteral("Save to Custom Stack…"));
     m_saveStackBtn->setEnabled(false);
+    m_showTechnicalInspectorCheck = new QCheckBox(QStringLiteral("Show technical inspector"), bottomPane);
+    m_showTechnicalInspectorCheck->setObjectName(QStringLiteral("presetShowTechnicalInspectorCheck"));
+    m_showTechnicalInspectorCheck->setChecked(false);
+    m_showTechnicalInspectorCheck->setToolTip(QStringLiteral("Show raw MLT JSON parameters, Kdenlive Effect XML, and Raw Premiere XML inspector tabs"));
 
     actionRow->addWidget(m_applyBtn);
     actionRow->addWidget(m_favoriteBtn);
     actionRow->addWidget(m_saveStackBtn);
     actionRow->addStretch(1);
+    actionRow->addWidget(m_showTechnicalInspectorCheck);
     bottomLayout->addLayout(actionRow);
 
     // Inspector tabs
@@ -207,19 +231,19 @@ void PremierePresetBrowser::buildUi()
 
     const QFont monoFont = QFontDatabase::systemFont(QFontDatabase::FixedFont);
 
-    auto *paramsTab = new QWidget(m_inspectorTabs);
-    auto *paramsLayout = new QVBoxLayout(paramsTab);
+    m_paramsTabWidget = new QWidget(m_inspectorTabs);
+    auto *paramsLayout = new QVBoxLayout(m_paramsTabWidget);
     paramsLayout->setContentsMargins(2, 2, 2, 2);
     paramsLayout->setSpacing(4);
-    m_paramEditorEdit = new QPlainTextEdit(paramsTab);
+    m_paramEditorEdit = new QPlainTextEdit(m_paramsTabWidget);
     m_paramEditorEdit->setObjectName(QStringLiteral("presetParamEditor"));
     m_paramEditorEdit->setFont(monoFont);
     m_paramEditorEdit->setPlaceholderText(QStringLiteral("Edit MLT filter parameters & keyframe animation JSON before applying..."));
-    m_applyEditedParamsBtn = new QPushButton(QStringLiteral("Apply Edited Parameters / Keyframes"), paramsTab);
+    m_applyEditedParamsBtn = new QPushButton(QStringLiteral("Apply Edited Parameters / Keyframes"), m_paramsTabWidget);
     m_applyEditedParamsBtn->setEnabled(false);
     paramsLayout->addWidget(m_paramEditorEdit, 1);
     paramsLayout->addWidget(m_applyEditedParamsBtn);
-    m_inspectorTabs->addTab(paramsTab, QStringLiteral("Parameters && Keyframes"));
+    m_inspectorTabs->addTab(m_paramsTabWidget, QStringLiteral("Parameters && Keyframes"));
 
     m_kdenliveXmlEdit = new QPlainTextEdit(m_inspectorTabs);
     m_kdenliveXmlEdit->setReadOnly(true);
@@ -245,6 +269,8 @@ void PremierePresetBrowser::buildUi()
     stacksLayout->addLayout(stackButtonsRow);
     m_inspectorTabs->addTab(stacksTab, QStringLiteral("Saved Custom Stacks"));
 
+    updateTechnicalInspectorVisibility();
+
     bottomLayout->addWidget(m_inspectorTabs, 1);
 
     splitter->addWidget(m_presetTree);
@@ -253,11 +279,22 @@ void PremierePresetBrowser::buildUi()
     splitter->setStretchFactor(1, 2);
     rootLayout->addWidget(splitter, 1);
 
+    // Debounced search timer (120ms) so typing never stutters
+    m_searchDebounceTimer = new QTimer(this);
+    m_searchDebounceTimer->setSingleShot(true);
+    m_searchDebounceTimer->setInterval(120);
+    connect(m_searchDebounceTimer, &QTimer::timeout, this, &PremierePresetBrowser::refreshView);
+
     // Signal connections (dual Qt5/Qt6 safe)
-    connect(m_searchEdit, &QLineEdit::textChanged, this, &PremierePresetBrowser::onSearchOrFilterChanged);
+    connect(m_searchEdit, &QLineEdit::textChanged, this, [this](const QString &) {
+        if (m_searchDebounceTimer) {
+            m_searchDebounceTimer->start();
+        }
+    });
     connect(m_packFilterCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &PremierePresetBrowser::onSearchOrFilterChanged);
     connect(m_statusFilterCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &PremierePresetBrowser::onSearchOrFilterChanged);
     connect(m_favoritesOnlyCheck, &QCheckBox::toggled, this, &PremierePresetBrowser::onSearchOrFilterChanged);
+    connect(m_showTechnicalInspectorCheck, &QCheckBox::toggled, this, &PremierePresetBrowser::onShowTechnicalInspectorToggled);
     connect(m_presetTree, &QTreeWidget::itemSelectionChanged, this, &PremierePresetBrowser::onPresetSelectionChanged);
     connect(m_presetTree, &QTreeWidget::itemDoubleClicked, this, [this](QTreeWidgetItem *, int) { onApplyClicked(); });
     connect(m_importBtn, &QPushButton::clicked, this, &PremierePresetBrowser::onImportArchiveClicked);
@@ -314,6 +351,8 @@ bool PremierePresetBrowser::loadReportJson(const QJsonObject &reportObj, QString
 
     m_entries.clear();
     m_indexById.clear();
+    m_rawJsonById.clear();
+    m_previewPixmapCache.clear();
 
     const QJsonArray presetsArr = reportObj.value(QStringLiteral("presets")).toArray();
     m_entries.reserve(presetsArr.size());
@@ -361,6 +400,7 @@ bool PremierePresetBrowser::loadReportJson(const QJsonObject &reportObj, QString
 
         if (!entry.record.presetId.isEmpty()) {
             m_indexById.insert(entry.record.presetId, m_entries.size());
+            m_rawJsonById.insert(entry.record.presetId, obj);
             m_entries.append(entry);
         }
     }
@@ -396,6 +436,46 @@ bool PremierePresetBrowser::findPresetById(const QString &presetId, PresetDispla
         *outEntry = m_entries.at(it.value());
     }
     return true;
+}
+
+QJsonObject PremierePresetBrowser::presetJsonById(const QString &presetId) const
+{
+    return m_rawJsonById.value(presetId);
+}
+
+void PremierePresetBrowser::setExecutableOnlyFilter(bool enabled)
+{
+    if (!m_statusFilterCombo) {
+        return;
+    }
+    const QString targetKey = enabled ? QStringLiteral("executable") : QStringLiteral("all");
+    const int idx = m_statusFilterCombo->findData(targetKey);
+    if (idx >= 0) {
+        m_statusFilterCombo->setCurrentIndex(idx);
+    }
+}
+
+bool PremierePresetBrowser::isExecutableOnlyFilter() const
+{
+    return m_statusFilterCombo && m_statusFilterCombo->currentData().toString() == QStringLiteral("executable");
+}
+
+void PremierePresetBrowser::setShowTechnicalInspector(bool show)
+{
+    if (m_showTechnicalInspectorCheck) {
+        m_showTechnicalInspectorCheck->setChecked(show);
+    }
+    updateTechnicalInspectorVisibility();
+}
+
+bool PremierePresetBrowser::showTechnicalInspector() const
+{
+    return m_showTechnicalInspectorCheck && m_showTechnicalInspectorCheck->isChecked();
+}
+
+void PremierePresetBrowser::setDragEffectIdResolver(std::function<QString(const QString &presetId)> resolver)
+{
+    m_dragEffectIdResolver = std::move(resolver);
 }
 
 void PremierePresetBrowser::setFavorite(const QString &presetId, bool favorite)
@@ -496,6 +576,26 @@ QByteArray PremierePresetBrowser::buildMimePayloadForPreset(const QString &prese
     return QJsonDocument(payload).toJson(QJsonDocument::Compact);
 }
 
+QString PremierePresetBrowser::resolveDragEffectId(const QString &presetId) const
+{
+    if (presetId.isEmpty()) {
+        return {};
+    }
+    // Notify any listener preparing drag materialization
+    Q_EMIT const_cast<PremierePresetBrowser *>(this)->prepareDragEffectId(presetId);
+    if (m_dragEffectIdResolver) {
+        const QString resolved = m_dragEffectIdResolver(presetId);
+        if (!resolved.isEmpty()) {
+            return resolved;
+        }
+    }
+    PresetDisplayEntry entry;
+    if (findPresetById(presetId, &entry) && entry.record.mltFilters.size() == 1) {
+        return entry.record.mltFilters.first().toObject().value(QStringLiteral("service")).toString();
+    }
+    return {};
+}
+
 void PremierePresetBrowser::clearFilters()
 {
     m_searchEdit->clear();
@@ -585,7 +685,14 @@ bool PremierePresetBrowser::matchesActiveFilters(const PresetDisplayEntry &entry
 
     const QString statusFilter = m_statusFilterCombo->currentData().toString();
     if (!statusFilter.isEmpty() && statusFilter != QStringLiteral("all")) {
-        if (compatibilityStatusToString(entry.record.status) != statusFilter) {
+        if (statusFilter == QStringLiteral("executable")) {
+            const bool isExecutable =
+                (entry.record.status == PresetCompatibilityStatus::ExactValidated || entry.record.status == PresetCompatibilityStatus::Approximated) &&
+                !entry.record.mltFilters.isEmpty();
+            if (!isExecutable) {
+                return false;
+            }
+        } else if (compatibilityStatusToString(entry.record.status) != statusFilter) {
             return false;
         }
     }
@@ -744,15 +851,25 @@ void PremierePresetBrowser::updateInspectorForPreset(const PresetDisplayEntry *e
 
     m_overviewBrowser->setHtml(html);
 
-    // Visual Before / After preview thumbnail
+    // Visual Before / After preview thumbnail (cached scaled QPixmap so typing/selection never stutters)
     if (m_previewImageLabel) {
         const QString previewPath = !entry->previewSplitPath.isEmpty()
                                         ? entry->previewSplitPath
                                         : (!entry->previewAfterPath.isEmpty() ? entry->previewAfterPath : entry->previewBeforePath);
         if (!previewPath.isEmpty() && QFileInfo::exists(previewPath)) {
-            const QPixmap pix(previewPath);
-            if (!pix.isNull()) {
-                m_previewImageLabel->setPixmap(pix.scaled(360, 120, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+            QPixmap scaled;
+            const auto cacheIt = m_previewPixmapCache.constFind(previewPath);
+            if (cacheIt != m_previewPixmapCache.constEnd()) {
+                scaled = cacheIt.value();
+            } else {
+                const QPixmap pix(previewPath);
+                if (!pix.isNull()) {
+                    scaled = pix.scaled(360, 120, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+                    m_previewPixmapCache.insert(previewPath, scaled);
+                }
+            }
+            if (!scaled.isNull()) {
+                m_previewImageLabel->setPixmap(scaled);
             } else {
                 m_previewImageLabel->setPixmap(QPixmap());
                 m_previewImageLabel->setText(QStringLiteral("Preview available at: %1").arg(previewPath));
@@ -889,8 +1006,41 @@ void PremierePresetBrowser::onApplyEditedParamsClicked()
     }
 }
 
+void PremierePresetBrowser::onShowTechnicalInspectorToggled(bool)
+{
+    updateTechnicalInspectorVisibility();
+}
+
+void PremierePresetBrowser::updateTechnicalInspectorVisibility()
+{
+    if (!m_inspectorTabs) {
+        return;
+    }
+    const bool showTech = m_showTechnicalInspectorCheck && m_showTechnicalInspectorCheck->isChecked();
+    const QList<QWidget *> technicalTabs = {m_paramsTabWidget, m_kdenliveXmlEdit, m_rawXmlEdit};
+    for (QWidget *tab : technicalTabs) {
+        if (!tab) {
+            continue;
+        }
+        const int idx = m_inspectorTabs->indexOf(tab);
+        if (idx >= 0) {
+#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
+            m_inspectorTabs->setTabVisible(idx, showTech);
+#else
+            m_inspectorTabs->setTabEnabled(idx, showTech);
+#endif
+        }
+    }
+    if (!showTech && m_inspectorTabs->currentIndex() > 0 && technicalTabs.contains(m_inspectorTabs->currentWidget())) {
+        m_inspectorTabs->setCurrentIndex(0);
+    }
+}
+
 void PremierePresetBrowser::onSearchOrFilterChanged()
 {
+    if (m_searchDebounceTimer) {
+        m_searchDebounceTimer->stop();
+    }
     refreshView();
 }
 

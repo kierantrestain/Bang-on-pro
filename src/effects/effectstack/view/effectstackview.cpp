@@ -246,6 +246,8 @@ void EffectStackView::dropEvent(QDropEvent *event)
         }
         if (added) {
             m_scrollTimer.start();
+            slotFocusEffect();
+            Q_EMIT effectDroppedOnStack();
         }
     }
     if (dragRow > -1 && dragRow < m_model->rowCount()) {
@@ -367,6 +369,7 @@ void EffectStackView::loadEffects()
         const QString assetName = EffectsRepository::get()->getName(effectModel->getAssetId());
         view = new CollapsibleEffectView(assetName, effectModel, m_sourceFrameSize, this);
         connect(view, &CollapsibleEffectView::deleteEffect, this, &EffectStackView::slotDeleteEffect);
+        connect(view, &CollapsibleEffectView::duplicateEffect, this, &EffectStackView::slotDuplicateEffect);
         connect(view, &CollapsibleEffectView::moveEffect, m_model.get(), &EffectStackModel::moveEffect);
         connect(view, &CollapsibleEffectView::reloadEffect, this, &EffectStackView::reloadEffect);
         connect(view, &CollapsibleEffectView::switchHeight, this, &EffectStackView::slotAdjustDelegate, Qt::DirectConnection);
@@ -431,6 +434,27 @@ void EffectStackView::slotDeleteEffect(const std::shared_ptr<EffectItemModel> &e
         pCore->removeGroupEffect(m_model->getOwnerId(), effect->getAssetId(), effect->getId());
     } else {
         m_model->removeEffect(effect);
+    }
+}
+
+void EffectStackView::slotDuplicateEffect(const std::shared_ptr<EffectItemModel> &effect)
+{
+    if (!m_model || !effect) {
+        return;
+    }
+    const int sourceRow = effect->row();
+    Fun undo = []() { return true; };
+    Fun redo = []() { return true; };
+    const PlaylistState::ClipState state = pCore->getItemState(m_model->getOwnerId());
+    if (m_model->copyEffectWithUndo(effect, state, undo, redo)) {
+        const int newRow = m_model->rowCount() - 1;
+        if (sourceRow >= 0 && sourceRow + 1 < newRow) {
+            m_model->moveEffectWithUndo(sourceRow + 1, m_model->getEffectStackRow(newRow), undo, redo);
+            m_model->setActiveEffect(sourceRow + 1);
+        } else if (newRow >= 0) {
+            m_model->setActiveEffect(newRow);
+        }
+        pCore->pushUndo(undo, redo, i18n("Duplicate %1", EffectsRepository::get()->getName(effect->getAssetId())));
     }
 }
 
@@ -689,7 +713,7 @@ void EffectStackView::slotSaveStack()
         }
         effect.setAttribute(QStringLiteral("parentIn"), pCore->getItemIn(m_model->getOwnerId()));
         doc.appendChild(effect);
-        for (int i = 0; i <= m_model->rowCount(); ++i) {
+        for (int i = 0; i < m_model->rowCount(); ++i) {
             CollapsibleEffectView *w = static_cast<CollapsibleEffectView *>(m_effectsTree->indexWidget(m_model->index(i, 0, QModelIndex())));
             if (w) {
                 effect.appendChild(doc.importNode(w->toXml().documentElement(), true));

@@ -95,7 +95,7 @@ except ImportError:
     MacDMGPackager = None
 
 
-BANGONPRO_VERSION = "1.0.0"
+BANGONPRO_VERSION = "1.7.0"
 MACOS_DEPLOYMENT_TARGET = "13.0"
 MIN_MLT_VERSION = "7.22.0"
 
@@ -114,6 +114,9 @@ class subinfo(info.infoclass):  # noqa: N801 - Craft requires lowercase `subinfo
         )
         self.svnTargets["integration"] = (
             "https://github.com/kierantrestain/Bang-on-pro.git|bangonpro/integration|"
+        )
+        self.svnTargets["v1.7.0"] = (
+            "https://github.com/kierantrestain/Bang-on-pro.git|bangonpro/v1.7-release|"
         )
         self.defaultTarget = "main"
 

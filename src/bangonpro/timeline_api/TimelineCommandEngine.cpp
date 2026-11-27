@@ -3459,6 +3459,37 @@ void TimelineCommandEngine::setActiveContext(const QString &projectId, const QSt
     }
 }
 
+void TimelineCommandEngine::resetForProject(const QString &projectId, const QString &sequenceId)
+{
+    RecursiveMutexLocker locker(&m_writeMutex);
+    const QString nextProj = projectId.trimmed();
+    const QString nextSeq = sequenceId.trimmed();
+    m_activeProjectId = nextProj;
+    m_activeSequenceId = nextSeq;
+    m_hasExplicitContext = !m_activeProjectId.isEmpty() || !m_activeSequenceId.isEmpty();
+
+    const QVector<PendingProposal> staleProposals = m_pendingProposals;
+    m_pendingProposals.clear();
+    m_undoStack.clear();
+    m_redoStack.clear();
+    m_activityLog.clear();
+    m_revision = 0;
+
+    if (m_backend) {
+        m_backend->clearAliases();
+        InMemoryTimelineBackend *memBackend = dynamic_cast<InMemoryTimelineBackend *>(m_backend.get());
+        if (memBackend != nullptr) {
+            memBackend->setActiveContext(m_activeProjectId, m_activeSequenceId);
+        }
+    }
+
+    for (const PendingProposal &proposal : staleProposals) {
+        Q_EMIT proposalResolved(proposal.batch.requestId, false);
+    }
+    Q_EMIT revisionChanged(m_revision);
+    Q_EMIT activityLogUpdated();
+}
+
 QString TimelineCommandEngine::activeProjectId() const
 {
     RecursiveMutexLocker locker(&m_writeMutex);

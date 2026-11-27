@@ -59,6 +59,10 @@ class TimelineItemModel;
 class MonitorProxy;
 class KDualAction;
 
+namespace BangOnPro {
+class UnifiedEffectsPanel;
+}
+
 class MltErrorEvent : public QEvent
 {
 public:
@@ -152,6 +156,16 @@ public:
 
     /** @brief Raise (show) the project bin*/
     void raiseBin();
+    /** @brief Show and raise the dedicated Effect Controls dock. */
+    void showEffectControls();
+    /** @brief Access the unified Bang On Pro Effects Library widget. */
+    BangOnPro::UnifiedEffectsPanel *unifiedEffectsPanel() const { return m_unifiedEffectsPanel; }
+    /** @brief Access the dedicated Effect Controls dock widget. */
+    QDockWidget *effectStackDock() const { return m_effectStackDock; }
+    /** @brief Copy the active clip/item's effect stack XML for selective Paste Attributes. */
+    void slotCopyAttributes();
+    /** @brief Open the selective Paste Attributes dialog and apply chosen effects with undo. */
+    void slotPasteAttributesDialog();
     /** @brief Add a bin widget*/
     void addBin(Bin *bin, const QString &binName = QString(), bool updateCount = true);
     /** @brief Clean current document references from all bins*/
@@ -235,6 +249,8 @@ private:
     QDockWidget *m_compositionListDock;
     TransitionListWidget *m_compositionList;
     EffectListWidget *m_effectList2;
+    BangOnPro::UnifiedEffectsPanel *m_unifiedEffectsPanel{nullptr};
+    QString m_copiedAttributesXml;
 
     AssetPanel *m_assetPanel{nullptr};
     QDockWidget *m_effectStackDock;

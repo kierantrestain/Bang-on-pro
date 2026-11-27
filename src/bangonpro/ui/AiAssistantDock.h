@@ -80,6 +80,9 @@ public:
     /** @brief Clear the active proposal diff tree and reset pending state. */
     void clearProposal();
 
+    /** @brief Reset all project-scoped proposals, diff trees, warnings, prompts, and activity log on project switch. */
+    void resetForProject();
+
     /** @brief True if a proposed batch is awaiting approval or rejection. */
     bool hasPendingProposal() const;
 

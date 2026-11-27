@@ -73,6 +73,7 @@ Rectangle {
     property string clipThumbId
     property bool forceReloadAudioThumb
     property bool isComposition: false
+    property bool effectDropHover: false
     property int slipOffset: boundValue(outPoint - maxDuration + 1, trimmingOffset, inPoint)
     property int scrollStart: scrollView.contentX - (clipRoot.modelStart * root.timeScale)
     visible: scrollView.width + clipRoot.scrollStart >= 0 && clipRoot.scrollStart < clipRoot.width
@@ -283,19 +284,25 @@ Rectangle {
         onEntered: drag => {
             dropData = drag.getDataAsString('kdenlive/effect')
             dropSource = drag.getDataAsString('kdenlive/effectsource')
+            clipRoot.effectDropHover = true
             updateDrag()
         }
         onDropped: drag => {
+            clipRoot.effectDropHover = false
             console.log("Add effect: ", dropData)
             if (dropSource == '') {
                 // drop from effects list
-                controller.addClipEffect(clipRoot.clipId, dropData)
+                var applied = controller.addClipEffect(clipRoot.clipId, dropData)
+                if (applied && applied.length > 0) {
+                    timeline.notifyEffectApplied(clipRoot.clipId, dropData)
+                }
                 if (proxy.seekOnDrop() && (proxy.position < clipRoot.modelStart || proxy.position > clipRoot.modelStart + clipRoot.clipDuration)) {
                     // If timeline cursor is not inside clip, seek to drop position
                     proxy.position = clipRoot.modelStart + drag.x / timeScale
                 }
             } else {
                 controller.copyClipEffect(clipRoot.clipId, dropSource)
+                timeline.notifyEffectApplied(clipRoot.clipId, dropData)
             }
             dropSource = ''
             drag.acceptProposedAction
@@ -303,6 +310,7 @@ Rectangle {
             //console.log('KFR VIEW VISIBLE: ', effectRow.visible, ', SOURCE: ', effectRow.source, '\n HIDEVIEW:', clipRoot.hideClipViews<<', UNDEFINED: ', (clipRoot.keyframeModel == undefined))
         }
         onExited: {
+            clipRoot.effectDropHover = false
             root.endDrag()
         }
     }
@@ -417,7 +425,7 @@ Rectangle {
             color: 'transparent'
             id: itemBorder
             anchors.fill: parent
-            border.color: (clipStatus === ClipStatus.StatusMissing || ClipStatus === ClipStatus.StatusWaiting || clipStatus === ClipStatus.StatusDeleting) ? "#ff0000" : clipRoot.selected ? root.selectionColor : grouped ? root.groupColor : borderColor
+            border.color: clipRoot.effectDropHover ? "#FF5A1F" : (clipStatus === ClipStatus.StatusMissing || ClipStatus === ClipStatus.StatusWaiting || clipStatus === ClipStatus.StatusDeleting) ? "#ff0000" : clipRoot.selected ? root.selectionColor : grouped ? root.groupColor : borderColor
             border.width: isGrabbed ? 8 : 2
         }
 
@@ -1576,6 +1584,39 @@ Rectangle {
             color: activePalette.highlightedText
             visible: slipControler.visible
             opacity: 1
+        }
+    }
+
+    Rectangle {
+        // Bang On Pro V1.7: crisp effect drop-target visual feedback
+        id: effectDropOverlay
+        anchors.fill: parent
+        z: 100
+        visible: clipRoot.effectDropHover
+        color: "#26FF5A1F"
+        border.color: "#FF5A1F"
+        border.width: 2
+        radius: 2
+        Rectangle {
+            id: effectDropPill
+            visible: clipRoot.width >= 64 && clipRoot.height >= 20
+            anchors.centerIn: parent
+            width: Math.min(clipRoot.width - 8, effectDropPillText.implicitWidth + 12)
+            height: Math.min(clipRoot.height - 4, effectDropPillText.implicitHeight + 4)
+            radius: 4
+            color: "#E618181A"
+            border.color: "#FF5A1F"
+            border.width: 1
+            Text {
+                id: effectDropPillText
+                anchors.centerIn: parent
+                text: i18n("+ Drop Effect")
+                font: miniFont
+                color: "#EDEDED"
+                elide: Text.ElideRight
+                width: Math.min(implicitWidth, parent.width - 8)
+                horizontalAlignment: Text.AlignHCenter
+            }
         }
     }
 }

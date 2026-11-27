@@ -193,6 +193,9 @@ public:
         }
         return false;
     }
+
+    /** @brief Clears cached logical-to-native entity aliases when switching projects. */
+    virtual void clearAliases() {}
 };
 
 struct MediaAsset
@@ -564,6 +567,7 @@ public:
 
     // Active project/sequence context tracking & external/manual edit notification.
     void setActiveContext(const QString &projectId, const QString &sequenceId);
+    void resetForProject(const QString &projectId, const QString &sequenceId);
     QString activeProjectId() const;
     QString activeSequenceId() const;
     void notifyExternalEdit(const QString &reason = QString());

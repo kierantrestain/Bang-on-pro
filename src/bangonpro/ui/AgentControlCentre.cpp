@@ -21,6 +21,7 @@
 #include <QHBoxLayout>
 #include <QHash>
 #include <QHeaderView>
+#include <QHideEvent>
 #include <QJsonDocument>
 #include <QLabel>
 #include <QLineEdit>
@@ -30,6 +31,7 @@
 #include <QPlainTextEdit>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QShowEvent>
 #include <QSizePolicy>
 #include <QSpinBox>
 #include <QStringList>
@@ -114,11 +116,24 @@ QString minutesSeconds(double seconds)
     return QStringLiteral("%1:%2").arg(s / 60).arg(s % 60, 2, 10, QLatin1Char('0'));
 }
 
+QDateTime parseIsoUtc(const QString &raw)
+{
+    if (raw.isEmpty()) {
+        return {};
+    }
+    QDateTime dt = QDateTime::fromString(raw, Qt::ISODateWithMs);
+    if (!dt.isValid()) {
+        dt = QDateTime::fromString(raw, Qt::ISODate);
+    }
+    return dt.isValid() ? dt.toUTC() : QDateTime();
+}
+
 QString plainStatus(const QString &status)
 {
     static const QHash<QString, QString> words = {
         {QStringLiteral("queued"), QStringLiteral("Queued")},
         {QStringLiteral("interrupted"), QStringLiteral("Stopped before finishing")},
+        {QStringLiteral("paused"), QStringLiteral("Paused")},
         {QStringLiteral("running"), QStringLiteral("Running")},
         {QStringLiteral("completed"), QStringLiteral("Done")},
         {QStringLiteral("needs_attention"), QStringLiteral("Needs attention")},
@@ -150,6 +165,9 @@ TallyState historyTally(const QString &status)
     if (status == QLatin1String("cancelled") || status == QLatin1String("interrupted")) {
         return TallyState::Skipped;
     }
+    if (status == QLatin1String("paused")) {
+        return TallyState::Review;
+    }
     if (status == QLatin1String("queued") || status == QLatin1String("planned_manual")) {
         return TallyState::Idle;
     }
@@ -180,7 +198,7 @@ QString statusLabel(const QString &status, const QString &decision, bool stale)
         {QStringLiteral("completed"), QStringLiteral("Done")},      {QStringLiteral("skipped"), QStringLiteral("Skipped")},
         {QStringLiteral("failed"), QStringLiteral("Failed")},       {QStringLiteral("blocked"), QStringLiteral("Blocked")},
         {QStringLiteral("cancelled"), QStringLiteral("Cancelled")}, {QStringLiteral("rolled_back"), QStringLiteral("Rolled back")},
-        {QStringLiteral("interrupted"), QStringLiteral("Stopped")},
+        {QStringLiteral("interrupted"), QStringLiteral("Stopped")}, {QStringLiteral("paused"), QStringLiteral("Paused")},
     };
     static const QHash<QString, QString> decisions = {
         {QStringLiteral("auto_accepted"), QStringLiteral("applied")},
@@ -205,8 +223,8 @@ bool isFinishedWithDraft(const QString &status)
 
 bool isResumable(const QString &status)
 {
-    return status == QLatin1String("cancelled") || status == QLatin1String("interrupted") || status == QLatin1String("failed") ||
-           status == QLatin1String("completed_with_errors") || status.startsWith(QLatin1String("blocked"));
+    return status == QLatin1String("paused") || status == QLatin1String("cancelled") || status == QLatin1String("interrupted") ||
+           status == QLatin1String("failed") || status == QLatin1String("completed_with_errors") || status.startsWith(QLatin1String("blocked"));
 }
 
 QLabel *wrapLabel(const QString &text, QWidget *parent, const char *role)
@@ -226,6 +244,9 @@ AgentControlCentre::AgentControlCentre(QWidget *parent)
     m_pollTimer = new QTimer(this);
     m_pollTimer->setInterval(500);
     connect(m_pollTimer, &QTimer::timeout, this, [this]() { refreshFromDisk(); });
+    m_elapsedClock = new QTimer(this);
+    m_elapsedClock->setInterval(1000);
+    connect(m_elapsedClock, &QTimer::timeout, this, &AgentControlCentre::updateElapsedLabel);
     applyEditType(QStringLiteral("full_edit"));
     updateActionStates();
 }
@@ -398,14 +419,59 @@ QWidget *AgentControlCentre::buildSetup()
     m_profileCombo->addItem(tr("Daily news"), QStringLiteral("daily_news"));
     m_profileCombo->addItem(tr("Social short 9:16"), QStringLiteral("social_short"));
     styleLabel->setBuddy(m_profileCombo);
-    m_referencesBtn = new QPushButton(tr("Reference videos…"), m_setupSection);
+    m_referencesBtn = new QPushButton(tr("References…"), m_setupSection);
     m_referencesBtn->setObjectName(QStringLiteral("acc_references"));
-    m_referencesBtn->setToolTip(tr("Learn an editing style from videos you like and reuse it"));
+    m_referencesBtn->setToolTip(tr("Learn an editing style from reference videos you like and reuse it"));
     styleRow->addWidget(m_profileCombo, 1);
     styleRow->addWidget(m_referencesBtn);
     lay->addLayout(styleRow);
     connect(m_referencesBtn, &QPushButton::clicked, this, &AgentControlCentre::referenceVideosRequested);
     connect(m_profileCombo, QOverload<int>::of(&QComboBox::activated), this, [this]() { noteActivity(QStringLiteral("setup")); });
+
+    auto *cutForm = new QFormLayout;
+    cutForm->setContentsMargins(0, 0, 0, 0);
+    cutForm->setHorizontalSpacing(M::kSpace2);
+    cutForm->setVerticalSpacing(M::kSpace1);
+    cutForm->setRowWrapPolicy(QFormLayout::WrapLongRows);
+    cutForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+
+    m_mediaSourceCombo = new QComboBox(m_setupSection);
+    m_mediaSourceCombo->setObjectName(QStringLiteral("acc_media_source"));
+    m_mediaSourceCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    m_mediaSourceCombo->setMinimumContentsLength(8);
+    m_mediaSourceCombo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    m_mediaSourceCombo->addItem(tr("Current sequence"), QStringLiteral("sequence"));
+    m_mediaSourceCombo->addItem(tr("Selected Bin clips"), QStringLiteral("selected_bin"));
+    m_mediaSourceCombo->addItem(tr("Project Bin"), QStringLiteral("project_bin"));
+    m_mediaSourceCombo->addItem(tr("Choose files…"), QStringLiteral("files"));
+    m_mediaSourceCombo->setToolTip(tr("Which footage Bang On Pro should assemble into the edited sequence"));
+
+    m_outputFormatCombo = new QComboBox(m_setupSection);
+    m_outputFormatCombo->setObjectName(QStringLiteral("acc_output_format"));
+    m_outputFormatCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    m_outputFormatCombo->setMinimumContentsLength(8);
+    m_outputFormatCombo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    m_outputFormatCombo->addItem(tr("Match sequence"), QStringLiteral("match"));
+    m_outputFormatCombo->addItem(tr("16:9 Landscape"), QStringLiteral("16:9"));
+    m_outputFormatCombo->addItem(tr("9:16 Vertical"), QStringLiteral("9:16"));
+    m_outputFormatCombo->addItem(tr("1:1 Square"), QStringLiteral("1:1"));
+    m_outputFormatCombo->setToolTip(tr("Output aspect ratio for the edited sequence"));
+
+    m_targetDurationSpin = new QSpinBox(m_setupSection);
+    m_targetDurationSpin->setObjectName(QStringLiteral("acc_target_duration"));
+    m_targetDurationSpin->setRange(0, 240);
+    m_targetDurationSpin->setValue(0);
+    m_targetDurationSpin->setSpecialValueText(tr("Auto"));
+    m_targetDurationSpin->setSuffix(tr(" min"));
+    m_targetDurationSpin->setToolTip(tr("Optional target duration in minutes (0 = Auto)"));
+
+    cutForm->addRow(wrapLabel(tr("Source"), m_setupSection, "secondary"), m_mediaSourceCombo);
+    cutForm->addRow(wrapLabel(tr("Format"), m_setupSection, "secondary"), m_outputFormatCombo);
+    cutForm->addRow(wrapLabel(tr("Target"), m_setupSection, "secondary"), m_targetDurationSpin);
+    lay->addLayout(cutForm);
+    connect(m_mediaSourceCombo, QOverload<int>::of(&QComboBox::activated), this, [this]() { noteActivity(QStringLiteral("setup")); });
+    connect(m_outputFormatCombo, QOverload<int>::of(&QComboBox::activated), this, [this]() { noteActivity(QStringLiteral("setup")); });
+    connect(m_targetDurationSpin, QOverload<int>::of(&QSpinBox::valueChanged), this, [this]() { noteActivity(QStringLiteral("setup")); });
 
     auto *briefLabel = wrapLabel(tr("Describe the edit"), m_setupSection, "secondary");
     lay->addWidget(briefLabel);
@@ -453,6 +519,28 @@ QWidget *AgentControlCentre::buildRun()
     auto *lay = new QVBoxLayout(m_runSection);
     lay->setContentsMargins(0, 0, 0, 0);
     lay->setSpacing(M::kSpace2);
+
+    auto *telemetryRow = new QHBoxLayout;
+    telemetryRow->setSpacing(M::kSpace2);
+    m_engineBadge = new QLabel(m_runSection);
+    m_engineBadge->setObjectName(QStringLiteral("acc_engine_badge"));
+    setTextRole(m_engineBadge, "meta");
+    m_engineBadge->setProperty("bopPill", true);
+    m_engineBadge->setVisible(false);
+    m_elapsedLabel = new QLabel(m_runSection);
+    m_elapsedLabel->setObjectName(QStringLiteral("acc_elapsed_label"));
+    setTextRole(m_elapsedLabel, "meta");
+    m_elapsedLabel->setVisible(false);
+    telemetryRow->addWidget(m_engineBadge);
+    telemetryRow->addStretch(1);
+    telemetryRow->addWidget(m_elapsedLabel);
+    lay->addLayout(telemetryRow);
+
+    m_resourceLabel = wrapLabel(QString(), m_runSection, "meta");
+    m_resourceLabel->setObjectName(QStringLiteral("acc_resource_label"));
+    m_resourceLabel->setVisible(false);
+    lay->addWidget(m_resourceLabel);
+
     m_stageList = new QListWidget(m_runSection);
     m_stageList->setObjectName(QStringLiteral("acc_stages"));
     m_stageList->setAccessibleName(tr("Production stages"));
@@ -490,18 +578,46 @@ QWidget *AgentControlCentre::buildRun()
     m_problemLabel->setTextFormat(Qt::RichText);
     m_problemLabel->setVisible(false);
     lay->addWidget(m_problemLabel);
-    auto *row = new QHBoxLayout;
-    row->setSpacing(M::kSpace2);
+
+    auto *actions = new QGridLayout;
+    actions->setHorizontalSpacing(M::kSpace2);
+    actions->setVerticalSpacing(M::kSpace1);
+    m_pauseBtn = new QPushButton(tr("Pause"), m_runSection);
+    m_pauseBtn->setObjectName(QStringLiteral("acc_pause"));
+    m_pauseBtn->setToolTip(tr("Pause cleanly after the current stage finishes. Resume continues without losing work."));
     m_cancelBtn = new QPushButton(tr("Cancel"), m_runSection);
     m_cancelBtn->setObjectName(QStringLiteral("acc_cancel"));
     m_cancelBtn->setToolTip(tr("Stop after the current step. Finished stages are kept, and Resume continues from there."));
     m_resumeBtn = new QPushButton(tr("Resume"), m_runSection);
     m_resumeBtn->setObjectName(QStringLiteral("acc_resume"));
     m_resumeBtn->setToolTip(tr("Continue from the last finished stage. Nothing is redone twice."));
-    row->addWidget(m_cancelBtn);
-    row->addWidget(m_resumeBtn);
-    row->addStretch(1);
-    lay->addLayout(row);
+    m_retryBtn = new QPushButton(tr("Retry"), m_runSection);
+    m_retryBtn->setObjectName(QStringLiteral("acc_retry"));
+    m_retryBtn->setToolTip(tr("Retry the failed or blocked production from the last verified checkpoint."));
+    m_discardBtn = new QPushButton(tr("Discard"), m_runSection);
+    m_discardBtn->setObjectName(QStringLiteral("acc_discard"));
+    setRole(m_discardBtn, "danger");
+    m_discardBtn->setToolTip(tr("Remove this stopped production draft. Your original footage is never touched."));
+    m_newFromRunBtn = new QPushButton(tr("New production"), m_runSection);
+    m_newFromRunBtn->setObjectName(QStringLiteral("acc_new_from_run"));
+    setRole(m_newFromRunBtn, "quiet");
+    m_newFromRunBtn->setToolTip(tr("Return to setup and start a new production."));
+
+    actions->addWidget(m_pauseBtn, 0, 0);
+    actions->addWidget(m_cancelBtn, 0, 1);
+    actions->addWidget(m_resumeBtn, 1, 0);
+    actions->addWidget(m_retryBtn, 1, 1);
+    actions->addWidget(m_discardBtn, 2, 0);
+    actions->addWidget(m_newFromRunBtn, 2, 1);
+    lay->addLayout(actions);
+
+    connect(m_pauseBtn, &QPushButton::clicked, this, [this]() {
+        if (!m_jobDir.isEmpty()) {
+            m_statusLabel->setText(tr("Pausing… finishing the current stage"));
+            m_pauseBtn->setEnabled(false);
+            Q_EMIT pauseJobRequested(m_jobDir);
+        }
+    });
     connect(m_cancelBtn, &QPushButton::clicked, this, [this]() {
         if (!m_jobDir.isEmpty()) {
             m_statusLabel->setText(tr("Cancelling… the current step is finishing"));
@@ -513,6 +629,21 @@ QWidget *AgentControlCentre::buildRun()
         if (!m_jobDir.isEmpty()) {
             Q_EMIT resumeJobRequested(m_jobDir);
         }
+    });
+    connect(m_retryBtn, &QPushButton::clicked, this, [this]() {
+        if (!m_jobDir.isEmpty()) {
+            Q_EMIT retryJobRequested(m_jobDir);
+        }
+    });
+    connect(m_discardBtn, &QPushButton::clicked, this, [this]() {
+        if (!m_jobDir.isEmpty()) {
+            Q_EMIT discardJobRequested(m_jobDir);
+        }
+    });
+    connect(m_newFromRunBtn, &QPushButton::clicked, this, [this]() {
+        clearActiveJob();
+        Q_EMIT newProductionRequested();
+        m_briefEdit->setFocus();
     });
     m_runSection->setVisible(false);
     return m_runSection;
@@ -604,8 +735,8 @@ QWidget *AgentControlCentre::buildDone()
         Q_EMIT exportRequested();
     });
     connect(m_newJobBtn, &QPushButton::clicked, this, [this]() {
-        m_viewingFinished = false;
-        updateActionStates();
+        clearActiveJob();
+        Q_EMIT newProductionRequested();
         m_briefEdit->setFocus();
     });
     connect(m_reviseBtn, &QPushButton::clicked, this, [this]() {
@@ -942,6 +1073,42 @@ void AgentControlCentre::setEditType(const QString &type)
     applyEditType(type);
 }
 
+QString AgentControlCentre::selectedMediaSource() const
+{
+    return m_mediaSourceCombo->currentData().toString();
+}
+
+void AgentControlCentre::setSelectedMediaSource(const QString &source)
+{
+    const int idx = m_mediaSourceCombo->findData(source);
+    if (idx >= 0) {
+        m_mediaSourceCombo->setCurrentIndex(idx);
+    }
+}
+
+QString AgentControlCentre::selectedOutputFormat() const
+{
+    return m_outputFormatCombo->currentData().toString();
+}
+
+void AgentControlCentre::setSelectedOutputFormat(const QString &format)
+{
+    const int idx = m_outputFormatCombo->findData(format);
+    if (idx >= 0) {
+        m_outputFormatCombo->setCurrentIndex(idx);
+    }
+}
+
+int AgentControlCentre::targetDurationMinutes() const
+{
+    return m_targetDurationSpin->value();
+}
+
+void AgentControlCentre::setTargetDurationMinutes(int minutes)
+{
+    m_targetDurationSpin->setValue(qBound(0, minutes, 240));
+}
+
 bool AgentControlCentre::qcMarkersVisible() const
 {
     return m_qcMarkersCheck->isChecked();
@@ -981,6 +1148,114 @@ void AgentControlCentre::setProjectContext(const QString &projectName, const QSt
     m_contextLabel->setText(projectName.isEmpty()
                                 ? tr("No project open")
                                 : (seq.isEmpty() ? tr("Project: %1").arg(projectName) : tr("Project: %1 · Sequence: %2").arg(projectName, seq)));
+}
+
+void AgentControlCentre::clearActiveJob()
+{
+    m_pollTimer->stop();
+    m_elapsedClock->stop();
+    m_jobElapsedWall.invalidate();
+    m_jobStartedUtc = QDateTime();
+    m_jobDir.clear();
+    m_lastDiskSignature.clear();
+    m_jobStatus.clear();
+    m_draftProject.clear();
+    m_lastStatusSeen.clear();
+    m_agentSessionText.clear();
+    m_agentDetailText.clear();
+    m_revisionCount = 0;
+    m_workerProcessRunning = false;
+    m_progressMeasured = false;
+    m_deadPolls = 0;
+    m_lostReported = false;
+    m_hasDraft = false;
+    m_viewingFinished = false;
+
+    for (int i = 0; i < m_stageList->count(); ++i) {
+        QListWidgetItem *item = m_stageList->item(i);
+        item->setData(kStageStateRole, QStringLiteral("pending"));
+        item->setIcon(tallyIcon(TallyState::Idle));
+        item->setText(tr(kStages[i].label));
+        item->setToolTip(QString());
+        item->setForeground(QColor(QString::fromLatin1(StudioPaletteTokens::kTextMuted)));
+    }
+    for (int i = 0; i < m_agentTree->topLevelItemCount(); ++i) {
+        QTreeWidgetItem *it = m_agentTree->topLevelItem(i);
+        it->setIcon(ColAgent, tallyIcon(TallyState::Idle));
+        it->setText(ColStatus, tr("Idle"));
+        it->setForeground(ColStatus, QColor(QString::fromLatin1(StudioPaletteTokens::kTextMuted)));
+        it->setText(ColConfidence, QString());
+        it->setText(ColOps, QString());
+        it->setText(ColEngine, QString());
+        it->setText(ColSummary, QString());
+        it->setToolTip(ColSummary, QString());
+    }
+    m_reviewList->clear();
+    m_reviewTitle->setText(tr("Worth a look"));
+    m_reviewTitle->setVisible(false);
+    m_reviewList->setVisible(false);
+    m_summaryView->clear();
+    m_problemLabel->clear();
+    m_problemLabel->setVisible(false);
+    m_reasoningLabel->clear();
+    m_reasoningLabel->setVisible(false);
+    m_doneDetail->clear();
+    m_statusLabel->setText(tr("No production running"));
+    m_statusLabel->setToolTip(QString());
+    m_jobMetaLabel->setText(tr("No job"));
+    m_jobMetaLabel->setToolTip(QString());
+    m_engineBadge->clear();
+    m_engineBadge->setVisible(false);
+    m_elapsedLabel->clear();
+    m_elapsedLabel->setVisible(false);
+    m_resourceLabel->clear();
+    m_resourceLabel->setVisible(false);
+    m_progress->setRange(0, 1000);
+    m_progress->setValue(0);
+    m_progress->setVisible(false);
+    {
+        const QSignalBlocker block(m_qcMarkersCheck);
+        m_qcMarkersCheck->setChecked(false);
+    }
+    m_reviseEdit->clear();
+    m_reviseSelection->setChecked(false);
+    updateActionStates();
+}
+
+void AgentControlCentre::resetForProject(const QString &projectUuid, const QString &projectName, const QStringList &sequences, int activeSequenceIndex)
+{
+    clearActiveJob();
+    m_activeProjectUuid = projectUuid;
+    if (m_briefEdit) {
+        m_briefEdit->clear();
+    }
+    if (m_seriesEdit) {
+        m_seriesEdit->clear();
+    }
+    if (m_episodeEdit) {
+        m_episodeEdit->clear();
+    }
+    if (m_mediaSourceCombo) {
+        const QSignalBlocker block(m_mediaSourceCombo);
+        m_mediaSourceCombo->setCurrentIndex(0);
+    }
+    if (m_outputFormatCombo) {
+        const QSignalBlocker block(m_outputFormatCombo);
+        m_outputFormatCombo->setCurrentIndex(0);
+    }
+    if (m_targetDurationSpin) {
+        const QSignalBlocker block(m_targetDurationSpin);
+        m_targetDurationSpin->setValue(0);
+    }
+    m_historyList->clear();
+    m_historyTitle->setText(tr("Queue and history"));
+    setProjectContext(projectName, sequences, activeSequenceIndex);
+    updateActionStates();
+}
+
+QString AgentControlCentre::activeProjectUuid() const
+{
+    return m_activeProjectUuid;
 }
 
 QString AgentControlCentre::projectContextText() const
@@ -1168,6 +1443,18 @@ QStringList AgentControlCentre::buildRunArguments(const QStringList &inputs) con
     }
     if (m_budgetSpin->value() > 0.0) {
         args << QStringLiteral("--budget-usd") << QString::number(m_budgetSpin->value(), 'f', 2);
+    }
+    const QString aspect = selectedOutputFormat();
+    if (!aspect.isEmpty() && aspect != QLatin1String("match")) {
+        args << QStringLiteral("--aspect-ratio") << aspect;
+    }
+    const int targetMin = targetDurationMinutes();
+    if (targetMin > 0) {
+        args << QStringLiteral("--target-duration-sec") << QString::number(targetMin * 60);
+    }
+    const QString source = selectedMediaSource();
+    if (!source.isEmpty() && source != QLatin1String("sequence")) {
+        args << QStringLiteral("--media-source") << source;
     }
     const QStringList disabled = disabledAgents();
     if (!disabled.isEmpty()) {
@@ -1442,15 +1729,62 @@ void AgentControlCentre::loadJobStatus(const QJsonObject &doc)
     }
     m_jobMetaLabel->setText(doc.value(QStringLiteral("job_id")).toString());
 
-    // Reasoning: which provider actually worked, or that everything ran on this Mac.
+    // Reasoning & compute-tier badge: honest distinction between deterministic, local neural, and subscription AI.
     const QJsonObject reasoning = doc.value(QStringLiteral("reasoning")).toObject();
     const QString reasoningMsg = reasoning.value(QStringLiteral("message")).toString();
     m_reasoningLabel->setText(reasoningMsg);
     m_reasoningLabel->setToolTip(reasoning.value(QStringLiteral("detail")).toString());
     m_reasoningLabel->setVisible(!reasoningMsg.isEmpty());
 
+    bool anyNeural = !doc.value(QStringLiteral("asr_model_id")).toString().isEmpty();
+    for (auto it = agents.constBegin(); it != agents.constEnd(); ++it) {
+        if (it.value().toObject().value(QStringLiteral("neural_inference")).toBool()) {
+            anyNeural = true;
+            break;
+        }
+    }
+    const QString rMode = reasoning.value(QStringLiteral("mode")).toString();
+    const int rCalls = reasoning.value(QStringLiteral("calls")).toInt();
+    if (rCalls > 0 || (!rMode.isEmpty() && rMode != QLatin1String("local"))) {
+        m_engineBadge->setText(tr("Subscription AI"));
+    } else if (anyNeural) {
+        m_engineBadge->setText(tr("Local neural"));
+    } else {
+        m_engineBadge->setText(tr("Local deterministic"));
+    }
+    m_engineBadge->setVisible(true);
+
+    // Lightweight resource telemetry (RSS MB & CPU time) when recorded in job.json.
+    const QJsonObject resUsage = doc.value(QStringLiteral("resource_usage")).toObject();
+    const QJsonValue rssVal = resUsage.value(QStringLiteral("rss_mb"));
+    if (rssVal.isDouble()) {
+        const QJsonValue cpuVal = resUsage.value(QStringLiteral("cpu_time_sec"));
+        if (cpuVal.isDouble()) {
+            m_resourceLabel->setText(tr("RAM %1 MB · CPU %2s").arg(qRound(rssVal.toDouble())).arg(cpuVal.toDouble(), 0, 'f', 1));
+        } else {
+            m_resourceLabel->setText(tr("RAM %1 MB").arg(qRound(rssVal.toDouble())));
+        }
+        m_resourceLabel->setVisible(true);
+    } else {
+        m_resourceLabel->clear();
+        m_resourceLabel->setVisible(false);
+    }
+
+    // Live elapsed clock while running; final duration when stopped/finished.
+    const QDateTime parsedStart = parseIsoUtc(doc.value(QStringLiteral("started_at_utc")).toString());
+    if (parsedStart.isValid()) {
+        m_jobStartedUtc = parsedStart;
+    }
+
     const QJsonValue machine = doc.value(QStringLiteral("processing_elapsed_sec"));
     if (isRunningStatus()) {
+        if (!m_jobStartedUtc.isValid() && !m_jobElapsedWall.isValid()) {
+            m_jobElapsedWall.start();
+        }
+        if (!m_elapsedClock->isActive()) {
+            m_elapsedClock->start();
+        }
+        updateElapsedLabel();
         QString current;
         for (int i = 0; i < m_stageList->count(); ++i) {
             if (m_stageList->item(i)->data(kStageStateRole).toString() == QLatin1String("running")) {
@@ -1476,6 +1810,16 @@ void AgentControlCentre::loadJobStatus(const QJsonObject &doc)
         m_statusLabel->setText(line);
         m_statusLabel->setToolTip(runningAgentText);
     } else {
+        m_elapsedClock->stop();
+        if (machine.isDouble()) {
+            m_elapsedLabel->setText(minutesSeconds(machine.toDouble()));
+            m_elapsedLabel->setVisible(true);
+        } else if (m_jobStartedUtc.isValid() || m_jobElapsedWall.isValid()) {
+            updateElapsedLabel();
+        } else {
+            m_elapsedLabel->clear();
+            m_elapsedLabel->setVisible(false);
+        }
         QString line = plainStatus(m_jobStatus);
         if (machine.isDouble()) {
             line += tr(" · %1 on this Mac").arg(minutesSeconds(machine.toDouble()));
@@ -1516,13 +1860,21 @@ void AgentControlCentre::setActiveJobDir(const QString &jobDir)
         m_lostReported = false;
         m_viewingFinished = true;
         m_problemLabel->setVisible(false);
+        m_jobStartedUtc = QDateTime();
+        if (!jobDir.isEmpty()) {
+            m_jobElapsedWall.start();
+        } else {
+            m_jobElapsedWall.invalidate();
+        }
     }
     m_jobDir = jobDir;
+    m_lastDiskSignature.clear();
     m_lastStatusSeen.clear();
     if (!jobDir.isEmpty()) {
         m_pollTimer->start();
     } else {
         m_pollTimer->stop();
+        m_elapsedClock->stop();
     }
     updateActionStates();
 }
@@ -1610,10 +1962,37 @@ QString AgentControlCentre::agentDetailText() const
     return m_agentDetailText;
 }
 
-bool AgentControlCentre::refreshFromDisk()
+QString AgentControlCentre::computeDiskSignature() const
+{
+    const QDir dir(m_jobDir);
+    auto fileSig = [&dir](const QString &rel) -> QString {
+        const QFileInfo fi(dir.filePath(rel));
+        if (!fi.exists()) {
+            return QStringLiteral("0");
+        }
+        return QStringLiteral("1:%1:%2").arg(fi.size()).arg(fi.lastModified().toMSecsSinceEpoch());
+    };
+    return fileSig(QStringLiteral("job.json")) + QLatin1Char('|') + fileSig(QStringLiteral("draft/agent_presence.json")) + QLatin1Char('|') +
+           fileSig(QStringLiteral("draft/agent_edits.json")) + QLatin1Char('|') +
+           (QFileInfo::exists(dir.filePath(QStringLiteral("CANCEL"))) ? QLatin1Char('1') : QLatin1Char('0')) +
+           (QFileInfo::exists(dir.filePath(QStringLiteral("PAUSE"))) ? QLatin1Char('1') : QLatin1Char('0'));
+}
+
+bool AgentControlCentre::refreshFromDisk(bool force)
 {
     if (m_jobDir.isEmpty()) {
         return false;
+    }
+    const QString sig = computeDiskSignature();
+    const bool jobExists = sig.startsWith(QLatin1String("1:"));
+    if (!jobExists) {
+        return false;
+    }
+    if (!force && sig == m_lastDiskSignature) {
+        // Still check worker liveness if the job thinks it is running, so dead workers are never missed.
+        if (!isRunningStatus() || m_workerProcessRunning || jobWorkerAlive(m_jobDir)) {
+            return true;
+        }
     }
     QFile f(QDir(m_jobDir).filePath(QStringLiteral("job.json")));
     if (!f.open(QIODevice::ReadOnly)) {
@@ -1623,6 +2002,7 @@ bool AgentControlCentre::refreshFromDisk()
     if (!doc.isObject()) {
         return false; // partially written file; next poll will pick it up
     }
+    m_lastDiskSignature = sig;
     loadJobStatus(doc.object());
     {
         auto readObj = [this](const QString &rel) {
@@ -1653,7 +2033,7 @@ void AgentControlCentre::recoverJob(const QString &jobDir, bool processAlive)
 {
     setWorkerProcessRunning(processAlive);
     setActiveJobDir(jobDir);
-    refreshFromDisk();
+    refreshFromDisk(true);
 }
 
 void AgentControlCentre::setBusy(bool busy, const QString &text)
@@ -1663,14 +2043,65 @@ void AgentControlCentre::setBusy(bool busy, const QString &text)
         m_jobStatus = QStringLiteral("running");
         m_viewingFinished = true;
         m_problemLabel->setVisible(false);
+        if (!m_jobElapsedWall.isValid()) {
+            m_jobElapsedWall.start();
+        }
+        if (!m_elapsedClock->isActive()) {
+            m_elapsedClock->start();
+        }
+        updateElapsedLabel();
         if (!m_jobDir.isEmpty()) {
             m_pollTimer->start();
+        }
+    } else {
+        m_elapsedClock->stop();
+        if (m_jobStatus == QLatin1String("running") && (m_jobDir.isEmpty() || !QFileInfo::exists(QDir(m_jobDir).filePath(QStringLiteral("job.json"))))) {
+            // Worker terminated before writing job.json: never display an active production without a live worker.
+            m_jobStatus = QStringLiteral("failed");
+            m_pollTimer->stop();
         }
     }
     if (!text.isEmpty()) {
         m_statusLabel->setText(text);
     }
     updateActionStates();
+}
+
+void AgentControlCentre::updateElapsedLabel()
+{
+    double elapsedSec = 0.0;
+    if (m_jobStartedUtc.isValid()) {
+        elapsedSec = qMax<qint64>(0, m_jobStartedUtc.msecsTo(QDateTime::currentDateTimeUtc())) / 1000.0;
+    } else if (m_jobElapsedWall.isValid()) {
+        elapsedSec = m_jobElapsedWall.elapsed() / 1000.0;
+    } else {
+        m_elapsedLabel->clear();
+        m_elapsedLabel->setVisible(false);
+        return;
+    }
+    m_elapsedLabel->setText(minutesSeconds(elapsedSec));
+    m_elapsedLabel->setVisible(true);
+}
+
+void AgentControlCentre::hideEvent(QHideEvent *event)
+{
+    m_pollTimer->stop();
+    m_elapsedClock->stop();
+    QWidget::hideEvent(event);
+}
+
+void AgentControlCentre::showEvent(QShowEvent *event)
+{
+    QWidget::showEvent(event);
+    if (!m_jobDir.isEmpty() && (isRunningStatus() || m_workerProcessRunning)) {
+        if (!m_pollTimer->isActive()) {
+            m_pollTimer->start();
+        }
+        if (!m_elapsedClock->isActive()) {
+            m_elapsedClock->start();
+        }
+        refreshFromDisk(true);
+    }
 }
 
 void AgentControlCentre::updateActionStates()
@@ -1686,11 +2117,25 @@ void AgentControlCentre::updateActionStates()
     m_runSection->setVisible(showRun || (!m_problemLabel->isHidden() && !showDone));
     m_doneSection->setVisible(showDone);
 
+    const bool cancelExists = hasJob && QFileInfo::exists(QDir(m_jobDir).filePath(QStringLiteral("CANCEL")));
+    const bool pauseExists = hasJob && QFileInfo::exists(QDir(m_jobDir).filePath(QStringLiteral("PAUSE")));
+    m_pauseBtn->setVisible(running);
+    m_pauseBtn->setEnabled(running && !pauseExists && !cancelExists);
     m_cancelBtn->setVisible(running);
-    m_cancelBtn->setEnabled(running && !QFileInfo::exists(QDir(m_jobDir).filePath(QStringLiteral("CANCEL"))));
+    m_cancelBtn->setEnabled(running && !cancelExists);
     const bool resumable = hasJob && !running && isResumable(m_jobStatus);
     m_resumeBtn->setVisible(resumable);
     m_resumeBtn->setEnabled(resumable);
+    const bool retryable = hasJob && !running && (m_jobStatus == QLatin1String("failed") || m_jobStatus.startsWith(QLatin1String("blocked")));
+    m_retryBtn->setVisible(retryable);
+    m_retryBtn->setEnabled(retryable);
+    const bool discardable = hasJob && !running && !finished;
+    m_discardBtn->setVisible(discardable);
+    m_discardBtn->setEnabled(discardable);
+    const bool canNewFromRun = !running && !showDone && (hasJob || !m_problemLabel->isHidden());
+    m_newFromRunBtn->setVisible(canNewFromRun);
+    m_newFromRunBtn->setEnabled(canNewFromRun);
+
     m_rerunBtn->setEnabled(hasJob && !running && hasAgent);
     const bool canRevise = finished && m_jobStatus != QLatin1String("completed_with_errors");
     m_reviseEdit->setEnabled(canRevise);
@@ -1752,6 +2197,21 @@ QString AgentControlCentre::reasoningText() const
 QString AgentControlCentre::problemText() const
 {
     return m_problemLabel->isHidden() ? QString() : m_problemLabel->text();
+}
+
+QString AgentControlCentre::elapsedText() const
+{
+    return m_elapsedLabel->isHidden() ? QString() : m_elapsedLabel->text();
+}
+
+QString AgentControlCentre::resourceText() const
+{
+    return m_resourceLabel->isHidden() ? QString() : m_resourceLabel->text();
+}
+
+QString AgentControlCentre::engineBadgeText() const
+{
+    return m_engineBadge->isHidden() ? QString() : m_engineBadge->text();
 }
 
 bool AgentControlCentre::progressIsMeasured() const

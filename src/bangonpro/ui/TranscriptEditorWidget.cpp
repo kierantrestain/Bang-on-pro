@@ -160,7 +160,11 @@ bool TranscriptEditorWidget::loadFromFile(const QString &filePath, QString *erro
         return false;
     }
 
-    return loadFromJson(doc.object(), errorMessage);
+    if (!loadFromJson(doc.object(), errorMessage)) {
+        return false;
+    }
+    m_activeFilePath = filePath;
+    return true;
 }
 
 bool TranscriptEditorWidget::loadFromJson(const QJsonObject &json, QString *errorMessage)
@@ -309,9 +313,26 @@ void TranscriptEditorWidget::clear()
     m_segments.clear();
     m_speakerRenames.clear();
     m_sourceMetadata = QJsonObject{};
+    m_activeFilePath.clear();
     m_tree->clear();
     rebuildSpeakerCombo();
     updateSummaryAndButtons();
+}
+
+void TranscriptEditorWidget::resetForProject()
+{
+    if (m_searchEdit != nullptr) {
+        m_searchEdit->blockSignals(true);
+        m_searchEdit->clear();
+        m_searchEdit->blockSignals(false);
+    }
+    if (m_speakerFilterCombo != nullptr) {
+        m_speakerFilterCombo->blockSignals(true);
+        m_speakerFilterCombo->setCurrentIndex(0);
+        m_speakerFilterCombo->blockSignals(false);
+    }
+    m_activeFilePath.clear();
+    clear();
 }
 
 int TranscriptEditorWidget::segmentCount() const

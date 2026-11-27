@@ -373,7 +373,11 @@ def probe_hardware_capabilities(disk_path: str | Path = ".") -> HardwareCapabili
     videotoolbox_available = (
         system_name == "darwin"
         and "videotoolbox" in hwaccels
-        and ("h264_videotoolbox" in encoders or "hevc_videotoolbox" in encoders)
+        and (
+            "h264_videotoolbox" in encoders
+            or "hevc_videotoolbox" in encoders
+            or "prores_videotoolbox" in encoders
+        )
     )
 
     metal_assessment = assess_metal_mlt_support(
@@ -435,10 +439,11 @@ def generate_export_profile(
     """Generate a validated FFmpeg & MLT export/proxy profile with deterministic CPU fallback.
 
     On Apple Silicon with VideoToolbox encoders available, emits real
-    ``h264_videotoolbox`` / ``hevc_videotoolbox`` arguments (and ``prores_ks`` for
-    Apple ProRes 422 / 422 HQ / 422 Proxy mastering). When VideoToolbox is
-    unavailable (e.g., Linux CI), automatically falls back to deterministic CPU
-    encoders (``libx264``, ``libx265``, ``prores_ks``) with explicit metadata.
+    ``h264_videotoolbox`` / ``hevc_videotoolbox`` / ``prores_videotoolbox`` arguments
+    for H.264, HEVC, and Apple ProRes 422 / 422 HQ / 422 Proxy mastering. When
+    VideoToolbox or ``prores_videotoolbox`` is unavailable (e.g., Linux CI or older
+    FFmpeg builds), automatically falls back to deterministic CPU encoders
+    (``libx264``, ``libx265``, ``prores_ks``) with explicit metadata.
     """
     caps = capabilities if capabilities is not None else probe_hardware_capabilities()
     worker_threads = max(1, threads if threads is not None else min(caps.cpu_cores_logical, 8))
@@ -447,6 +452,7 @@ def generate_export_profile(
 
     vt_h264_ok = caps.videotoolbox_available and "h264_videotoolbox" in caps.ffmpeg_encoders
     vt_hevc_ok = caps.videotoolbox_available and "hevc_videotoolbox" in caps.ffmpeg_encoders
+    vt_prores_ok = caps.videotoolbox_available and "prores_videotoolbox" in caps.ffmpeg_encoders
 
     if profile_name == "h264_master":
         bitrate = video_bitrate or "16M"
@@ -610,23 +616,56 @@ def generate_export_profile(
         )
 
     prores_variants = {
-        "prores_422_proxy": ("0", "Apple ProRes 422 Proxy (prores_ks)"),
-        "prores_422": ("2", "Apple ProRes 422 Standard (prores_ks)"),
-        "prores_422_hq": ("3", "Apple ProRes 422 HQ Mastering (prores_ks)"),
+        "prores_422_proxy": ("0", "Apple ProRes 422 Proxy"),
+        "prores_422": ("2", "Apple ProRes 422 Standard"),
+        "prores_422_hq": ("3", "Apple ProRes 422 HQ Mastering"),
     }
     if profile_name in prores_variants:
-        prores_level, desc = prores_variants[profile_name]
+        prores_level, base_desc = prores_variants[profile_name]
+        if vt_prores_ok:
+            return HardwareProfile(
+                profile_name=profile_name,
+                description=f"{base_desc} (Apple Silicon VideoToolbox)",
+                container="mov",
+                video_codec="prores_videotoolbox",
+                audio_codec="pcm_s16le",
+                pixel_format="yuv422p10le",
+                hardware_accelerated=True,
+                accelerator="videotoolbox",
+                fallback_used=False,
+                fallback_reason=None,
+                ffmpeg_input_args=decode_args,
+                ffmpeg_output_args=[
+                    "-c:v", "prores_videotoolbox",
+                    "-profile:v", prores_level,
+                    "-allow_sw", "1",
+                    "-pix_fmt", "yuv422p10le",
+                    "-c:a", "pcm_s16le",
+                ],
+                mlt_consumer_properties={
+                    "f": "mov",
+                    "vcodec": "prores_videotoolbox",
+                    "vprofile": prores_level,
+                    "pix_fmt": "yuv422p10le",
+                    "acodec": "pcm_s16le",
+                    "threads": str(worker_threads),
+                    "real_time": f"-{min(worker_threads, 4)}",
+                },
+                host_platform=caps.platform_system,
+                host_arch=caps.machine,
+            )
+
         return HardwareProfile(
             profile_name=profile_name,
-            description=desc,
+            description=f"{base_desc} (prores_ks)",
             container="mov",
             video_codec="prores_ks",
             audio_codec="pcm_s16le",
             pixel_format="yuv422p10le",
             hardware_accelerated=False,
             accelerator="cpu_prores_ks",
-            fallback_used=False,
-            fallback_reason=None,
+            fallback_used=True,
+            fallback_reason="prores_videotoolbox unavailable on current host",
             ffmpeg_input_args=decode_args,
             ffmpeg_output_args=[
                 "-c:v", "prores_ks",

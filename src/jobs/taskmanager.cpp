@@ -17,6 +17,56 @@ SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
 #include <KMessageWidget>
 #include <QFuture>
 #include <QThread>
+#ifdef Q_OS_MAC
+#include <sys/sysctl.h>
+#elif defined(Q_OS_UNIX)
+#include <unistd.h>
+#endif
+
+namespace {
+
+struct RamConcurrencyCaps
+{
+    int maxTaskThreads;
+    int maxTranscodeThreads;
+};
+
+quint64 detectSystemRamBytes()
+{
+#if defined(Q_OS_MAC)
+    uint64_t hwMem = 0;
+    size_t len = sizeof(hwMem);
+    if (sysctlbyname("hw.memsize", &hwMem, &len, nullptr, 0) == 0 && hwMem > 0) {
+        return static_cast<quint64>(hwMem);
+    }
+#elif defined(Q_OS_UNIX)
+    const long pages = sysconf(_SC_PHYS_PAGES);
+    const long pageSize = sysconf(_SC_PAGESIZE);
+    if (pages > 0 && pageSize > 0) {
+        return static_cast<quint64>(pages) * static_cast<quint64>(pageSize);
+    }
+#endif
+    return 0;
+}
+
+RamConcurrencyCaps ramTierConcurrencyCaps()
+{
+    const quint64 ramBytes = detectSystemRamBytes();
+    const quint64 kGiB = 1024ULL * 1024ULL * 1024ULL;
+    const quint64 kHalfGiB = 512ULL * 1024ULL * 1024ULL;
+    if (ramBytes > 0 && ramBytes <= (8ULL * kGiB + kHalfGiB)) {
+        return {2, 1};
+    }
+    if (ramBytes > 0 && ramBytes <= (16ULL * kGiB + kHalfGiB)) {
+        return {3, 2};
+    }
+    if (ramBytes > 0) {
+        return {4, 3};
+    }
+    return {4, 2};
+}
+
+} // namespace
 
 TaskManager::TaskManager(QObject *parent)
     : QObject(parent)
@@ -24,9 +74,12 @@ TaskManager::TaskManager(QObject *parent)
     , m_tasksListLock(QReadWriteLock::Recursive)
     , m_blockUpdates(false)
 {
-    int maxThreads = qMin(4, QThread::idealThreadCount() - 1);
+    const RamConcurrencyCaps caps = ramTierConcurrencyCaps();
+    const int idealThreads = qMax(1, QThread::idealThreadCount() - 1);
+    const int maxThreads = qMin(caps.maxTaskThreads, idealThreads);
     m_taskPool.setMaxThreadCount(qMax(maxThreads, 1));
-    m_transcodePool.setMaxThreadCount(KdenliveSettings::proxythreads());
+    const int requestedProxyThreads = qMax(1, KdenliveSettings::proxythreads());
+    m_transcodePool.setMaxThreadCount(qMin(requestedProxyThreads, caps.maxTranscodeThreads));
 }
 
 TaskManager::~TaskManager()
@@ -41,7 +94,9 @@ bool TaskManager::isBlocked() const
 
 void TaskManager::updateConcurrency()
 {
-    m_transcodePool.setMaxThreadCount(KdenliveSettings::proxythreads());
+    const RamConcurrencyCaps caps = ramTierConcurrencyCaps();
+    const int requestedProxyThreads = qMax(1, KdenliveSettings::proxythreads());
+    m_transcodePool.setMaxThreadCount(qMin(requestedProxyThreads, caps.maxTranscodeThreads));
 }
 
 void TaskManager::discardJobs(const ObjectId &owner, AbstractTask::JOBTYPE type, bool softDelete, const QVector<AbstractTask::JOBTYPE> exceptions)

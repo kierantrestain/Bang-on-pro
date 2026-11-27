@@ -205,11 +205,15 @@ def test_apple_silicon_videotoolbox_profiles_and_prores() -> None:
         ("prores_422_hq", "3"),
     ):
         pr = generate_export_profile(name, capabilities=mac_caps)
-        assert pr.video_codec == "prores_ks"
+        assert pr.video_codec == "prores_videotoolbox"
+        assert pr.hardware_accelerated is True
+        assert pr.accelerator == "videotoolbox"
+        assert pr.fallback_used is False
         assert pr.container == "mov"
         assert pr.audio_codec == "pcm_s16le"
         assert pr.pixel_format == "yuv422p10le"
         assert expected_level in pr.ffmpeg_output_args
+        assert pr.mlt_consumer_properties["vcodec"] == "prores_videotoolbox"
         assert pr.mlt_consumer_properties["vprofile"] == expected_level
         ok, issues = validate_profile_against_capabilities(pr, mac_caps)
         assert ok, issues
@@ -1012,5 +1016,98 @@ def test_proxy_cancellation_cleanup_corrupt_cache_recovery_and_url_creds(tmp_pat
     assert proxy_file.exists()
     assert stray_proj.exists()
     assert mgr.verify_no_duplicate_media([src_clip]).verified_clean is True
+
+
+def test_prores_videotoolbox_selection_and_prores_ks_fallback() -> None:
+    """Verify hardware prores_videotoolbox is selected when available and falls back cleanly to prores_ks."""
+    mac_with_prores_vt = _simulated_apple_silicon_caps()
+    for name, level in (("prores_422_proxy", "0"), ("prores_422", "2"), ("prores_422_hq", "3")):
+        hw_prof = generate_export_profile(name, capabilities=mac_with_prores_vt)
+        assert hw_prof.video_codec == "prores_videotoolbox"
+        assert hw_prof.hardware_accelerated is True
+        assert hw_prof.accelerator == "videotoolbox"
+        assert hw_prof.fallback_used is False
+        assert "-allow_sw" in hw_prof.ffmpeg_output_args
+        assert hw_prof.mlt_consumer_properties["vcodec"] == "prores_videotoolbox"
+        assert hw_prof.mlt_consumer_properties["vprofile"] == level
+        ok, issues = validate_profile_against_capabilities(hw_prof, mac_with_prores_vt)
+        assert ok, issues
+
+    mac_without_prores_vt = _simulated_apple_silicon_caps()
+    mac_without_prores_vt.ffmpeg_encoders = [
+        enc for enc in mac_without_prores_vt.ffmpeg_encoders if enc != "prores_videotoolbox"
+    ]
+    for name, level in (("prores_422_proxy", "0"), ("prores_422", "2"), ("prores_422_hq", "3")):
+        sw_prof = generate_export_profile(name, capabilities=mac_without_prores_vt)
+        assert sw_prof.video_codec == "prores_ks"
+        assert sw_prof.hardware_accelerated is False
+        assert sw_prof.accelerator == "cpu_prores_ks"
+        assert sw_prof.fallback_used is True
+        assert sw_prof.fallback_reason is not None
+        assert sw_prof.mlt_consumer_properties["vcodec"] == "prores_ks"
+        assert sw_prof.mlt_consumer_properties["vprofile"] == level
+        ok, issues = validate_profile_against_capabilities(sw_prof, mac_without_prores_vt)
+        assert ok, issues
+
+
+def test_cache_budget_manager_locking_corrupt_backup_and_throttling(tmp_path: Path) -> None:
+    """Verify flock manifest locking (0o600), corrupt manifest backup, and throttled enforcement."""
+    cache_root = tmp_path / "locked_cache"
+    cache_root.mkdir(parents=True, exist_ok=True)
+
+    # 1. Corrupt cache_manifest.json must be backed up to cache_manifest.json.corrupt.<ts> before reset
+    corrupt_payload = "{corrupt-json-truncated"
+    manifest_path = cache_root / "cache_manifest.json"
+    manifest_path.write_text(corrupt_payload, encoding="utf-8")
+
+    mgr = CacheBudgetManager(
+        cache_root,
+        config=StorageBudgetConfig(max_cache_gb=1.0, max_models_gb=1.0),
+    )
+    corrupt_backups = sorted(cache_root.glob("cache_manifest.json.corrupt.*"))
+    assert len(corrupt_backups) == 1
+    assert corrupt_backups[0].read_text(encoding="utf-8") == corrupt_payload
+    assert mgr.manifest_lock_path.is_file()
+    if os.name == "posix":
+        assert (mgr.manifest_lock_path.stat().st_mode & 0o777) == 0o600
+
+    # 2. Concurrent registrations serialize cleanly via lock without corrupting manifest JSON
+    created_files: list[Path] = []
+    for idx in range(12):
+        fpath = mgr.proxies_dir / f"proxy_{idx:02d}.mp4"
+        fpath.write_bytes(b"P" * 1024)
+        created_files.append(fpath)
+
+    errors: list[Exception] = []
+
+    def worker(files_slice: list[Path]) -> None:
+        try:
+            for item in files_slice:
+                mgr.register_cache_entry(item, category="proxies")
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=worker, args=(created_files[i::3],))
+        for i in range(3)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10.0)
+    assert errors == []
+
+    persisted = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert len(persisted["entries"]) == len(created_files)
+
+    # 3. maybe_enforce_cache_budget runs first time, then throttles while under high-water mark
+    first_report = mgr.maybe_enforce_cache_budget(min_interval_sec=60.0, high_water_ratio=0.85)
+    assert first_report is not None
+    throttled_report = mgr.maybe_enforce_cache_budget(min_interval_sec=60.0, high_water_ratio=0.85)
+    assert throttled_report is None
+    # Direct enforce_cache_budget always executes unconditionally
+    forced_report = mgr.enforce_cache_budget()
+    assert forced_report is not None
+
 
 

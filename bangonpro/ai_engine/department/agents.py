@@ -81,6 +81,36 @@ class JobOptions:
     provider_config: dict[str, Any] | None = None
     asr_model_id: str | None = None
     edit_type: str | None = None  # V1.6: first_cut | full_edit | social_clips | custom (the Production panel's choice)
+    aspect_ratio: str | None = None  # V1.7: match | 16:9 | 9:16 | 1:1
+    target_duration_sec: float | None = None  # V1.7: optional target cut duration in seconds
+    media_source: str | None = None  # V1.7: sequence | selected_bin | project_bin | files
+
+
+def _apply_output_aspect_ratio(profile: dict[str, Any], aspect_ratio: str | None) -> tuple[int, int] | None:
+    """Apply an explicit output aspect ratio to ``profile['video_spec']`` and return ``(width, height)``."""
+    ar = (aspect_ratio or "").strip().lower()
+    if not ar or ar in ("match", "match_sequence", "auto"):
+        return None
+    spec = profile.setdefault("video_spec", {})
+    cur_w = int(spec.get("width") or 1920)
+    cur_h = int(spec.get("height") or 1080)
+    dims_map: dict[str, tuple[int, int]] = {
+        "16:9": (1920, 1080),
+        "landscape": (1920, 1080),
+        "9:16": (1080, 1920),
+        "vertical": (1080, 1920),
+        "1:1": (1080, 1080),
+        "square": (1080, 1080),
+        "4:5": (1080, 1350),
+    }
+    dims = dims_map.get(ar)
+    if dims is None:
+        return None
+    # Preserve higher-resolution 16:9 (e.g. 4K) if already matching 16:9.
+    if dims == (1920, 1080) and cur_h > 0 and abs((cur_w / cur_h) - (16.0 / 9.0)) < 0.02 and cur_w >= 1920:
+        dims = (cur_w, cur_h)
+    spec["width"], spec["height"] = dims
+    return dims
 
 
 @dataclass
@@ -288,6 +318,21 @@ def run_executive_plan(ctx: AgentContext) -> AgentOutcome:
         intent_confidence=float(st.intent.intent_confidence if st.intent.intent_confidence is not None else 1.0),
         review_brief=bool(ctx.plan.get("review_brief")),
     )
+    directives = eplan.setdefault("interpretation", {}).setdefault("directives", {})
+    if ctx.options.target_duration_sec is not None and float(ctx.options.target_duration_sec) > 0:
+        target_sec = float(ctx.options.target_duration_sec)
+        directives["target_duration_sec"] = target_sec
+        directives["target_duration_min"] = round(target_sec / 60.0, 3)
+        st.metadata["target_duration_sec"] = target_sec
+    if ctx.options.aspect_ratio:
+        directives["aspect_ratio"] = ctx.options.aspect_ratio
+        st.metadata["aspect_ratio"] = ctx.options.aspect_ratio
+        dims = _apply_output_aspect_ratio(st.profile, ctx.options.aspect_ratio)
+        if dims is not None:
+            directives["output_dimensions"] = list(dims)
+    if ctx.options.media_source:
+        directives["media_source"] = ctx.options.media_source
+        st.metadata["media_source"] = ctx.options.media_source
     st.metadata["executive_plan"] = eplan
     path = write_json_atomic(Path(st.output_dir) / "executive_plan.json", eplan)
     st.artifacts["executive_plan_json"] = str(path)
@@ -780,6 +825,10 @@ def run_rough_cut(ctx: AgentContext) -> AgentOutcome:
         if cached:
             st.metadata["scene_cuts_precomputed"] = {"camera_id": ref, "sha256": ref_asset.sha256, "cuts": cached["cuts"], "backend": cached["backend"]}
             hits.append("scene_cuts")
+    if ctx.options.aspect_ratio:
+        _apply_output_aspect_ratio(st.profile, ctx.options.aspect_ratio)
+    if ctx.options.target_duration_sec is not None and float(ctx.options.target_duration_sec) > 0:
+        st.metadata["target_duration_sec"] = float(ctx.options.target_duration_sec)
     batches = _norm_batches(run_rough_cut_multicam_agent(st, ctx.token, ctx.progress))
     if ref_asset is not None and ref_asset.has_video and not hits and st.metadata.get("scene_cut_camera") == ref:
         ctx.cache.put("scene_cuts", "1", scene_key, {"cuts": list(st.scene_cuts_sec), "backend": st.metadata.get("scene_detect_backend")})
@@ -795,7 +844,25 @@ def run_rough_cut(ctx: AgentContext) -> AgentOutcome:
     n_dis = len(decisions.get("disfluencies", []) or [])
     if n_dis:
         items.append(f"{n_dis} false start(s)/stutter(s)/repeat(s) removed on word boundaries: check the 'Removed ...' markers")
+    target_sec = float(ctx.options.target_duration_sec) if (ctx.options.target_duration_sec is not None and float(ctx.options.target_duration_sec) > 0) else None
+    if target_sec is not None and edited > target_sec * 1.1:
+        items.append(f"Edited cut is {edited:.1f}s vs requested target {target_sec:.1f}s: tighten or select sections to trim further")
     stats = decisions.get("stats", {})
+    metrics: dict[str, Any] = {
+        "shots": len(shots),
+        "edited_duration_sec": round(edited, 3),
+        "source_duration_sec": round(sources, 3),
+        "pause_policy": (decisions.get("rules") or {}).get("pause_policy"),
+        "protected_pauses": pm.get("protected_pauses"),
+        "protected_retention": pm.get("protected_retention"),
+        "dead_air_removed_ratio": pm.get("dead_air_removed_ratio"),
+        "cuts_inside_words": len(pm.get("cuts_inside_words", []) or []),
+        "words_lost": len(pm.get("words_lost", []) or []),
+        "disfluencies_removed": n_dis,
+    }
+    if target_sec is not None:
+        metrics["target_duration_sec"] = round(target_sec, 3)
+        metrics["target_duration_delta_sec"] = round(edited - target_sec, 3)
     return AgentOutcome(
         batches=batches,
         confidence=round(float(np.mean([s.confidence for s in shots])), 4) if shots else 0.5,
@@ -804,18 +871,7 @@ def run_rough_cut(ctx: AgentContext) -> AgentOutcome:
         rationale="Setup delay trimmed; pauses compressed to a natural show-specific length (pauses after questions, before punchlines and around reactions protected); no cut inside speech; speaker-aware switching per camera plan",
         review_items=items,
         cache_hits=hits,
-        metrics={
-            "shots": len(shots),
-            "edited_duration_sec": round(edited, 3),
-            "source_duration_sec": round(sources, 3),
-            "pause_policy": (decisions.get("rules") or {}).get("pause_policy"),
-            "protected_pauses": pm.get("protected_pauses"),
-            "protected_retention": pm.get("protected_retention"),
-            "dead_air_removed_ratio": pm.get("dead_air_removed_ratio"),
-            "cuts_inside_words": len(pm.get("cuts_inside_words", []) or []),
-            "words_lost": len(pm.get("words_lost", []) or []),
-            "disfluencies_removed": n_dis,
-        },
+        metrics=metrics,
         est_external_cost_usd=0.0,
     )
 
@@ -1529,12 +1585,20 @@ def run_distribution(ctx: AgentContext) -> AgentOutcome:
                 reel = out / f"{st.sequence_id}_highlights.mp4"
                 ok = _ffmpeg(["-i", master, "-vf", f"select='{sel}',setpts=N/FRAME_RATE/TB", "-af", f"aselect='{sel}',asetpts=N/SR/TB", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-c:a", "aac", str(reel)])
                 deliverables.append({"kind": "highlight_reel", "path": str(reel), "windows_timeline_sec": windows, "status": "rendered" if ok else "failed"})
-    manifest = {
+    if ctx.options.aspect_ratio:
+        _apply_output_aspect_ratio(st.profile, ctx.options.aspect_ratio)
+    spec = st.profile.get("video_spec") or {}
+    manifest: dict[str, Any] = {
         "sequence_id": st.sequence_id,
         "deliverables": deliverables,
         "publish_status": "not_published (requires explicit editor approval)",
         "export_presets": st.profile.get("export_presets", []),
+        "output_dimensions": [int(spec.get("width", 1920)), int(spec.get("height", 1080))],
     }
+    if ctx.options.aspect_ratio:
+        manifest["aspect_ratio"] = ctx.options.aspect_ratio
+    if ctx.options.target_duration_sec is not None and float(ctx.options.target_duration_sec) > 0:
+        manifest["target_duration_sec"] = float(ctx.options.target_duration_sec)
     mpath = write_json_atomic(Path(st.output_dir) / "delivery_manifest.json", manifest)
     st.artifacts["delivery_manifest_json"] = str(mpath)
     failed = [d for d in deliverables if d.get("status") == "failed"]

@@ -10,11 +10,13 @@
 #include <QHash>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QPixmap>
 #include <QSet>
 #include <QString>
 #include <QStringList>
 #include <QVector>
 #include <QWidget>
+#include <functional>
 
 class QCheckBox;
 class QComboBox;
@@ -25,6 +27,7 @@ class QPlainTextEdit;
 class QPushButton;
 class QTabWidget;
 class QTextBrowser;
+class QTimer;
 class QTreeWidgetItem;
 
 namespace BangOnPro {
@@ -65,7 +68,7 @@ class PremierePresetBrowser : public QWidget
 public:
     static constexpr const char *kPresetMimeType = "application/x-bangonpro-preset";
 
-    explicit PremierePresetBrowser(QWidget *parent = nullptr);
+    explicit PremierePresetBrowser(QWidget *parent = nullptr, bool executableOnlyDefault = false);
     ~PremierePresetBrowser() override = default;
 
     bool loadReportFile(const QString &jsonPath, QString *errorOut = nullptr);
@@ -75,6 +78,17 @@ public:
     int visiblePresetCount() const;
     QVector<PresetDisplayEntry> presets() const;
     bool findPresetById(const QString &presetId, PresetDisplayEntry *outEntry) const;
+    /** @brief Return cached raw preset JSON object by ID (avoids re-reading compatibility_report.json from disk). */
+    QJsonObject presetJsonById(const QString &presetId) const;
+
+    void setExecutableOnlyFilter(bool enabled);
+    bool isExecutableOnlyFilter() const;
+
+    void setShowTechnicalInspector(bool show);
+    bool showTechnicalInspector() const;
+
+    /** @brief Optional callback to resolve/register a preset as a native kdenlive/effect ID during drag start. */
+    void setDragEffectIdResolver(std::function<QString(const QString &presetId)> resolver);
 
     void setFavorite(const QString &presetId, bool favorite);
     bool isFavorite(const QString &presetId) const;
@@ -91,6 +105,7 @@ public:
     bool loadUserState(const QString &jsonPath);
 
     QByteArray buildMimePayloadForPreset(const QString &presetId) const;
+    QString resolveDragEffectId(const QString &presetId) const;
 
 public Q_SLOTS:
     void clearFilters();
@@ -101,6 +116,7 @@ Q_SIGNALS:
     void importArchiveRequested(const QString &zipPath);
     void presetSelected(const QString &presetId);
     void customStackApplied(const QString &stackName, const QJsonArray &combinedMltFilters);
+    void prepareDragEffectId(const QString &presetId);
 
 private Q_SLOTS:
     void onSearchOrFilterChanged();
@@ -112,12 +128,14 @@ private Q_SLOTS:
     void onApplyCustomStackClicked();
     void onRemoveCustomStackClicked();
     void onApplyEditedParamsClicked();
+    void onShowTechnicalInspectorToggled(bool show);
 
 private:
     void buildUi();
     void populatePackFilter();
     void updateSummaryBanner();
     void updateInspectorForPreset(const PresetDisplayEntry *entry);
+    void updateTechnicalInspectorVisibility();
     void refreshCustomStacksList();
     bool matchesActiveFilters(const PresetDisplayEntry &entry) const;
     QString selectedPresetId() const;
@@ -126,8 +144,12 @@ private:
 
     QVector<PresetDisplayEntry> m_entries;
     QHash<QString, int> m_indexById;
+    QHash<QString, QJsonObject> m_rawJsonById;
+    mutable QHash<QString, QPixmap> m_previewPixmapCache;
     QSet<QString> m_favorites;
     QVector<CustomEffectStack> m_customStacks;
+    std::function<QString(const QString &)> m_dragEffectIdResolver;
+    bool m_executableOnlyDefault = false;
 
     QString m_archiveName;
     QString m_archiveSha256;
@@ -136,9 +158,11 @@ private:
     // UI Controls
     QLabel *m_summaryLabel = nullptr;
     QLineEdit *m_searchEdit = nullptr;
+    QTimer *m_searchDebounceTimer = nullptr;
     QComboBox *m_packFilterCombo = nullptr;
     QComboBox *m_statusFilterCombo = nullptr;
     QCheckBox *m_favoritesOnlyCheck = nullptr;
+    QCheckBox *m_showTechnicalInspectorCheck = nullptr;
     QPushButton *m_importBtn = nullptr;
     QPushButton *m_applyBtn = nullptr;
     QPushButton *m_favoriteBtn = nullptr;
@@ -146,6 +170,7 @@ private:
 
     PresetTreeWidget *m_presetTree = nullptr;
     QTabWidget *m_inspectorTabs = nullptr;
+    QWidget *m_paramsTabWidget = nullptr;
     QLabel *m_previewImageLabel = nullptr;
     QTextBrowser *m_overviewBrowser = nullptr;
     QPlainTextEdit *m_paramEditorEdit = nullptr;

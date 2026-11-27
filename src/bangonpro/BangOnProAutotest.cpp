@@ -5,8 +5,11 @@
 
 #include "BangOnProAutotest.h"
 #include "BangOnProIntegration.h"
+#include "effects_browser/IntrinsicTransformWidget.h"
+#include "effects_browser/UnifiedEffectsPanel.h"
 #include "ui/AgentControlCentre.h"
 
+#include "assets/assetpanel.hpp"
 #include "bin/bin.h"
 #include "bin/model/markerlistmodel.hpp"
 #include "bin/projectclip.h"
@@ -14,8 +17,12 @@
 #include "core.h"
 #include "doc/docundostack.hpp"
 #include "doc/kdenlivedoc.h"
+#include "effects/effectstack/model/effectstackmodel.hpp"
+#include "mainwindow.h"
 #include "project/projectmanager.h"
 #include "timeline2/model/timelineitemmodel.hpp"
+#include "timeline2/view/timelinecontroller.h"
+#include "timeline2/view/timelinewidget.h"
 
 #include <QAbstractButton>
 #include <QApplication>
@@ -35,6 +42,9 @@
 #include <QProcess>
 #include <QTimer>
 #include <QUrl>
+#ifdef Q_OS_LINUX
+#include <unistd.h>
+#endif
 
 namespace BangOnPro {
 
@@ -234,8 +244,76 @@ bool BangOnProAutotest::runStep(const QJsonObject &step, QString *error)
         pCore->projectManager()->openFile(QUrl::fromLocalFile(step.value(QStringLiteral("path")).toString()));
         return true;
     }
+    if (op == QLatin1String("new_project")) {
+        if (pCore && pCore->currentDoc()) {
+            pCore->currentDoc()->setModified(false);
+        }
+        pCore->projectManager()->newFile(false);
+        return true;
+    }
     if (op == QLatin1String("save_project_as")) {
         return pCore->projectManager()->saveFileAs(step.value(QStringLiteral("path")).toString(), true);
+    }
+    if (op == QLatin1String("select_first_clip")) {
+        auto *mw = qobject_cast<MainWindow *>(m_window);
+        if (!mw || !mw->getCurrentTimeline() || !mw->getCurrentTimeline()->model() || !mw->getCurrentTimeline()->controller()) {
+            *error = QStringLiteral("no active timeline");
+            return false;
+        }
+        auto tl = mw->getCurrentTimeline()->model();
+        auto *tc = mw->getCurrentTimeline()->controller();
+        for (int tid : tl->getTracksIds(false)) {
+            const auto items = tl->getItemsInRange(tid, 0, -1, false);
+            if (!items.empty()) {
+                const int cid = *items.begin();
+                tl->requestSetSelection({cid});
+                tc->showAsset(cid);
+                return true;
+            }
+        }
+        *error = QStringLiteral("no video clip found on timeline");
+        return false;
+    }
+    if (op == QLatin1String("apply_effect")) {
+        auto *mw = qobject_cast<MainWindow *>(m_window);
+        if (!mw || !mw->unifiedEffectsPanel()) {
+            *error = QStringLiteral("unified effects panel unavailable");
+            return false;
+        }
+        const QString effId = step.value(QStringLiteral("effect_id")).toString();
+        if (!mw->unifiedEffectsPanel()->applyEntry(effId)) {
+            mw->addEffect(effId);
+            mw->showEffectControls();
+        }
+        return true;
+    }
+    if (op == QLatin1String("adjust_transform")) {
+        auto *mw = qobject_cast<MainWindow *>(m_window);
+        auto *assetPanel = mw ? mw->findChild<AssetPanel *>() : nullptr;
+        auto *tw = assetPanel ? assetPanel->intrinsicTransformWidget() : nullptr;
+        if (!tw) {
+            *error = QStringLiteral("intrinsic transform widget unavailable");
+            return false;
+        }
+        if (step.contains(QStringLiteral("pos_x")) || step.contains(QStringLiteral("pos_y"))) {
+            tw->setPosition(step.value(QStringLiteral("pos_x")).toDouble(tw->positionX()), step.value(QStringLiteral("pos_y")).toDouble(tw->positionY()));
+        }
+        if (step.contains(QStringLiteral("scale"))) {
+            const double sc = step.value(QStringLiteral("scale")).toDouble(100.0);
+            tw->setScalePercent(sc, sc);
+        }
+        if (step.contains(QStringLiteral("rotation"))) {
+            tw->setRotationDegrees(step.value(QStringLiteral("rotation")).toDouble(0.0));
+        }
+        if (step.contains(QStringLiteral("opacity"))) {
+            tw->setOpacityPercent(step.value(QStringLiteral("opacity")).toDouble(100.0));
+        }
+        if (step.value(QStringLiteral("keyframe")).toBool(false)) {
+            if (auto *kfBtn = tw->findChild<QAbstractButton *>(QStringLiteral("intrinsic_kf_toggle"))) {
+                kfBtn->click();
+            }
+        }
+        return true;
     }
     if (op == QLatin1String("wait_ms")) {
         m_waiting = QJsonObject{{QStringLiteral("until_ms"), QDateTime::currentMSecsSinceEpoch() + step.value(QStringLiteral("ms")).toInt(1000)}};
@@ -293,6 +371,14 @@ bool BangOnProAutotest::runStep(const QJsonObject &step, QString *error)
             return true;
         }
         *error = QStringLiteral("nothing to undo");
+        return false;
+    }
+    if (op == QLatin1String("redo")) {
+        if (pCore->undoStack() && pCore->undoStack()->canRedo()) {
+            pCore->undoStack()->redo();
+            return true;
+        }
+        *error = QStringLiteral("nothing to redo");
         return false;
     }
     if (op == QLatin1String("kill_department")) {
@@ -355,8 +441,44 @@ QJsonObject BangOnProAutotest::snapshot() const
         s.insert(QStringLiteral("completion_visible"), acc->completionVisible());
         s.insert(QStringLiteral("review_items"), acc->reviewItemCount());
         s.insert(QStringLiteral("project_context"), acc->projectContextText());
+        s.insert(QStringLiteral("acc_project_uuid"), acc->activeProjectUuid());
+        if (auto *brief = acc->findChild<QPlainTextEdit *>(QStringLiteral("acc_brief"))) {
+            s.insert(QStringLiteral("brief_text"), brief->toPlainText());
+        }
     }
+    s.insert(QStringLiteral("project_uuid"), m_integration->activeProjectUuid());
     s.insert(QStringLiteral("department_running"), m_integration->departmentProcess() != nullptr);
+    if (auto *mw = qobject_cast<MainWindow *>(m_window)) {
+        QDockWidget *ecDock = mw->effectStackDock();
+        s.insert(QStringLiteral("effect_controls_visible"), ecDock && ecDock->isVisible());
+        s.insert(QStringLiteral("effect_controls_title"), ecDock ? ecDock->windowTitle() : QString());
+        if (auto *ap = mw->findChild<AssetPanel *>()) {
+            const ObjectId owner = ap->effectStackOwner();
+            if (owner.type == KdenliveObjectType::TimelineClip && owner.itemId >= 0 && pCore) {
+                if (auto st = pCore->getItemEffectStack(owner.uuid, int(owner.type), owner.itemId)) {
+                    s.insert(QStringLiteral("active_clip_effects"), st->rowCount());
+                }
+            }
+            if (auto *tw = ap->intrinsicTransformWidget()) {
+                s.insert(QStringLiteral("intrinsic_transform_visible"), tw->isVisible());
+                s.insert(QStringLiteral("intrinsic_transform_materialized"), tw->hasMaterializedTransform());
+                s.insert(QStringLiteral("intrinsic_scale_x"), tw->scaleXPercent());
+                s.insert(QStringLiteral("intrinsic_rotation"), tw->rotationDegrees());
+            }
+        }
+    }
+#ifdef Q_OS_LINUX
+    {
+        QFile statm(QStringLiteral("/proc/self/statm"));
+        if (statm.open(QIODevice::ReadOnly)) {
+            const QList<QByteArray> parts = statm.readAll().trimmed().split(' ');
+            if (parts.size() >= 2) {
+                const double rssBytes = double(parts.at(1).toLongLong()) * double(sysconf(_SC_PAGESIZE));
+                s.insert(QStringLiteral("rss_mb"), std::round(rssBytes / (1024.0 * 1024.0) * 10.0) / 10.0);
+            }
+        }
+    }
+#endif
     if (pCore && pCore->currentDoc() && pCore->projectItemModel()) {
         const QUuid current = pCore->currentTimelineId();
         QJsonArray seqs;

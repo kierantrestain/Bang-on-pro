@@ -56,6 +56,7 @@ public:
     bool nativeRedo(QString *errorOut = nullptr) override;
 
     void setTimelineOverride(std::shared_ptr<TimelineItemModel> timeline);
+    void clearAliases() override;
 
 private:
     std::shared_ptr<TimelineItemModel> resolveTimeline(const QString &sequenceId) const;

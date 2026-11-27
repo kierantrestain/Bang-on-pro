@@ -336,13 +336,19 @@ def studio(pristine: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyP
         """Another episode of the series: the same synthetic footage, a separate job, draft and history."""
         from bangonpro.ai_engine.mcp.__main__ import make_server
 
+        from bangonpro.ai_engine.department.checkpoint import write_checkpoint_atomic
+
         d = tmp_path / "jobs" / job_id
         shutil.copytree(pristine["dir"], d)
         for f in d.rglob("*"):
             if f.is_file() and f.suffix in (".json", ".kdenlive", ".jsonl", ".ass", ".md", ".otio"):
                 txt = f.read_text(encoding="utf-8", errors="ignore")
                 if str(pristine["dir"]) in txt:
-                    f.write_text(txt.replace(str(pristine["dir"]), str(d)), encoding="utf-8")
+                    updated = txt.replace(str(pristine["dir"]), str(d))
+                    if f.parent.name == "checkpoints" and f.suffix == ".json":
+                        write_checkpoint_atomic(f, json.loads(updated))
+                    else:
+                        f.write_text(updated, encoding="utf-8")
         doc = json.loads((d / "job.json").read_text())
         doc["job_id"], doc["series_id"] = job_id, series
         (d / "job.json").write_text(json.dumps(doc, indent=1))

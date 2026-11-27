@@ -237,6 +237,32 @@ CollapsibleEffectView::CollapsibleEffectView(const QString &effectName, const st
     saveEffectButton->setIcon(QIcon::fromTheme(QStringLiteral("document-save")));
     saveEffectButton->setToolTip(i18n("Save effect"));
 
+    // Bang On Pro V1.7: direct one-click Reset & Duplicate header buttons
+    m_resetButton = new QToolButton(frame);
+    m_resetButton->setObjectName(QStringLiteral("effectResetButton"));
+    m_resetButton->setAutoRaise(true);
+    m_resetButton->setIcon(QIcon::fromTheme(QStringLiteral("view-refresh")));
+    m_resetButton->setToolTip(i18n("Reset effect parameters"));
+    m_resetButton->setVisible(effectModel->rowCount() > 0);
+    connect(m_resetButton, &QAbstractButton::clicked, this, &CollapsibleEffectView::slotResetEffect);
+
+    m_duplicateButton = new QToolButton(frame);
+    m_duplicateButton->setObjectName(QStringLiteral("effectDuplicateButton"));
+    m_duplicateButton->setAutoRaise(true);
+    m_duplicateButton->setIcon(QIcon::fromTheme(QStringLiteral("edit-copy")));
+    m_duplicateButton->setToolTip(i18n("Duplicate effect"));
+    m_duplicateButton->setVisible(effectId != QLatin1String("speed") && !EffectsRepository::get()->isUnique(effectId));
+    connect(m_duplicateButton, &QAbstractButton::clicked, this, &CollapsibleEffectView::slotDuplicateEffect);
+
+    const int insertIdx = l->indexOf(buttonUp);
+    if (insertIdx >= 0) {
+        l->insertWidget(insertIdx, m_resetButton);
+        l->insertWidget(insertIdx + 1, m_duplicateButton);
+    } else {
+        l->addWidget(m_resetButton);
+        l->addWidget(m_duplicateButton);
+    }
+
     if (!effectModel->isEnabled()) {
         title->setEnabled(false);
         if (KdenliveSettings::disable_effect_parameters()) {
@@ -508,6 +534,11 @@ void CollapsibleEffectView::updateScene()
 void CollapsibleEffectView::slotDeleteEffect()
 {
     Q_EMIT deleteEffect(m_model);
+}
+
+void CollapsibleEffectView::slotDuplicateEffect()
+{
+    Q_EMIT duplicateEffect(m_model);
 }
 
 void CollapsibleEffectView::slotEffectUp()

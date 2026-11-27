@@ -701,6 +701,24 @@ void AiAssistantDock::clearProposal()
     updateActionButtonStates();
 }
 
+void AiAssistantDock::resetForProject()
+{
+    clearProposal();
+    m_hasAppliedProposal = false;
+    m_canUndo = false;
+    clearClarificationPrompt();
+    clearStaleProposalWarning();
+    setIsolatedPreviewSummary(QJsonObject{});
+    setTimelineRevision(0);
+    setBusy(false);
+    clearActivityLog();
+    if (m_instructionInput != nullptr) {
+        m_instructionInput->clear();
+    }
+    setStatusBadge(tr("Ready"), QStringLiteral("idle"));
+    updateActionButtonStates();
+}
+
 bool AiAssistantDock::hasPendingProposal() const
 {
     return m_hasPendingProposal;

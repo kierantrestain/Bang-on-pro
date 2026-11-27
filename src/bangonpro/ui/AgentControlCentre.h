@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <QDateTime>
 #include <QElapsedTimer>
 #include <QJsonArray>
 #include <QJsonObject>
@@ -16,12 +17,14 @@ class QButtonGroup;
 class QCheckBox;
 class QComboBox;
 class QDoubleSpinBox;
+class QHideEvent;
 class QLabel;
 class QLineEdit;
 class QListWidget;
 class QPlainTextEdit;
 class QProgressBar;
 class QPushButton;
+class QShowEvent;
 class QSpinBox;
 class QTimer;
 class QToolButton;
@@ -68,6 +71,12 @@ public:
     QString selectedProfileId() const;
     QString editType() const;
     void setEditType(const QString &type);
+    QString selectedMediaSource() const;
+    void setSelectedMediaSource(const QString &source);
+    QString selectedOutputFormat() const;
+    void setSelectedOutputFormat(const QString &format);
+    int targetDurationMinutes() const;
+    void setTargetDurationMinutes(int minutes);
     void setBrief(const QString &brief);
     QString brief() const;
     /** @brief Agents the editor explicitly disabled for this job. */
@@ -82,6 +91,11 @@ public:
 
     /** @brief Current project and its sequences (names in tab order); @p current is the open one. */
     void setProjectContext(const QString &projectName, const QStringList &sequenceNames, int current);
+    /** @brief Reset all active job state, history, and context when switching projects. */
+    void resetForProject(const QString &projectUuid, const QString &projectName, const QStringList &sequences, int activeSequenceIndex);
+    /** @brief Detach cleanly from the active job and return to setup without deleting history. */
+    void clearActiveJob();
+    QString activeProjectUuid() const;
     QString projectContextText() const;
 
     /** @brief Render a job.json document (stages, agents, progress, reasoning, decisions, artifacts). */
@@ -92,7 +106,7 @@ public:
     /** @brief Start polling <jobDir>/job.json (and summary.md when the job finishes). */
     void setActiveJobDir(const QString &jobDir);
     QString activeJobDir() const;
-    bool refreshFromDisk();
+    bool refreshFromDisk(bool force = false);
     /** @brief Reopen a job after a restart; liveness is probed, never assumed. */
     void recoverJob(const QString &jobDir, bool processAlive);
     void setBusy(bool busy, const QString &text = QString());
@@ -110,6 +124,9 @@ public:
     QString statusText() const;
     QString reasoningText() const;
     QString problemText() const;
+    QString elapsedText() const;
+    QString resourceText() const;
+    QString engineBadgeText() const;
     bool progressIsMeasured() const;
     bool completionVisible() const;
     bool advancedExpanded() const;
@@ -146,7 +163,11 @@ Q_SIGNALS:
     void timingFinishRequested(int qualityRating);
     void measurementActivity(const QString &category);
     void cancelJobRequested(const QString &jobDir);
+    void pauseJobRequested(const QString &jobDir);
     void resumeJobRequested(const QString &jobDir);
+    void retryJobRequested(const QString &jobDir);
+    void discardJobRequested(const QString &jobDir);
+    void newProductionRequested();
     void rerunAgentRequested(const QString &jobDir, const QString &agentId);
     void reviseDraftRequested(const QString &jobDir, const QString &instruction, bool selectionOnly);
     void undoRevisionRequested(const QString &jobDir);
@@ -163,6 +184,10 @@ Q_SIGNALS:
     /** @brief job.json says running but no worker holds the job: the integration persists the truth (department status). */
     void workerLost(const QString &jobDir);
 
+protected:
+    void hideEvent(QHideEvent *event) override;
+    void showEvent(QShowEvent *event) override;
+
 private:
     void buildUi();
     QWidget *buildSetup();
@@ -171,10 +196,12 @@ private:
     QWidget *buildAdvanced();
     void buildTimingRow(QVBoxLayout *root, QWidget *parent);
     void updateTimingLabel();
+    void updateElapsedLabel();
     void updateActionStates();
     void applyEditType(const QString &type);
     void renderStages(const QJsonArray &stages);
     void renderProblem(const QJsonObject &doc);
+    QString computeDiskSignature() const;
     QTreeWidgetItem *agentItem(const QString &agentId) const;
     bool isRunningStatus() const;
 
@@ -187,18 +214,28 @@ private:
     QButtonGroup *m_editTypeGroup{nullptr};
     QComboBox *m_profileCombo{nullptr};
     QPushButton *m_referencesBtn{nullptr};
+    QComboBox *m_mediaSourceCombo{nullptr};
+    QComboBox *m_outputFormatCombo{nullptr};
+    QSpinBox *m_targetDurationSpin{nullptr};
     QPlainTextEdit *m_briefEdit{nullptr};
     QPushButton *m_startBtn{nullptr};
     QLabel *m_setupHint{nullptr};
     // run
     QWidget *m_runSection{nullptr};
+    QLabel *m_engineBadge{nullptr};
+    QLabel *m_elapsedLabel{nullptr};
+    QLabel *m_resourceLabel{nullptr};
     QListWidget *m_stageList{nullptr};
     QLabel *m_statusLabel{nullptr};
     QProgressBar *m_progress{nullptr};
     QLabel *m_reasoningLabel{nullptr};
     QLabel *m_problemLabel{nullptr};
+    QPushButton *m_pauseBtn{nullptr};
     QPushButton *m_cancelBtn{nullptr};
     QPushButton *m_resumeBtn{nullptr};
+    QPushButton *m_retryBtn{nullptr};
+    QPushButton *m_discardBtn{nullptr};
+    QPushButton *m_newFromRunBtn{nullptr};
     // done
     QWidget *m_doneSection{nullptr};
     QLabel *m_doneTitle{nullptr};
@@ -235,7 +272,12 @@ private:
     QListWidget *m_historyList{nullptr};
 
     QTimer *m_pollTimer{nullptr};
+    QTimer *m_elapsedClock{nullptr};
+    QElapsedTimer m_jobElapsedWall;
+    QDateTime m_jobStartedUtc;
+    QString m_activeProjectUuid;
     QString m_jobDir;
+    QString m_lastDiskSignature;
     QString m_agentSessionText;
     QString m_agentDetailText;
     QString m_jobStatus;

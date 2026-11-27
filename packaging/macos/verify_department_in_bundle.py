@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
+import resource
 import shutil
 import subprocess
 import sys
@@ -38,6 +40,7 @@ if str(REPO_ROOT) not in sys.path:
 from bangonpro.ai_engine.agents.ingest_sync import extract_mono_pcm  # noqa: E402
 from bangonpro.ai_engine.department import JobOptions, ProductionJob  # noqa: E402
 from bangonpro.ai_engine.model_manager import ModelManager  # noqa: E402
+from bangonpro.macos.hardware_profiles import probe_hardware_capabilities
 
 SR = 16000
 HOST_LINES = [
@@ -223,6 +226,63 @@ def verify_v122_operations(job: ProductionJob, cams: dict[str, Path], work: Path
     return evidence
 
 
+def _peak_rss_mb() -> float:
+    usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    if sys.platform == "darwin":
+        return round(usage / (1024.0 * 1024.0), 2)
+    return round(usage / 1024.0, 2)
+
+
+def verify_bundle_self_containment(work: Path, failures: list[str]) -> dict:
+    """Verify python3 runs cleanly with stripped PYTHONPATH & PYTHONNOUSERSITE=1 and probe VideoToolbox."""
+    clean_env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in ("PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE", "DYLD_LIBRARY_PATH")
+    }
+    clean_env["PYTHONNOUSERSITE"] = "1"
+    probe_script = (
+        "import json, sys; "
+        "print(json.dumps({"
+        "'executable': sys.executable, "
+        "'prefix': sys.prefix, "
+        "'base_prefix': sys.base_prefix, "
+        "'version': sys.version.split()[0]"
+        "}))"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-s", "-c", probe_script],
+        env=clean_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    isolated_ok = proc.returncode == 0
+    py_info: dict = {}
+    if isolated_ok:
+        try:
+            py_info = json.loads(proc.stdout.strip())
+        except json.JSONDecodeError:
+            isolated_ok = False
+    if not isolated_ok:
+        failures.append(
+            f"bundled python self-containment check failed (rc={proc.returncode}): {proc.stderr.strip()[:300]}"
+        )
+
+    caps = probe_hardware_capabilities(disk_path=work)
+    return {
+        "isolated_python_ok": isolated_ok,
+        "python": py_info,
+        "videotoolbox_available": bool(caps.videotoolbox_available),
+        "ffmpeg_hwaccels": list(caps.ffmpeg_hwaccels),
+        "ffmpeg_encoders": list(caps.ffmpeg_encoders),
+        "host_tier": caps.host_tier,
+        "is_apple_silicon": bool(caps.is_apple_silicon),
+        "is_virtualized": bool(caps.is_virtualized),
+        "peak_rss_mb": _peak_rss_mb(),
+    }
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--output-dir", required=True, help="Small evidence files (JSON, summary) only")
@@ -286,11 +346,15 @@ def main() -> int:
     if melt_ok is False:
         failures.append("draft project failed to render with melt")
     result["v122"] = verify_v122_operations(job, cams, work, out, model_dir, failures)
+    containment = verify_bundle_self_containment(work, failures)
+    result["bundle_self_containment"] = containment
+    result["videotoolbox_available"] = containment["videotoolbox_available"]
+    result["peak_rss_mb"] = _peak_rss_mb()
     result["failures"] = failures
     result["passed"] = not failures
     (out / "department_verification.json").write_text(json.dumps(result, indent=2, default=str) + "\n", encoding="utf-8")
     shutil.copy2(job.dir / "summary.md", out / "summary.md")
-    print(json.dumps({k: result[k] for k in ("passed", "failures", "job_status", "asr", "segmentation", "evidence")}, indent=2, default=str))
+    print(json.dumps({k: result[k] for k in ("passed", "failures", "job_status", "asr", "segmentation", "videotoolbox_available", "peak_rss_mb", "evidence")}, indent=2, default=str))
     return 0 if not failures else 1
 
 

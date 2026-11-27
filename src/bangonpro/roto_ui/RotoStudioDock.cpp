@@ -17,13 +17,21 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QPushButton>
+#include <QShowEvent>
 #include <QSlider>
 #include <QSpinBox>
 #include <QTabWidget>
+#include <QTimer>
 #include <QUuid>
 #include <QVBoxLayout>
 
 namespace BangOnPro {
+
+namespace {
+constexpr int kListRefreshDebounceMs = 80;
+} // namespace
+
+constexpr int RotoStudioDock::kMaxCanvasUndoDepth;
 
 RotoStudioDock::RotoStudioDock(QWidget *parent)
     : QWidget(parent)
@@ -32,10 +40,151 @@ RotoStudioDock::RotoStudioDock(QWidget *parent)
     setWindowTitle(QStringLiteral("Roto and 2D"));
     buildUi();
 
-    // Seed an initial editable mask, 2D plate layer, and opening storyboard shot
+    m_maskListRefreshTimer = new QTimer(this);
+    m_maskListRefreshTimer->setSingleShot(true);
+    m_maskListRefreshTimer->setInterval(kListRefreshDebounceMs);
+    connect(m_maskListRefreshTimer, &QTimer::timeout, this, &RotoStudioDock::refreshMaskList);
+
+    m_layerListRefreshTimer = new QTimer(this);
+    m_layerListRefreshTimer->setSingleShot(true);
+    m_layerListRefreshTimer->setInterval(kListRefreshDebounceMs);
+    connect(m_layerListRefreshTimer, &QTimer::timeout, this, &RotoStudioDock::refreshCanvas2DList);
+}
+
+void RotoStudioDock::showEvent(QShowEvent *event)
+{
+    QWidget::showEvent(event);
+    ensureDefaultContentSeeded();
+}
+
+void RotoStudioDock::ensureDefaultContentSeeded() const
+{
+    if (!m_defaultContentSeeded) {
+        const_cast<RotoStudioDock *>(this)->seedDefaultContent();
+    }
+}
+
+void RotoStudioDock::seedDefaultContent()
+{
+    if (m_defaultContentSeeded) {
+        return;
+    }
+    m_defaultContentSeeded = true;
+    // Seed an initial editable mask, 2D plate layer, and opening storyboard shot lazily on first use.
     addMaskLayer(QStringLiteral("Subject Mask 1"));
     addCanvas2DLayer(QStringLiteral("Studio Backdrop"), QStringLiteral("gradient"));
     addStoryboardShot(QStringLiteral("Opening Establishing Shot"), 3.0, QString(), QStringLiteral("Wide studio push-in"));
+}
+
+void RotoStudioDock::resetForProject()
+{
+    if (m_maskListRefreshTimer != nullptr) {
+        m_maskListRefreshTimer->stop();
+    }
+    if (m_layerListRefreshTimer != nullptr) {
+        m_layerListRefreshTimer->stop();
+    }
+    m_defaultContentSeeded = true;
+
+    m_syncingMaskUi = true;
+    m_masks.clear();
+    m_selectedMaskIdx = -1;
+    if (m_maskList != nullptr) {
+        m_maskList->clear();
+    }
+    if (m_frameSpin != nullptr) {
+        m_frameSpin->setValue(0);
+    }
+    if (m_featherSlider != nullptr) {
+        m_featherSlider->setValue(0);
+    }
+    if (m_expandSlider != nullptr) {
+        m_expandSlider->setValue(0);
+    }
+    if (m_edgeRefineSlider != nullptr) {
+        m_edgeRefineSlider->setValue(25);
+    }
+    if (m_opacitySlider != nullptr) {
+        m_opacitySlider->setValue(100);
+    }
+    if (m_invertCheck != nullptr) {
+        m_invertCheck->setChecked(false);
+    }
+    if (m_rotoStatusLabel != nullptr) {
+        m_rotoStatusLabel->setText(QStringLiteral("Ready"));
+    }
+    if (m_canvas != nullptr) {
+        QImage blankFrame(64, 36, QImage::Format_RGB32);
+        blankFrame.fill(QColor(18, 21, 27));
+        m_canvas->setFrameImage(blankFrame);
+        m_canvas->setAlphaMaskImage(QImage());
+        m_canvas->clearGeometry();
+        m_canvas->setFeatherPx(0.0);
+        m_canvas->setExpandPx(0.0);
+        m_canvas->setInverted(false);
+    }
+    m_syncingMaskUi = false;
+
+    m_syncingLayerUi = true;
+    m_canvasLayers.clear();
+    m_canvasUndoStack.clear();
+    m_canvasRedoStack.clear();
+    if (m_layerList != nullptr) {
+        m_layerList->clear();
+    }
+    if (m_layerUndoBtn != nullptr) {
+        m_layerUndoBtn->setEnabled(false);
+    }
+    if (m_layerRedoBtn != nullptr) {
+        m_layerRedoBtn->setEnabled(false);
+    }
+    m_syncingLayerUi = false;
+
+    m_syncingShotUi = true;
+    m_storyboardShots.clear();
+    if (m_shotList != nullptr) {
+        m_shotList->clear();
+    }
+    if (m_shotTitleEdit != nullptr) {
+        m_shotTitleEdit->clear();
+    }
+    if (m_shotDialogueEdit != nullptr) {
+        m_shotDialogueEdit->clear();
+    }
+    if (m_shotActionEdit != nullptr) {
+        m_shotActionEdit->clear();
+    }
+    if (m_shotPromptEdit != nullptr) {
+        m_shotPromptEdit->clear();
+    }
+    if (m_shotDurationSpin != nullptr) {
+        m_shotDurationSpin->setValue(3.0);
+    }
+    m_syncingShotUi = false;
+}
+
+RotoMaskCanvasWidget *RotoStudioDock::canvasWidget() const
+{
+    ensureDefaultContentSeeded();
+    return m_canvas;
+}
+
+int RotoStudioDock::maskCount() const
+{
+    ensureDefaultContentSeeded();
+    return m_masks.size();
+}
+
+int RotoStudioDock::canvas2DLayerCount() const
+{
+    ensureDefaultContentSeeded();
+    return m_canvasLayers.size();
+}
+
+int RotoStudioDock::storyboardShotCount() const
+{
+    ensureDefaultContentSeeded();
+    return m_storyboardShots.size();
 }
 
 void RotoStudioDock::buildUi()
@@ -353,6 +502,7 @@ QWidget *RotoStudioDock::buildStoryboardTab()
 
 QString RotoStudioDock::addMaskLayer(const QString &name)
 {
+    ensureDefaultContentSeeded();
     StudioMaskLayerEntry entry;
     entry.id = QStringLiteral("mask_") + QUuid::createUuid().toString(QUuid::WithoutBraces).left(8);
     entry.name = name.isEmpty() ? QStringLiteral("Mask %1").arg(m_masks.size() + 1) : name;
@@ -365,6 +515,7 @@ QString RotoStudioDock::addMaskLayer(const QString &name)
 
 bool RotoStudioDock::duplicateSelectedMask()
 {
+    ensureDefaultContentSeeded();
     if (m_selectedMaskIdx < 0 || m_selectedMaskIdx >= m_masks.size()) {
         return false;
     }
@@ -380,6 +531,7 @@ bool RotoStudioDock::duplicateSelectedMask()
 
 bool RotoStudioDock::removeSelectedMask()
 {
+    ensureDefaultContentSeeded();
     if (m_selectedMaskIdx < 0 || m_selectedMaskIdx >= m_masks.size()) {
         return false;
     }
@@ -392,6 +544,7 @@ bool RotoStudioDock::removeSelectedMask()
 
 void RotoStudioDock::setMaskCombineMode(int index, const QString &mode)
 {
+    ensureDefaultContentSeeded();
     if (index < 0 || index >= m_masks.size()) {
         return;
     }
@@ -404,6 +557,7 @@ void RotoStudioDock::setMaskCombineMode(int index, const QString &mode)
 
 void RotoStudioDock::setMaskInverted(int index, bool inverted)
 {
+    ensureDefaultContentSeeded();
     if (index < 0 || index >= m_masks.size()) {
         return;
     }
@@ -416,6 +570,7 @@ void RotoStudioDock::setMaskInverted(int index, bool inverted)
 
 void RotoStudioDock::addKeyframeAtCurrentFrame()
 {
+    ensureDefaultContentSeeded();
     if (m_selectedMaskIdx < 0 || m_selectedMaskIdx >= m_masks.size()) {
         return;
     }
@@ -457,6 +612,7 @@ QString RotoStudioDock::segmentationBackendStatusText() const
 
 QJsonObject RotoStudioDock::exportRotoSessionJson() const
 {
+    ensureDefaultContentSeeded();
     QJsonObject session;
     session.insert(QStringLiteral("schema_version"), QStringLiteral("1.0"));
     session.insert(QStringLiteral("session_id"), QStringLiteral("studio_roto_1"));
@@ -513,6 +669,9 @@ QJsonObject RotoStudioDock::exportRotoSessionJson() const
 
 void RotoStudioDock::refreshMaskList()
 {
+    if (m_maskListRefreshTimer != nullptr && m_maskListRefreshTimer->isActive()) {
+        m_maskListRefreshTimer->stop();
+    }
     m_syncingMaskUi = true;
     m_maskList->clear();
     for (const StudioMaskLayerEntry &m : m_masks) {
@@ -574,7 +733,11 @@ void RotoStudioDock::handleMaskParamsChanged()
     m_canvas->setFeatherPx(m.featherPx);
     m_canvas->setExpandPx(m.expandPx);
     m_canvas->setInverted(m.inverted);
-    refreshMaskList();
+    if (m_maskListRefreshTimer != nullptr) {
+        m_maskListRefreshTimer->start();
+    } else {
+        refreshMaskList();
+    }
 }
 
 void RotoStudioDock::handleToolComboChanged(int index)
@@ -611,6 +774,9 @@ void RotoStudioDock::handleCommitMaskClicked()
 void RotoStudioDock::pushCanvas2DUndoSnapshot()
 {
     m_canvasUndoStack.append(m_canvasLayers);
+    while (m_canvasUndoStack.size() > kMaxCanvasUndoDepth) {
+        m_canvasUndoStack.removeFirst();
+    }
     m_canvasRedoStack.clear();
     if (m_layerUndoBtn) {
         m_layerUndoBtn->setEnabled(!m_canvasUndoStack.isEmpty());
@@ -622,6 +788,7 @@ void RotoStudioDock::pushCanvas2DUndoSnapshot()
 
 QString RotoStudioDock::addCanvas2DLayer(const QString &name, const QString &kind, const QString &imagePath, const QString &text)
 {
+    ensureDefaultContentSeeded();
     pushCanvas2DUndoSnapshot();
     StudioCanvas2DLayer layer;
     layer.id = QStringLiteral("layer_") + QUuid::createUuid().toString(QUuid::WithoutBraces).left(8);
@@ -637,6 +804,7 @@ QString RotoStudioDock::addCanvas2DLayer(const QString &name, const QString &kin
 
 bool RotoStudioDock::moveSelectedCanvas2DLayer(int delta)
 {
+    ensureDefaultContentSeeded();
     const int row = m_layerList->currentRow();
     const int target = row + delta;
     if (row < 0 || row >= m_canvasLayers.size() || target < 0 || target >= m_canvasLayers.size()) {
@@ -651,10 +819,14 @@ bool RotoStudioDock::moveSelectedCanvas2DLayer(int delta)
 
 bool RotoStudioDock::undoCanvas2D()
 {
+    ensureDefaultContentSeeded();
     if (m_canvasUndoStack.isEmpty()) {
         return false;
     }
     m_canvasRedoStack.append(m_canvasLayers);
+    while (m_canvasRedoStack.size() > kMaxCanvasUndoDepth) {
+        m_canvasRedoStack.removeFirst();
+    }
     m_canvasLayers = m_canvasUndoStack.takeLast();
     refreshCanvas2DList();
     return true;
@@ -662,10 +834,14 @@ bool RotoStudioDock::undoCanvas2D()
 
 bool RotoStudioDock::redoCanvas2D()
 {
+    ensureDefaultContentSeeded();
     if (m_canvasRedoStack.isEmpty()) {
         return false;
     }
     m_canvasUndoStack.append(m_canvasLayers);
+    while (m_canvasUndoStack.size() > kMaxCanvasUndoDepth) {
+        m_canvasUndoStack.removeFirst();
+    }
     m_canvasLayers = m_canvasRedoStack.takeLast();
     refreshCanvas2DList();
     return true;
@@ -673,6 +849,7 @@ bool RotoStudioDock::redoCanvas2D()
 
 QJsonObject RotoStudioDock::exportCanvas2DJson() const
 {
+    ensureDefaultContentSeeded();
     QJsonObject obj;
     obj.insert(QStringLiteral("width"), 1920);
     obj.insert(QStringLiteral("height"), 1080);
@@ -697,6 +874,9 @@ QJsonObject RotoStudioDock::exportCanvas2DJson() const
 
 void RotoStudioDock::refreshCanvas2DList()
 {
+    if (m_layerListRefreshTimer != nullptr && m_layerListRefreshTimer->isActive()) {
+        m_layerListRefreshTimer->stop();
+    }
     m_syncingLayerUi = true;
     const int prevRow = m_layerList->currentRow();
     m_layerList->clear();
@@ -742,11 +922,16 @@ void RotoStudioDock::handleCanvasLayerPropsChanged()
     l.blendMode = m_layerBlendCombo->currentText();
     l.opacity = static_cast<double>(m_layerOpacitySlider->value()) / 100.0;
     l.visible = m_layerVisibleCheck->isChecked();
-    refreshCanvas2DList();
+    if (m_layerListRefreshTimer != nullptr) {
+        m_layerListRefreshTimer->start();
+    } else {
+        refreshCanvas2DList();
+    }
 }
 
 QString RotoStudioDock::addStoryboardShot(const QString &title, double durationSec, const QString &dialogue, const QString &action)
 {
+    ensureDefaultContentSeeded();
     StudioStoryboardCard card;
     card.id = QStringLiteral("shot_") + QUuid::createUuid().toString(QUuid::WithoutBraces).left(8);
     card.shotNumber = m_storyboardShots.size() + 1;
@@ -762,6 +947,7 @@ QString RotoStudioDock::addStoryboardShot(const QString &title, double durationS
 
 bool RotoStudioDock::deleteSelectedStoryboardShot()
 {
+    ensureDefaultContentSeeded();
     const int row = m_shotList->currentRow();
     if (row < 0 || row >= m_storyboardShots.size()) {
         return false;
@@ -776,6 +962,7 @@ bool RotoStudioDock::deleteSelectedStoryboardShot()
 
 bool RotoStudioDock::moveSelectedStoryboardShot(int delta)
 {
+    ensureDefaultContentSeeded();
     const int row = m_shotList->currentRow();
     const int target = row + delta;
     if (row < 0 || row >= m_storyboardShots.size() || target < 0 || target >= m_storyboardShots.size()) {
@@ -792,6 +979,7 @@ bool RotoStudioDock::moveSelectedStoryboardShot(int delta)
 
 QJsonObject RotoStudioDock::exportStoryboardJson() const
 {
+    ensureDefaultContentSeeded();
     QJsonObject obj;
     obj.insert(QStringLiteral("title"), QStringLiteral("Bang On Pro Storyboard"));
     QJsonArray arr;

@@ -7,6 +7,8 @@ SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
 #include "mainwindow.h"
 #include "assets/assetpanel.hpp"
 #include "audiomixer/mixermanager.hpp"
+#include "bangonpro/effects_browser/PasteAttributesDialog.h"
+#include "bangonpro/effects_browser/UnifiedEffectsPanel.h"
 #include "bin/clipcreator.hpp"
 #include "bin/generators/generators.h"
 #include "bin/mediabrowser.h"
@@ -26,6 +28,7 @@ SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
 #include "docktitlebarmanager.h"
 #include "effects/effectbasket.h"
 #include "effects/effectlist/view/effectlistwidget.hpp"
+#include "effects/effectstack/model/effectstackmodel.hpp"
 #include "jobs/audiolevelstask.h"
 #include "jobs/customjobtask.h"
 #include "jobs/scenesplittask.h"
@@ -431,10 +434,13 @@ void MainWindow::init(const QString &mltPath)
     guidesDock->close();
     m_onlineResourcesDock->close();
 
-    m_effectStackDock = addDock(i18n("Effect/Composition Stack"), QStringLiteral("effect_stack"), m_assetPanel);
+    m_effectStackDock = addDock(i18n("Effect Controls"), QStringLiteral("effect_stack"), m_assetPanel);
     connect(pCore.get(), &Core::requestShowBinEffectStack, m_assetPanel, &AssetPanel::showEffectStack);
     connect(m_assetPanel, &AssetPanel::doSplitEffect, m_projectMonitor, &Monitor::slotSwitchCompare);
     connect(m_assetPanel, &AssetPanel::doSplitBinEffect, m_clipMonitor, &Monitor::slotSwitchCompare);
+    connect(m_assetPanel, &AssetPanel::effectDroppedOnStack, this, &MainWindow::showEffectControls);
+    connect(m_assetPanel, &AssetPanel::copyAttributesRequested, this, &MainWindow::slotCopyAttributes);
+    connect(m_assetPanel, &AssetPanel::pasteAttributesRequested, this, &MainWindow::slotPasteAttributesDialog);
     connect(m_assetPanel, &AssetPanel::switchCurrentComposition, this,
             [&](int cid, const QString &compositionId) { getCurrentTimeline()->model()->switchComposition(cid, compositionId); });
     connect(pCore->bin(), &Bin::updateTabName, m_timelineTabs, &TimelineTabs::renameTab);
@@ -450,7 +456,9 @@ void MainWindow::init(const QString &mltPath)
                     return;
                 }
                 m_assetPanel->showEffectStack(clipName, model, size, showKeyframes);
-                m_effectStackDock->raise();
+                if (m_effectStackDock && m_effectStackDock->isVisible()) {
+                    m_effectStackDock->raise();
+                }
             });
 
     connect(m_timelineTabs, &TimelineTabs::updateAssetPosition, m_assetPanel, &AssetPanel::updateAssetPosition);
@@ -497,9 +505,34 @@ void MainWindow::init(const QString &mltPath)
     });
 
     m_effectList2 = new EffectListWidget(this);
+    m_effectList2->hide();
     connect(m_effectList2, &EffectListWidget::activateAsset, pCore->projectManager(), &ProjectManager::activateAsset);
-    connect(m_assetPanel, &AssetPanel::reloadEffect, m_effectList2, &EffectListWidget::reloadCustomEffect);
-    m_effectListDock = addDock(i18n("Effects"), QStringLiteral("effect_list"), m_effectList2);
+    connect(m_assetPanel, &AssetPanel::reloadEffect, this, [this](const QString &path) {
+        if (m_effectList2) {
+            m_effectList2->reloadCustomEffect(path);
+        }
+        if (m_unifiedEffectsPanel) {
+            m_unifiedEffectsPanel->populateFromRepositories();
+        }
+    });
+    m_unifiedEffectsPanel = new BangOnPro::UnifiedEffectsPanel(this);
+    m_unifiedEffectsPanel->populateFromRepositories();
+    connect(m_unifiedEffectsPanel, &BangOnPro::UnifiedEffectsPanel::applyEffectRequested, this, [this](const QString &assetId) {
+        addEffect(assetId);
+        showEffectControls();
+    });
+    connect(m_unifiedEffectsPanel, &BangOnPro::UnifiedEffectsPanel::applyTransitionRequested, this, [this](const QString &assetId) {
+        QVariantMap data;
+        data.insert(QStringLiteral("kdenlive/composition"), assetId);
+        pCore->projectManager()->activateAsset(data);
+        showEffectControls();
+    });
+    connect(m_unifiedEffectsPanel, &BangOnPro::UnifiedEffectsPanel::favoriteToggled, this, [this](const QString &, bool) {
+        if (m_effectList2) {
+            Q_EMIT m_effectList2->reloadFavorites();
+        }
+    });
+    m_effectListDock = addDock(i18n("Effects"), QStringLiteral("effect_list"), m_unifiedEffectsPanel);
 
     m_compositionList = new TransitionListWidget(this);
     m_compositionListDock = addDock(i18n("Compositions"), QStringLiteral("transition_list"), m_compositionList);
@@ -3648,8 +3681,137 @@ void MainWindow::slotPaste()
     getCurrentTimeline()->controller()->pasteItem();
 }
 
+void MainWindow::showEffectControls()
+{
+    if (m_effectStackDock) {
+        m_effectStackDock->show();
+        m_effectStackDock->raise();
+    }
+}
+
+void MainWindow::slotCopyAttributes()
+{
+    if (!m_assetPanel || !pCore) {
+        return;
+    }
+    const ObjectId owner = m_assetPanel->effectStackOwner();
+    if (owner.type == KdenliveObjectType::NoItem || owner.itemId < 0) {
+        pCore->displayMessage(i18n("Select a clip with effects to copy attributes"), InformationMessage, 2500);
+        return;
+    }
+    std::shared_ptr<EffectStackModel> stack = pCore->getItemEffectStack(owner.uuid, int(owner.type), owner.itemId);
+    if (!stack || stack->rowCount() == 0) {
+        pCore->displayMessage(i18n("Selected item has no effects or transform adjustments to copy"), InformationMessage, 2500);
+        return;
+    }
+    QDomDocument doc;
+    QDomElement root = stack->toXml(doc);
+    doc.appendChild(root);
+    m_copiedAttributesXml = doc.toString();
+    pCore->displayMessage(i18n("Copied %1 attribute(s) from selected clip", stack->rowCount()), InformationMessage, 2500);
+}
+
+void MainWindow::slotPasteAttributesDialog()
+{
+    if (!pCore || !getCurrentTimeline() || !getCurrentTimeline()->model()) {
+        return;
+    }
+    QString sourceXml = m_copiedAttributesXml;
+    if (sourceXml.isEmpty()) {
+        // Fallback: try reading copied clip effects from the system clipboard (kdenlive-scene).
+        const QString clipTxt = QApplication::clipboard() ? QApplication::clipboard()->text() : QString();
+        if (!clipTxt.isEmpty()) {
+            QDomDocument copiedDoc;
+            if (copiedDoc.setContent(clipTxt) && copiedDoc.documentElement().tagName() == QLatin1String("kdenlive-scene")) {
+                const QDomNodeList clips = copiedDoc.documentElement().elementsByTagName(QStringLiteral("clip"));
+                if (!clips.isEmpty()) {
+                    const QDomElement eff = clips.at(0).firstChildElement(QStringLiteral("effects"));
+                    if (!eff.isNull()) {
+                        QDomDocument outDoc;
+                        outDoc.appendChild(outDoc.importNode(eff, true));
+                        sourceXml = outDoc.toString();
+                    }
+                }
+            }
+        }
+    }
+    if (sourceXml.isEmpty()) {
+        pCore->displayMessage(i18n("Copy attributes from a clip first"), InformationMessage, 2500);
+        return;
+    }
+    const QVector<BangOnPro::AttributeItem> items = BangOnPro::PasteAttributesDialog::parseEffectsXml(sourceXml);
+    if (items.isEmpty()) {
+        pCore->displayMessage(i18n("No pasteable effects found in copied attributes"), InformationMessage, 2500);
+        return;
+    }
+    BangOnPro::PasteAttributesDialog dlg(items, this);
+    if (dlg.exec() != QDialog::Accepted) {
+        return;
+    }
+    const QString combinedXml = dlg.buildCombinedEffectsXml();
+    if (combinedXml.isEmpty()) {
+        return;
+    }
+    QDomDocument pasteDoc;
+    if (!pasteDoc.setContent(combinedXml)) {
+        return;
+    }
+    auto model = getCurrentTimeline()->model();
+    std::unordered_set<int> targetIds;
+    const std::unordered_set<int> sel = model->getCurrentSelection();
+    for (int s : sel) {
+        if (model->isGroup(s)) {
+            const std::unordered_set<int> leaves = model->getGroupElements(s);
+            for (int leaf : leaves) {
+                if (model->isClip(leaf)) {
+                    targetIds.insert(leaf);
+                }
+            }
+        } else if (model->isClip(s)) {
+            targetIds.insert(s);
+        }
+    }
+    if (targetIds.empty()) {
+        const ObjectId owner = m_assetPanel ? m_assetPanel->effectStackOwner() : ObjectId();
+        if (owner.type == KdenliveObjectType::TimelineClip && owner.itemId >= 0) {
+            targetIds.insert(owner.itemId);
+        }
+    }
+    if (targetIds.empty()) {
+        pCore->displayMessage(i18n("Select one or more timeline clips to paste attributes"), ErrorMessage, 2500);
+        return;
+    }
+    Fun undo = []() { return true; };
+    Fun redo = []() { return true; };
+    int appliedClips = 0;
+    for (int target : targetIds) {
+        std::shared_ptr<EffectStackModel> destStack = model->getClipEffectStackModel(target);
+        if (!destStack) {
+            continue;
+        }
+        if (dlg.clearExistingBeforePaste()) {
+            destStack->removeAllEffects(undo, redo);
+        }
+        if (destStack->fromXml(pasteDoc.documentElement(), undo, redo)) {
+            appliedClips++;
+        }
+    }
+    if (appliedClips > 0) {
+        pCore->pushUndo(undo, redo, i18n("Paste Attributes"));
+        showEffectControls();
+        pCore->displayMessage(i18n("Pasted attributes onto %1 clip(s)", appliedClips), InformationMessage, 2500);
+    } else {
+        undo();
+        pCore->displayMessage(i18n("Cannot paste selected attributes onto the selected clip(s)"), ErrorMessage, 2500);
+    }
+}
+
 void MainWindow::slotPasteEffects()
 {
+    if (!m_copiedAttributesXml.isEmpty()) {
+        slotPasteAttributesDialog();
+        return;
+    }
     getCurrentTimeline()->controller()->pasteEffects();
 }
 
@@ -5148,7 +5310,6 @@ void MainWindow::checkMaxCacheSize()
         return;
     }
     bool ok;
-    KIO::filesize_t total = 0;
     QDir cacheDir = pCore->currentDoc()->getCacheDir(SystemCacheRoot, &ok);
     if (!ok) {
         return;
@@ -5160,7 +5321,7 @@ void MainWindow::checkMaxCacheSize()
         toAdd << cacheDir;
     }
     if (backupFolder.exists()) {
-        toAdd << cacheDir;
+        toAdd << backupFolder;
     }
     if (cacheDir.cd(QStringLiteral("knewstuff"))) {
         toRemove << cacheDir;
@@ -5174,21 +5335,36 @@ void MainWindow::checkMaxCacheSize()
         toRemove << cacheDir;
         cacheDir.cdUp();
     }
+    if (toAdd.isEmpty()) {
+        return;
+    }
     pCore->displayMessage(i18n("Checking cached data size"), InformationMessage);
-    while (!toAdd.isEmpty()) {
-        QDir dir = toAdd.takeFirst();
+    struct AsyncCacheState
+    {
+        qint64 total = 0;
+        int remaining = 0;
+        qint64 limitBytes = 0;
+    };
+    auto state = std::make_shared<AsyncCacheState>();
+    state->remaining = toAdd.size() + toRemove.size();
+    state->limitBytes = qint64(1048576) * KdenliveSettings::maxcachesize();
+    auto launchJob = [this, state](const QDir &dir, bool add) {
         KIO::DirectorySizeJob *job = KIO::directorySize(QUrl::fromLocalFile(dir.absolutePath()));
-        job->exec();
-        total += job->totalSize();
+        connect(job, &KJob::result, this, [this, state, job, add]() {
+            if (!job->error()) {
+                const qint64 sz = static_cast<qint64>(job->totalSize());
+                state->total += add ? sz : -sz;
+            }
+            if (--state->remaining == 0 && state->total > state->limitBytes) {
+                slotManageCache();
+            }
+        });
+    };
+    for (const QDir &dir : qAsConst(toAdd)) {
+        launchJob(dir, true);
     }
-    while (!toRemove.isEmpty()) {
-        QDir dir = toRemove.takeFirst();
-        KIO::DirectorySizeJob *job = KIO::directorySize(QUrl::fromLocalFile(dir.absolutePath()));
-        job->exec();
-        total -= job->totalSize();
-    }
-    if (total > KIO::filesize_t(1048576) * KdenliveSettings::maxcachesize()) {
-        slotManageCache();
+    for (const QDir &dir : qAsConst(toRemove)) {
+        launchJob(dir, false);
     }
 }
 
@@ -5241,6 +5417,9 @@ void MainWindow::connectTimeline()
     pCore->projectManager()->setActiveTimeline(uuid);
     connect(m_projectMonitor, &Monitor::multitrackView, getCurrentTimeline()->controller(), &TimelineController::slotMultitrackView, Qt::UniqueConnection);
     connect(m_projectMonitor, &Monitor::activateTrack, getCurrentTimeline()->controller(), &TimelineController::activateTrackAndSelect, Qt::UniqueConnection);
+    connect(
+        getCurrentTimeline()->controller(), &TimelineController::effectAppliedToClip, this, [this](int, const QString &) { showEffectControls(); },
+        Qt::UniqueConnection);
     connect(getCurrentTimeline()->controller(), &TimelineController::timelineClipSelected, this, [&](bool selected) {
         m_loopClip->setEnabled(selected);
         Q_EMIT pCore->library()->enableAddSelection(selected);

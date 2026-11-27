@@ -27,6 +27,10 @@ class TransitionStackView;
 class MixStackView;
 class QLabel;
 
+namespace BangOnPro {
+class IntrinsicTransformWidget;
+}
+
 /** @class AssetPanel
     @brief This class is the widget that provides interaction with the asset currently selected.
     That is, it either displays an effectStack or the parameters of a transition
@@ -57,6 +61,8 @@ public:
     bool addEffect(const QString &effectId);
     /** @brief Used to pass a standard action like copy or paste to the effect stack widget */
     void sendStandardCommand(int command);
+    /** @brief Access the pinned intrinsic Motion / Transform inspector card. */
+    BangOnPro::IntrinsicTransformWidget *intrinsicTransformWidget() const { return m_intrinsicTransform; }
 
 public Q_SLOTS:
     /** @brief Clear panel if displaying itemId */
@@ -95,6 +101,14 @@ private:
     QScrollArea *m_sc;
     KMessageWidget *m_infoMessage;
     QTimer m_dragScrollTimer;
+    BangOnPro::IntrinsicTransformWidget *m_intrinsicTransform{nullptr};
+    QWidget *m_emptyStateWidget{nullptr};
+    QLabel *m_targetBadge{nullptr};
+    QAction *m_targetBadgeAction{nullptr};
+    QToolButton *m_copyAttributesButton{nullptr};
+    QToolButton *m_pasteAttributesButton{nullptr};
+    QAction *m_copyAttributesAction{nullptr};
+    QAction *m_pasteAttributesAction{nullptr};
 
 private Q_SLOTS:
     void processSplitEffect(bool enable);
@@ -114,4 +128,7 @@ Q_SIGNALS:
     void reloadEffect(const QString &path);
     void switchCurrentComposition(int tid, const QString &compoId);
     void slotSaveStack();
+    void copyAttributesRequested();
+    void pasteAttributesRequested();
+    void effectDroppedOnStack();
 };

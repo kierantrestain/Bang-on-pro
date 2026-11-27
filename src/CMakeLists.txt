@@ -91,6 +91,9 @@ list(APPEND kdenlive_SRCS
     bangonpro/timeline_api/TimelineCommandServer.cpp
     bangonpro/timeline_api/KdenliveTimelineBridge.cpp
     bangonpro/effects_browser/PremierePresetBrowser.cpp
+    bangonpro/effects_browser/UnifiedEffectsPanel.cpp
+    bangonpro/effects_browser/IntrinsicTransformWidget.cpp
+    bangonpro/effects_browser/PasteAttributesDialog.cpp
     bangonpro/ui/AiAssistantDock.cpp
     bangonpro/ui/AgentControlCentre.cpp
     bangonpro/ui/BangOnProWorkspace.cpp
@@ -149,6 +152,9 @@ set_source_files_properties(
     bangonpro/timeline_api/TimelineCommandServer.cpp
     bangonpro/timeline_api/KdenliveTimelineBridge.cpp
     bangonpro/effects_browser/PremierePresetBrowser.cpp
+    bangonpro/effects_browser/UnifiedEffectsPanel.cpp
+    bangonpro/effects_browser/IntrinsicTransformWidget.cpp
+    bangonpro/effects_browser/PasteAttributesDialog.cpp
     bangonpro/ui/AiAssistantDock.cpp
     bangonpro/ui/AgentControlCentre.cpp
     bangonpro/ui/BangOnProWorkspace.cpp

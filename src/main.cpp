@@ -51,6 +51,7 @@ SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
 #include <QApplication>
 #include <QCommandLineOption>
 #include <QCommandLineParser>
+#include <QDateTime>
 #include <QDir>
 #include <QIcon>
 #include <QProcess>
@@ -107,13 +108,16 @@ static LinuxPackageType getPackageType()
 
 static void resetConfig()
 {
-    // Delete config file
+    const QString stamp = QDateTime::currentDateTimeUtc().toString(QStringLiteral("yyyyMMdd-HHmmss"));
+    // Delete config file (preserving a timestamped backup first)
     KSharedConfigPtr config = KSharedConfig::openConfig();
     if (config->name().contains(QLatin1String("kdenlive"))) {
         // Make sure we delete our config file
         QFile f(QStandardPaths::locate(QStandardPaths::GenericConfigLocation, config->name(), QStandardPaths::LocateFile));
         if (f.exists()) {
-            qDebug() << " = = = =\nGOT Deleted file: " << f.fileName();
+            const QString backupPath = f.fileName() + QStringLiteral(".bak.") + stamp;
+            QFile::copy(f.fileName(), backupPath);
+            qDebug() << " = = = =\nBacked up and reset config file: " << f.fileName() << " -> " << backupPath;
             f.remove();
         }
     }
@@ -131,6 +135,7 @@ static void resetConfig()
     if (!f.exists()) {
         return;
     }
+    QFile::copy(f.fileName(), f.fileName() + QStringLiteral(".bak.") + stamp);
     if (!f.open(QIODevice::ReadOnly)) {
         return;
     }
@@ -375,7 +380,7 @@ int main(int argc, char *argv[])
         break;
     }
 
-    KAboutData aboutData(QByteArray("kdenlive"), i18n("Bang On Pro"), QStringLiteral("1.6.0 (Kdenlive %1)").arg(QStringLiteral(KDENLIVE_VERSION)),
+    KAboutData aboutData(QByteArray("kdenlive"), i18n("Bang On Pro"), QStringLiteral("1.7.0 (Kdenlive %1)").arg(QStringLiteral(KDENLIVE_VERSION)),
                          i18n("AI-Native Professional Video Editor built on Kdenlive & MLT."), KAboutLicense::GPL_V3,
                          i18n("Copyright © 2026 Bang On Pro Contributors; Built on Kdenlive (Copyright © 2007–2024 Kdenlive authors)"), otherText,
                          QStringLiteral("https://github.com/kierantrestain/Bang-on-pro"));

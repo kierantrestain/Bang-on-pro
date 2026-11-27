@@ -1,0 +1,61 @@
+{
+  "version": "1.7.0",
+  "binary": "/home/antigravity/kierantrestain/Bang-on-pro/install-prefix/bin/kdenlive",
+  "journeys": {
+    "journey1_isolation_and_ai_cut": {
+      "ok": true,
+      "rc": 0,
+      "elapsed_sec": 44.09,
+      "project_a_uuid": "fdaff863-c244-4b21-8492-247ee22c51c1",
+      "project_b_uuid": "5cfaf454-aea5-4e6f-8e21-0bb3214dd297",
+      "project_a_job_dir": "/tmp/bop_v17_accept_me_131vw/home/.local/share/kdenlive/bangonpro/projects/fdaff863-c244-4b21-8492-247ee22c51c1/jobs/job_20261127-200329_abcb21",
+      "project_b_job_dir": "/tmp/bop_v17_accept_me_131vw/home/.local/share/kdenlive/bangonpro/projects/5cfaf454-aea5-4e6f-8e21-0bb3214dd297/jobs/job_20261127-200347_638764",
+      "project_b_clean_job_dir": "",
+      "project_a_sequences_after_open": 2,
+      "render_a": {
+        "mp4_path": "/tmp/bop_v17_accept_me_131vw/project_a_export.mp4",
+        "size_bytes": 680760,
+        "duration_sec": 9.92,
+        "has_video": true,
+        "has_audio": true
+      }
+    },
+    "journey2_crash_recovery_and_bg_switch": {
+      "ok": true,
+      "rc": 0,
+      "elapsed_sec": 25.77,
+      "after_sigkill_status": "interrupted",
+      "project_b_during_bg_job_dir": "",
+      "project_b_after_bg_job_dir": ""
+    },
+    "journey3_effects_and_controls": {
+      "ok": true,
+      "rc": 0,
+      "elapsed_sec": 23.73,
+      "effect_controls_title": "Effect Controls",
+      "effect_controls_visible": true,
+      "effects_after_apply": 2,
+      "effects_after_reopen": 2,
+      "transform_materialized_after_reopen": true,
+      "render_fx": {
+        "mp4_path": "/tmp/bop_v17_accept_me_131vw/effected_export.mp4",
+        "size_bytes": 699409,
+        "duration_sec": 9.92,
+        "has_video": true,
+        "has_audio": true
+      }
+    },
+    "journey4_stability_and_legacy": {
+      "ok": true,
+      "rc": 0,
+      "elapsed_sec": 33.17,
+      "warm_startup_roundtrip_sec": 4.14,
+      "legacy_migrated_uuid": "fdaff863-c244-4b21-8492-247ee22c51c1",
+      "rss_mb_cycle_0": 531.2,
+      "rss_mb_cycle_5": 821,
+      "rss_mb_cycle_10": 818.6,
+      "rss_mb_delta_10_switches": 287.4
+    }
+  },
+  "acceptance": {}
+}

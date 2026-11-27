@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import hashlib
 import json
 import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +31,8 @@ from bangonpro.ai_engine.state import (
     TimeInterval,
     TranscriptSegment,
 )
+
+CHECKPOINT_HASH_KEY = "checkpoint_sha256"
 
 
 def _build(cls: type, data: dict[str, Any] | None) -> Any:
@@ -109,9 +113,70 @@ def deserialize_state(data: dict[str, Any]) -> ProjectAnalysisState:
 
 
 def write_json_atomic(path: str | Path, payload: Any) -> Path:
+    """Write UTF-8 JSON to a unique sibling temp file, fsync, then atomically replace ``path``."""
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    tmp = out.with_name(out.name + ".tmp")
-    tmp.write_text(json.dumps(payload, indent=2, default=str) + "\n", encoding="utf-8")
-    os.replace(tmp, out)
+    raw = (json.dumps(payload, indent=2, default=str) + "\n").encode("utf-8")
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{out.name}.", suffix=".tmp", dir=str(out.parent))
+    tmp_path = Path(tmp_name)
+    closed = False
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(raw)
+            fh.flush()
+            os.fsync(fh.fileno())
+        closed = True
+        os.replace(tmp_path, out)
+    except BaseException:
+        if not closed:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        tmp_path.unlink(missing_ok=True)
+        raise
     return out
+
+
+def compute_checkpoint_sha256(data: dict[str, Any]) -> str:
+    """Compute canonical SHA-256 hex digest of a checkpoint payload excluding ``checkpoint_sha256``."""
+    body = {k: v for k, v in data.items() if k != CHECKPOINT_HASH_KEY}
+    canonical = json.dumps(body, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def write_checkpoint_atomic(path: str | Path, payload: dict[str, Any]) -> Path:
+    """Attach ``checkpoint_sha256`` and write a checkpoint atomically with fsync."""
+    body = {k: v for k, v in payload.items() if k != CHECKPOINT_HASH_KEY}
+    # Round-trip through JSON defaults once so the hashed representation matches what is read back.
+    normalised = json.loads(json.dumps(body, default=str))
+    normalised[CHECKPOINT_HASH_KEY] = compute_checkpoint_sha256(normalised)
+    return write_json_atomic(path, normalised)
+
+
+def verify_checkpoint_integrity(data: dict[str, Any]) -> bool:
+    """Verify checkpoint structural validity and (when present) its SHA-256 digest.
+
+    Backward-compatible: V1.2-V1.6 checkpoints without ``checkpoint_sha256`` return True
+    when structurally valid.
+    """
+    if not isinstance(data, dict):
+        return False
+    agent_id = data.get("agent_id")
+    agent_index = data.get("agent_index")
+    state = data.get("state")
+    if not isinstance(agent_id, str) or not agent_id:
+        return False
+    if isinstance(agent_index, bool) or not isinstance(agent_index, int):
+        return False
+    if not isinstance(state, dict):
+        return False
+    for required_key in ("project_id", "sequence_id", "profile", "output_dir"):
+        if required_key not in state:
+            return False
+    if CHECKPOINT_HASH_KEY not in data or data[CHECKPOINT_HASH_KEY] is None:
+        return True
+    recorded = data.get(CHECKPOINT_HASH_KEY)
+    if not isinstance(recorded, str) or len(recorded) != 64:
+        return False
+    return recorded == compute_checkpoint_sha256(data)

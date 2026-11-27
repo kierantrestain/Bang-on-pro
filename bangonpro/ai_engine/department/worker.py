@@ -135,7 +135,14 @@ def worker_session(job_dir: str | Path, *, command: str = "run"):
                 held[1] -= 1
         return
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+    except (AttributeError, OSError):
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
     if fcntl is not None:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
