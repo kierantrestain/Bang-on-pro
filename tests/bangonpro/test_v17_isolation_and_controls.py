@@ -646,3 +646,24 @@ def test_project_index_keeps_protected_pause_kind() -> None:
         raise AssertionError(f"stub state incomplete: {exc}") from exc
     pauses = [e for e in idx["events"] if e["type"] == "protected_pause"]
     assert pauses == [{"type": "protected_pause", "start_sec": 9.0, "end_sec": 10.2, "evidence": "pause classification", "kind": "reflective"}]
+
+
+def test_neural_segment_straddling_dead_air_does_not_hide_the_silence() -> None:
+    """Long-form journey regression (CI, Whisper ASR): faster-whisper's VAD mode returned a segment
+    spanning the 4.5 s dead air between two speech chunks; the segment span counted as speech, so the
+    pacing plan never cut any of 25 dead-air gaps. Timed words are the evidence; the segment span may
+    only extend 0.3 s beyond them."""
+    from types import SimpleNamespace
+
+    from bangonpro.ai_engine.department.editorial_pacing import speech_evidence
+    from bangonpro.ai_engine.state import TranscriptSegment
+
+    def seg(sid: str, a: float, b: float, words: list[tuple[float, float]], neural: bool = True) -> TranscriptSegment:
+        return TranscriptSegment(sid, a, b, "host", "cam_host", "text", 0.9, False, -20.0, is_neural_inference=neural,
+                                 words=[{"word": f"w{i}", "start_sec": s, "end_sec": e} for i, (s, e) in enumerate(words)])
+
+    straddling = seg("s1", 2.0, 20.9, [(3.0, 3.6), (3.7, 8.9), (13.5, 14.2), (14.3, 20.9)])
+    vad_only = seg("s2", 30.0, 33.0, [], neural=False)
+    ev = speech_evidence(SimpleNamespace(transcript_segments=[straddling, vad_only], metadata={}))
+    spans = [(round(a, 2), round(b, 2)) for a, b, _ in ev]
+    assert spans == [(2.7, 8.9), (13.5, 20.9), (30.0, 33.0)], spans  # dead air 8.9-13.5 is silence again

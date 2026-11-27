@@ -275,27 +275,47 @@ def detect_flashes(path: Path) -> list[float]:
 
 
 def detect_beeps(path: Path) -> list[float]:
+    """Onsets of the 40 ms 5.5 kHz sync beeps.
+
+    A beep is a pure tone: nearly all of the 3-8 kHz energy sits in a 200 Hz band around 5.5 kHz.
+    Sibilants in real speech carry 5.5 kHz energy too but spread it across the whole band, so the
+    detector requires narrowband dominance as well as level (energy alone missed beeps masked by
+    adjacent "s" sounds in lexical TTS speech).
+    """
     from scipy.signal import butter, sosfiltfilt
 
     from bangonpro.ai_engine.agents.ingest_sync import extract_mono_pcm
 
     pcm = np.asarray(extract_mono_pcm(path, sample_rate=SR), dtype=np.float64)
-    sos = butter(6, [5200 / (SR / 2), 5800 / (SR / 2)], btype="bandpass", output="sos")
-    band = sosfiltfilt(sos, pcm)
-    hop = int(0.002 * SR)
-    env = np.sqrt(np.convolve(band ** 2, np.ones(hop * 5) / (hop * 5), mode="same"))[::hop]
-    thr = max(6.0 * float(np.median(env)) + 1e-6, 0.3 * float(np.max(env)))
-    onsets, last = [], -1.0
-    above = env > thr
-    for i in np.flatnonzero(above):
-        t = i * hop / SR
-        if t - last > 0.5:
-            # centre of the above-threshold run
+    narrow = sosfiltfilt(butter(6, [5400 / (SR / 2), 5600 / (SR / 2)], btype="bandpass", output="sos"), pcm)
+    wide = sosfiltfilt(butter(6, [3000 / (SR / 2), 8000 / (SR / 2)], btype="bandpass", output="sos"), pcm)
+    hop, win = int(0.002 * SR), int(0.010 * SR)
+    kern = np.ones(win) / win
+    en = np.convolve(narrow ** 2, kern, mode="same")[::hop]
+    ew = np.convolve(wide ** 2, kern, mode="same")[::hop] + 1e-12
+    tonal = en / ew
+    level = np.sqrt(en)
+    floor = float(np.median(level)) + 1e-9
+    # Beeps measure ~2500x the median band level for 40-50 ms; filter ringing on speech peaks for
+    # single 2 ms hops at ~20x. Require both a sustained run and a clear level margin.
+    above = (tonal > 0.6) & (level > 200.0 * floor)
+    min_run = int(0.020 / 0.002)
+    onsets: list[float] = []
+    i = 0
+    while i < above.size:
+        if above[i]:
             j = i
             while j + 1 < above.size and above[j + 1]:
                 j += 1
-            onsets.append(round(float((i + j) / 2 * hop / SR - 0.02), 4))  # beep centre -> beep start (40 ms beep)
-        last = t
+            if j - i + 1 >= min_run:
+                run = en[i:j + 1]
+                k = i + int(np.argmax(run >= 0.5 * float(run.max())))  # centred window: half energy at the beep's start
+                t0 = k * hop / SR
+                if not onsets or t0 - onsets[-1] > 0.5:
+                    onsets.append(round(float(t0), 4))
+            i = j + 1
+        else:
+            i += 1
     return onsets
 
 
