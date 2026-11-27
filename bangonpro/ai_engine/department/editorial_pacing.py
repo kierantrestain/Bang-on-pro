@@ -167,38 +167,15 @@ class PacingPlan:
 # ---------------------------------------------------------------------------
 # Speech evidence: everything a cut must never land inside
 # ---------------------------------------------------------------------------
-# A neural segment's own start/end are evidence only close to its timed words. faster-whisper's VAD
-# mode transcribes the speech chunks joined together and maps timestamps back, so one segment can
-# straddle the dead air between two chunks while its words stay accurate; trusting the segment span
-# kept every such gap (and defeated the setup-delay trim) in a 10-minute neural-ASR production.
-WORD_GAP_SPLIT_SEC = 1.0
-SEGMENT_EDGE_SLACK_SEC = 0.3
-
-
-def _segment_spans_from_words(seg: Any, words: list[dict[str, Any]]) -> list[tuple[float, float]]:
-    ws = sorted(words, key=lambda w: w["start_sec"])
-    spans: list[list[float]] = [[ws[0]["start_sec"], ws[0]["end_sec"]]]
-    for w in ws[1:]:
-        if w["start_sec"] - spans[-1][1] > WORD_GAP_SPLIT_SEC:
-            spans.append([w["start_sec"], w["end_sec"]])
-        else:
-            spans[-1][1] = max(spans[-1][1], w["end_sec"])
-    spans[0][0] = max(float(seg.start_sec), spans[0][0] - SEGMENT_EDGE_SLACK_SEC) if seg.start_sec < spans[0][0] else spans[0][0]
-    spans[-1][1] = min(float(seg.end_sec), spans[-1][1] + SEGMENT_EDGE_SLACK_SEC) if seg.end_sec > spans[-1][1] else spans[-1][1]
-    return [(float(a), float(b)) for a, b in spans]
-
-
 def speech_evidence(state: ProjectAnalysisState) -> list[tuple[float, float, str]]:
     """Sorted, merged regions of speech or reaction audio: segments, timed words, activity."""
     regs: list[tuple[float, float, str]] = []
     for s in state.transcript_segments:
-        words = [w for w in et.segment_words(s) if w["end_sec"] > w["start_sec"]]
-        if words:
-            regs.extend((a, b, "segment") for a, b in _segment_spans_from_words(s, words))
-        elif s.end_sec > s.start_sec:
+        if s.end_sec > s.start_sec:
             regs.append((float(s.start_sec), float(s.end_sec), "segment"))
-        for w in words:
-            regs.append((w["start_sec"], w["end_sec"], "word"))
+        for w in et.segment_words(s):
+            if w["end_sec"] > w["start_sec"]:
+                regs.append((w["start_sec"], w["end_sec"], "word"))
     for ev in state.metadata.get("nonspeech_activity", []) or []:
         if float(ev.get("end_sec", 0)) > float(ev.get("start_sec", 0)):
             regs.append((float(ev["start_sec"]), float(ev["end_sec"]), "activity"))

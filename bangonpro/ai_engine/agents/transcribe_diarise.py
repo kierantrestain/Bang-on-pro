@@ -1115,6 +1115,35 @@ def run_transcribe_diarise_agent(
     orphan_words: list[dict[str, Any]] = []
     if whisper_rows and asr_report.is_neural_inference:
         spec_starts = [sp["start_sec"] for sp in seg_specs]
+        # V1.7: Whisper word timestamps smear into neighbouring silence (CI long-form journey: the
+        # last word before a pause ran ~0.55 s past the speech, the next turn's first word began
+        # ~0.3 s early), and the segments extended by those words then carved the measured silence
+        # away, leaving dead air. A word side that crosses into an acoustically measured silence
+        # (>= the minimum pause; short pauses inside a turn are never touched) is trimmed back to
+        # where it still contains sound (6 dB over the noise floor - far below the speech threshold,
+        # so quiet words stay whole), never past the silence's own boundary. Words wholly inside a
+        # silence, or with no sound at all, are left untouched.
+        sound_db = (float(np.percentile(max_speech_db, 5)) if n_frames else -80.0) + 6.0
+        acoustic_silences = sorted((float(iv.start_sec), float(iv.end_sec)) for iv in silence_intervals)
+
+        def _trim_word_to_sound(ws: float, we: float) -> tuple[float, float]:
+            f0 = max(0, int(ws / hop_sec))
+            f1 = min(int(max_speech_db.size), int(np.ceil(we / hop_sec)))
+            if f1 - f0 < 2:
+                return ws, we
+            act = max_speech_db[f0:f1] > sound_db
+            if not act.any():
+                return ws, we
+            snd_s = (f0 + int(np.argmax(act))) * hop_sec - 0.05
+            snd_e = (f0 + int(act.size - np.argmax(act[::-1]))) * hop_sec + 0.05
+            for s0, s1 in acoustic_silences:
+                if s0 >= we or s1 <= ws:
+                    continue
+                if ws < s0 < we:  # runs from speech into the silence after it
+                    we = min(we, max(snd_e, s0))
+                if ws < s1 < we:  # runs back from speech into the silence before it
+                    ws = max(ws, min(snd_s, s1))
+            return ws, max(ws + 0.01, we)
 
         def _spec_for(t: float, reach: float) -> int | None:
             k = bisect.bisect_right(spec_starts, t) - 1
@@ -1131,7 +1160,8 @@ def run_transcribe_diarise_agent(
             row_words = [w for w in (row.get("words") or []) if str(w.get("word", "")).strip()]
             if row_words:
                 for w in row_words:
-                    ws, we = float(w["start_sec"]), float(w["end_sec"])
+                    ws, we = _trim_word_to_sound(float(w["start_sec"]), float(w["end_sec"]))
+                    w = {**w, "start_sec": round(ws, 4), "end_sec": round(we, 4)}
                     k = _spec_for((ws + we) / 2.0, 0.35)
                     if k is None:
                         orphan_words.append(dict(w))

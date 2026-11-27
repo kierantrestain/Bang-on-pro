@@ -813,13 +813,19 @@ def run_rough_cut_multicam_agent(
         # clock, so a shot's picture and dialogue start on the same master frame. Rounding is outward
         # (in-point down, out-point up) so a planned span - a kept pause, a speech turn - never loses
         # a frame; a shot that continues straight on from the previous one reuses its boundary frame.
+        # Shots never overlap on the master clock: a planned shot that starts before the previous one
+        # ends (speaker turns taken from ASR word timings overlap by a few hundred ms) starts where the
+        # previous shot ends, so no footage plays twice; a shot left with nothing new is dropped.
         raw_in, raw_out = float(sp["start"]), float(sp["end"])
-        if prev_raw_out is not None and abs(raw_in - prev_raw_out) < 1e-6:
+        if prev_raw_out is not None and raw_in < prev_raw_out + 1e-6:
             m_in_frame = prev_out_frame
         else:
             m_in_frame = max(0, math.floor(raw_in * fps + 1e-6))
-        m_out_frame = max(m_in_frame + 1, math.ceil(raw_out * fps - 1e-6))
-        prev_raw_out = raw_out
+        m_out_frame = math.ceil(raw_out * fps - 1e-6)
+        if prev_raw_out is not None and m_out_frame <= m_in_frame:
+            continue
+        m_out_frame = max(m_in_frame + 1, m_out_frame)
+        prev_raw_out = max(raw_out, prev_raw_out if prev_raw_out is not None else raw_out)
         m_in = m_in_frame / fps
         desired_frames = m_out_frame - m_in_frame
 

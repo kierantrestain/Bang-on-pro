@@ -127,7 +127,7 @@ def _fill(dur: float, clips: list[np.ndarray], cursor: list[int]) -> np.ndarray:
     return out
 
 
-def synthesise(base: Path, gt: dict[str, Any], *, lexical: bool) -> tuple[dict[str, Path], list[float], bool]:
+def synthesise(base: Path, gt: dict[str, Any], *, lexical: bool, guest_gain: float = 1.0) -> tuple[dict[str, Path], list[float], bool]:
     """Three-camera conversation per ``gt`` with sync markers; returns camera paths, marker master times, lexical flag."""
     from test_ai_production import _synthesize_speech_like_signal, _write_wav_16bit
 
@@ -150,7 +150,7 @@ def synthesise(base: Path, gt: dict[str, Any], *, lexical: bool) -> tuple[dict[s
         for who, buf, f0, syl in (("host", host, 140.0, 3.9), ("guest", guest, 215.0, 4.4)):
             if role in (who, "both"):
                 sig = _fill(e - s, bank[who], cursors[who]) if bank else _synthesize_speech_like_signal(e - s, SR, f0_hz=f0, syllable_hz=syl, seed=seed + (who == "guest"))
-                place(buf, s, sig, 0.55 if role == who else 0.24)
+                place(buf, s, sig, (0.55 if role == who else 0.24) * (guest_gain if who == "guest" else 1.0))
     for role, s, e in gt["interjections"]:
         place(host if role == "host" else guest, s, _synthesize_speech_like_signal(e - s, SR, f0_hz=150.0, syllable_hz=4.0, seed=999), 0.30)
     for k, (lab, ls, le, _keep) in enumerate(gt["protected"]):
