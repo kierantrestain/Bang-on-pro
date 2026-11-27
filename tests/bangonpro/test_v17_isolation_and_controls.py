@@ -609,3 +609,19 @@ def test_output_options_propagation_and_resource_telemetry(env: dict[str, Path])
     assert default_opts.aspect_ratio is None
     assert default_opts.target_duration_sec is None
     assert default_opts.media_source is None
+
+
+def test_half_frame_source_times_round_the_same_way_for_picture_and_dialogue() -> None:
+    """Long-form journey regression: a cut at master 49.74 s on a 25 fps sequence mapped the wide
+    camera (offset 0 s, source frame 1243.5) and the host microphone (offset 0.6 s, 1258.5) through
+    round-half-to-even, rounding picture up and dialogue down: one frame (40 ms) out of lip sync."""
+    from bangonpro.ai_engine.state import ProjectAnalysisState
+
+    st = ProjectAnalysisState("p", "s", {"video_spec": {"fps_num": 25, "fps_den": 1}}, ".")
+    assert st.sec_to_frame(49.74) == 1244 and st.sec_to_frame(50.34) == 1259
+    for master in (49.74, 10.02, 3.5 / 25, 7.817, 123.46):
+        snapped = st.sec_to_frame(master) / st.fps
+        picture = st.sec_to_frame(snapped + 0.0)
+        dialogue = st.sec_to_frame(snapped + 0.6)
+        assert dialogue - picture == 15, (master, picture, dialogue)  # 0.6 s offset is exactly 15 frames
+    assert st.sec_to_frame(-0.3) == 0

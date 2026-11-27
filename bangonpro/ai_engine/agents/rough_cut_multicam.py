@@ -805,9 +805,11 @@ def run_rough_cut_multicam_agent(
     timeline_cursor_frame = 0
 
     for idx, sp in enumerate(planned_raw_shots, start=1):
-        m_in = float(sp["start"])
         m_out = float(sp["end"])
-        desired_frames = max(1, round((m_out - m_in) * fps))
+        # Snap the cut to the master frame grid before mapping it into each camera's clock, so the
+        # picture and the dialogue of a shot start on the same master frame.
+        m_in = state.sec_to_frame(float(sp["start"])) / fps
+        desired_frames = max(1, state.sec_to_frame(m_out) - state.sec_to_frame(m_in))
 
         cam_id = sp["camera_id"]
         v_asset = state.media_assets[cam_id]

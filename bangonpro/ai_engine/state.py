@@ -9,6 +9,7 @@ SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
 from __future__ import annotations
 
 import copy
+import math
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -419,7 +420,10 @@ class ProjectAnalysisState:
         return float(self.fps_num) / float(self.fps_den)
 
     def sec_to_frame(self, sec: float) -> int:
-        return max(0, round(sec * self.fps))
+        # Round half up (never Python's round-half-to-even): picture and dialogue in-points from
+        # cameras whose source times both land on a half frame must round the same way, or the
+        # shot plays one frame out of lip sync.
+        return max(0, math.floor(sec * self.fps + 0.5 + 1e-9))
 
 
     def bump_version(self, stage: str, summary: str) -> int:

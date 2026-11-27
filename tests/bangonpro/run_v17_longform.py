@@ -54,6 +54,9 @@ import bench_v122_compare as bc  # noqa: E402
 SR = bc.SR
 FPS = bc.FPS
 FRAME = 1.0 / FPS
+# Picture/sound may differ by at most half a frame (a camera whose offset is a fractional number of
+# frames cannot do better) plus detector resolution; a whole-frame lip-sync error always fails.
+AV_TOLERANCE_MS = 1000.0 * FRAME / 2 + 5.0
 BEEP_HZ = 5500.0
 PROFILE = "podcast_multicam"
 BRIEF = "Edit this podcast into a complete YouTube episode: keep the natural rhythm, match the cameras, captions"
@@ -291,7 +294,7 @@ def detect_beeps(path: Path) -> list[float]:
             j = i
             while j + 1 < above.size and above[j + 1]:
                 j += 1
-            onsets.append(round((i + j) / 2 * hop / SR - 0.02, 4))  # beep centre -> beep start (40 ms beep)
+            onsets.append(round(float((i + j) / 2 * hop / SR - 0.02), 4))  # beep centre -> beep start (40 ms beep)
         last = t
     return onsets
 
@@ -300,7 +303,7 @@ def expected_marker_times(shots: list[dict[str, Any]], markers: list[float]) -> 
     exp = {}
     for m in markers:
         for sh in shots:
-            if sh["master_sync_in_sec"] + 0.1 <= m <= sh["master_sync_out_sec"] - 0.1:
+            if sh["master_sync_in_sec"] - FRAME / 2 <= m < sh["master_sync_out_sec"] - FRAME / 2:
                 exp[m] = sh["timeline_in_sec"] + (m - sh["master_sync_in_sec"])
                 break
     return exp
@@ -318,12 +321,12 @@ def verify_markers(render: Path, shots: list[dict[str, Any]], markers: list[floa
         if not (ok_f and ok_b):
             missing += 1
         else:
-            worst_av = max(worst_av, abs(f - b))
-            worst_pos = max(worst_pos, abs(f - te), abs(b - te))
+            worst_av = max(worst_av, abs(f - float(b)))
+            worst_pos = max(worst_pos, abs(f - te), abs(float(b) - te))
         rows.append({"master": m, "expected": round(te, 3), "flash": f, "beep": b})
     unexpected = [f for f in flashes if all(abs(f - te) > 0.5 for te in exp.values())]
     return {"markers_in_source": len(markers), "markers_expected_in_export": len(exp), "flashes_detected": len(flashes), "beeps_detected": len(beeps),
-            "missing_or_misplaced": missing, "unexpected_flashes": len(unexpected), "max_av_offset_ms": round(worst_av * 1000, 1),
+            "missing_or_misplaced": missing, "unexpected_flashes": len(unexpected), "max_av_offset_ms": round(float(worst_av) * 1000, 1), "av_tolerance_ms": AV_TOLERANCE_MS,
             "max_position_error_ms": round(worst_pos * 1000, 1), "detail": rows}
 
 
@@ -467,7 +470,7 @@ def main(argv: list[str] | None = None) -> int:
     vd, ad = float(render["video"].get("duration") or 0), float(render["audio"].get("duration") or 0)
     if render["video"].get("codec_name") != "h264" or render["audio"].get("codec_name") != "aac" or abs(vd - ad) > 0.1:
         failures.append(f"export streams invalid: video {render['video']}, audio {render['audio']}")
-    if sync["markers_expected_in_export"] < max(4, len(markers) // 2) or sync["missing_or_misplaced"] or sync["unexpected_flashes"] or sync["max_av_offset_ms"] > 1000.0 / FPS:
+    if sync["markers_expected_in_export"] < max(4, len(markers) // 2) or sync["missing_or_misplaced"] or sync["unexpected_flashes"] or sync["max_av_offset_ms"] > AV_TOLERANCE_MS:
         failures.append(f"export A/V sync markers failed: { {k: v for k, v in sync.items() if k != 'detail'} }")
     dept_video = job.doc["artifacts"].get("rendered_video")
     result["export"]["department_render"] = probe(Path(dept_video)) if dept_video and Path(dept_video).is_file() else None
@@ -510,7 +513,7 @@ def main(argv: list[str] | None = None) -> int:
                           "editorial_after_undo_fixes": ev_rev["corrective_fixes_needed"] if ev_rev else None}
     if rec.get("status") != "draft_ready" or not outside_same:
         failures.append(f"revision {rec.get('status')} / outside range unchanged={outside_same}")
-    if sync_rev["missing_or_misplaced"] or sync_rev["unexpected_flashes"] or sync_rev["max_av_offset_ms"] > 1000.0 / FPS:
+    if sync_rev["missing_or_misplaced"] or sync_rev["unexpected_flashes"] or sync_rev["max_av_offset_ms"] > AV_TOLERANCE_MS:
         failures.append(f"post-revision export A/V sync failed: { {k: v for k, v in sync_rev.items() if k != 'detail'} }")
     if not restored:
         failures.append("undo did not restore the pre-revision cut exactly")
