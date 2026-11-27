@@ -59,8 +59,8 @@
       "cam_c": 0
     },
     "processing_sec": {
-      "v1.2.1_single_window": 2.07,
-      "v1.2.2_refinement_extra": 0.44
+      "v1.2.1_single_window": 2.18,
+      "v1.2.2_refinement_extra": 0.32
     }
   },
   "assessor_validity_kendall_tau": {

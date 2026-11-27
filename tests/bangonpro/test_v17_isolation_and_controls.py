@@ -625,3 +625,24 @@ def test_half_frame_source_times_round_the_same_way_for_picture_and_dialogue() -
         dialogue = st.sec_to_frame(snapped + 0.6)
         assert dialogue - picture == 15, (master, picture, dialogue)  # 0.6 s offset is exactly 15 frames
     assert st.sec_to_frame(-0.3) == 0
+
+
+def test_project_index_keeps_protected_pause_kind() -> None:
+    """Long-form journey regression: with a neural transcript the editorial context classifies protected
+    pauses with a "kind"; build_project_index passed it as a keyword that collided with its own helper's
+    first parameter (TypeError), aborting a finished 10-minute production in its final draft rebuild."""
+    from types import SimpleNamespace
+
+    from bangonpro.ai_engine.department.project_index import build_project_index
+
+    st = SimpleNamespace(
+        metadata={"editorial_context": {"protected_pauses": [{"start_sec": 9.0, "end_sec": 10.2, "kind": "reflective"}]}},
+        asr_backend_report=SimpleNamespace(is_neural_inference=True), transcript_segments=[], interruption_intervals=[],
+        media_assets={}, profile={}, project_id="p", rough_cut_shots=[], captions=[], artifacts={},
+    )
+    try:
+        idx = build_project_index(st)
+    except AttributeError as exc:  # stub lacks an attribute the index reads later; the pause event is built first
+        raise AssertionError(f"stub state incomplete: {exc}") from exc
+    pauses = [e for e in idx["events"] if e["type"] == "protected_pause"]
+    assert pauses == [{"type": "protected_pause", "start_sec": 9.0, "end_sec": 10.2, "evidence": "pause classification", "kind": "reflective"}]

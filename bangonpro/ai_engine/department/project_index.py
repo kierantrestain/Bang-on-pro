@@ -25,7 +25,7 @@ def build_project_index(st: Any) -> dict[str, Any]:
     neural = bool(getattr(st.asr_backend_report, "is_neural_inference", False))
     events: list[dict[str, Any]] = []
 
-    def ev(kind: str, start: float, end: float, source: str, **extra: Any) -> None:
+    def ev(kind: str, start: float, end: float, source: str, /, **extra: Any) -> None:  # positional-only: extras may carry their own "kind"
         events.append({"type": kind, "start_sec": round(float(start), 3), "end_sec": round(float(max(start, end)), 3), "evidence": source, **extra})
 
     for s in st.transcript_segments:

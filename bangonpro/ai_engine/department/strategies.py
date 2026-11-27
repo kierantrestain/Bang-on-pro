@@ -312,6 +312,22 @@ def _split(key: str) -> str:
     return "learning" if h < 3 else "validation" if h == 3 else "held_out"
 
 
+_SPLIT_CYCLE = ("learning", "validation", "held_out", "learning", "learning")
+
+
+def _assign_splits(items: list[dict[str, Any]]) -> None:
+    """Stratified, deterministic learning/validation/held-out assignment (3:1:1).
+
+    Scenarios are ordered by the hash of their key and dealt round the 3:1:1 cycle, so the split of a
+    scenario still does not depend on its position in the production, but any three or more scenarios
+    always yield an independent validation and held-out set. Independent per-key hashing alone left
+    small productions with no held-out scenario whenever turn times moved by a frame.
+    """
+    ranked = sorted(items, key=lambda s: hashlib.sha256(s["key"].encode()).hexdigest())
+    for i, sc in enumerate(ranked):
+        sc["split"] = _SPLIT_CYCLE[i % len(_SPLIT_CYCLE)]
+
+
 def scenarios(bt: Any, intel: Any, agent: str, ctx: dict[str, Any]) -> list[dict[str, Any]]:
     """Deterministic scenario steps for an agent on this draft, shaped by what agents actually requested.
 
@@ -346,6 +362,7 @@ def scenarios(bt: Any, intel: Any, agent: str, ctx: dict[str, Any]) -> list[dict
                 key = f"m:{sp['speaker_id']}:{sp['start']:.1f}:{ln}"
                 out.append({"key": key, "split": _split(key), "steps": [("bop_switch_camera", {"agent": "multicam_director", "start": mid, "end": round(mid + ln, 2), "camera": other, "reason": "reaction"})],
                             "expect": []})
+    _assign_splits(out)
     out.sort(key=lambda s: s["key"])
     # keep every split represented within the budget
     by: dict[str, list[dict[str, Any]]] = {"learning": [], "validation": [], "held_out": []}

@@ -293,12 +293,12 @@
           "cuts_inside_words": 0,
           "cuts_inside_segments": 0,
           "interior_cuts": 2,
-          "edited_sec": 7.856
+          "edited_sec": 8.496
         },
         "shots": {
           "shots": 4,
           "camera_cuts": 1,
-          "camera_cuts_per_min": 7.637,
+          "camera_cuts_per_min": 7.062,
           "unnecessary_cuts": 0,
           "speaker_coverage": 1.0,
           "overlap_on_wide": null,
