@@ -18,6 +18,7 @@ set_target_properties(bangonpro_test_timeline_command_engine PROPERTIES
     CXX_STANDARD_REQUIRED ON
     CXX_EXTENSIONS OFF
     AUTOMOC ON
+    MACOSX_BUNDLE OFF
 )
 target_include_directories(bangonpro_test_timeline_command_engine PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/..
@@ -48,6 +49,7 @@ set_target_properties(bangonpro_test_ai_assistant_dock PROPERTIES
     CXX_STANDARD_REQUIRED ON
     CXX_EXTENSIONS OFF
     AUTOMOC ON
+    MACOSX_BUNDLE OFF
 )
 target_include_directories(bangonpro_test_ai_assistant_dock PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/..
@@ -77,6 +79,7 @@ set_target_properties(bangonpro_test_premiere_preset_browser PROPERTIES
     CXX_STANDARD_REQUIRED ON
     CXX_EXTENSIONS OFF
     AUTOMOC ON
+    MACOSX_BUNDLE OFF
 )
 target_include_directories(bangonpro_test_premiere_preset_browser PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/..
@@ -113,6 +116,7 @@ set_target_properties(bangonpro_test_pro_workspace PROPERTIES
     CXX_STANDARD_REQUIRED ON
     CXX_EXTENSIONS OFF
     AUTOMOC ON
+    MACOSX_BUNDLE OFF
 )
 target_include_directories(bangonpro_test_pro_workspace PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/..
@@ -143,6 +147,7 @@ set_target_properties(bangonpro_test_roto_studio PROPERTIES
     CXX_STANDARD_REQUIRED ON
     CXX_EXTENSIONS OFF
     AUTOMOC ON
+    MACOSX_BUNDLE OFF
 )
 target_include_directories(bangonpro_test_roto_studio PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/..
@@ -173,6 +178,7 @@ set_target_properties(bangonpro_test_agent_control_centre PROPERTIES
     CXX_STANDARD_REQUIRED ON
     CXX_EXTENSIONS OFF
     AUTOMOC ON
+    MACOSX_BUNDLE OFF
 )
 target_include_directories(bangonpro_test_agent_control_centre PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/..
@@ -204,6 +210,7 @@ set_target_properties(bangonpro_test_effects_and_controls PROPERTIES
     CXX_STANDARD_REQUIRED ON
     CXX_EXTENSIONS OFF
     AUTOMOC ON
+    MACOSX_BUNDLE OFF
 )
 target_include_directories(bangonpro_test_effects_and_controls PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/..

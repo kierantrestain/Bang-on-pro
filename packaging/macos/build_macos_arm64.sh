@@ -13,6 +13,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+# shellcheck source=packaging/macos/build_targets.sh
+source "${SCRIPT_DIR}/build_targets.sh"
 
 # Defaults
 BUILD_MODE="auto"          # auto | craft | homebrew
@@ -89,6 +91,11 @@ Environment variables:
   MACOS_NOTARY_KEY_PATH, MACOS_NOTARY_KEY_ID, MACOS_NOTARY_ISSUER_ID
   CRAFT_ROOT, CMAKE_PREFIX_PATH
 EOF
+}
+
+# Pipeline-free Mach-O probe (no SIGPIPE/pipefail false negatives).
+is_macho() {
+    [[ "$(file -b "$1" 2>/dev/null || true)" == *Mach-O* ]]
 }
 
 log() {
@@ -282,12 +289,12 @@ verify_dependencies() {
     # Check FFmpeg + VideoToolbox hardware acceleration
     command -v ffmpeg >/dev/null 2>&1 || die "ffmpeg binary not found in PATH."
     log "Found FFmpeg: $(ffmpeg -version | head -n 1)"
-    if ffmpeg -hide_banner -hwaccels 2>/dev/null | grep -qi videotoolbox; then
+    if [[ "$(ffmpeg -hide_banner -hwaccels 2>/dev/null || true)" == *[Vv]ideo[Tt]oolbox* ]]; then
         log "Verified FFmpeg Apple VideoToolbox hardware acceleration is available."
     else
         warn "FFmpeg VideoToolbox hwaccel not reported; hardware-accelerated H.264/HEVC/ProRes export may fall back to software."
     fi
-    if ffmpeg -hide_banner -encoders 2>/dev/null | grep -q "h264_videotoolbox"; then
+    if [[ "$(ffmpeg -hide_banner -encoders 2>/dev/null || true)" == *h264_videotoolbox* ]]; then
         log "Verified h264_videotoolbox encoder is enabled."
     fi
 }
@@ -330,40 +337,25 @@ build_application() {
     fi
 
     cmake "${cmake_args[@]}"
-    local build_targets=(kdenlive kdenlive_render mltpreview)
-    local avail_targets
-    avail_targets="$(ninja -C "${BUILD_DIR}" -t targets all 2>/dev/null || true)"
-    for extra_t in pofiles tsfiles; do
-        if printf '%s\n' "${avail_targets}" | grep -qE "^${extra_t}:"; then
-            build_targets+=("${extra_t}")
-        fi
-    done
-    if [[ "${SKIP_TESTS}" -eq 0 ]]; then
-        if printf '%s\n' "${avail_targets}" | grep -qE "^bangonpro_all_tests:"; then
-            build_targets+=(bangonpro_all_tests)
-        else
-            local test_t
-            for test_t in \
-                bangonpro_test_timeline_command_engine \
-                bangonpro_test_ai_assistant_dock \
-                bangonpro_test_premiere_preset_browser \
-                bangonpro_test_pro_workspace \
-                bangonpro_test_roto_studio \
-                bangonpro_test_agent_control_centre \
-                bangonpro_test_effects_and_controls; do
-                if printf '%s\n' "${avail_targets}" | grep -qE "^${test_t}:"; then
-                    build_targets+=("${test_t}")
-                fi
-            done
-        fi
-    fi
+    local avail_targets build_targets=() selected t
+    avail_targets="$(ninja -C "${BUILD_DIR}" -t targets all)" || \
+        die "Unable to list Ninja targets in ${BUILD_DIR}."
+    selected="$(bangonpro_select_build_targets "${avail_targets}" "${SKIP_TESTS}")" || \
+        die "Build target selection failed (see error above)."
+    while IFS= read -r t; do
+        [[ -n "${t}" ]] && build_targets+=("${t}")
+    done <<< "${selected}"
     log "Compiling ${build_targets[*]} with ${JOBS} parallel Ninja jobs..."
     cmake --build "${BUILD_DIR}" --target "${build_targets[@]}" --parallel "${JOBS}"
 
     if [[ "${SKIP_TESTS}" -eq 0 ]]; then
+        log "Verifying all ${#BANGONPRO_REQUIRED_TEST_TARGETS[@]} Bang On Pro C++ test executables were built..."
+        bangonpro_verify_test_executables "${BUILD_DIR}" || \
+            die "Required Bang On Pro C++ test executables are missing; refusing to run CTest."
         log "Running Bang On Pro C++ CTest unit tests (offscreen Qt platform)..."
         QT_QPA_PLATFORM=offscreen SDL_AUDIODRIVER=dummy \
-            ctest --test-dir "${BUILD_DIR}" -R "^bangonpro_" --output-on-failure --timeout 120 || \
+            ctest --test-dir "${BUILD_DIR}" -R "^bangonpro_" --no-tests=error \
+                --output-on-failure --timeout 120 || \
             die "One or more Bang On Pro C++ CTest suites failed."
     fi
 
@@ -441,7 +433,7 @@ relocate_macho_deps() {
     find "${scan_roots[@]}" \
         -type f \( -perm -111 -o -name "*.dylib" -o -name "*.so" \) 2>/dev/null | \
         while IFS= read -r candidate; do
-            if file -b "${candidate}" 2>/dev/null | grep -q "Mach-O"; then
+            if is_macho "${candidate}"; then
                 printf '%s\n' "${candidate}" >> "${queue_file}"
             fi
         done
@@ -953,7 +945,7 @@ sign_nested_macho_objects() {
     if [[ -d "${app_bundle}/Contents/Resources/python-env/bin" ]]; then
         find "${app_bundle}/Contents/Resources/python-env/bin" -type f -print0 | \
             while IFS= read -r -d '' pybin; do
-                if file -b "${pybin}" 2>/dev/null | grep -q "Mach-O"; then
+                if is_macho "${pybin}"; then
                     if [[ "${hardened_flags}" == "hardened" ]]; then
                         codesign --force --options runtime --timestamp --sign "${sign_identity}" "${pybin}"
                     else
@@ -1112,7 +1104,7 @@ audit_no_leaked_dylib_paths() {
     local bin
     while IFS= read -r bin; do
         [[ -n "${bin}" ]] || continue
-        if ! file -b "${bin}" 2>/dev/null | grep -q "Mach-O"; then
+        if ! is_macho "${bin}"; then
             continue
         fi
         checked=$((checked + 1))
@@ -1301,7 +1293,7 @@ verify_bundle_launch() {
         append_verify_log "${log_file}" "${out}"
         die "[${context_label}] Bundled melt -query producers failed (rc=${rc})"
     }
-    if printf '%s\n' "${out}" | grep -q "avformat"; then
+    if [[ "${out}" == *avformat* ]]; then
         append_verify_log "${log_file}" "PASS: Bundled melt loaded avformat producer from Contents/PlugIns/mlt"
     else
         append_verify_log "${log_file}" "${out}"

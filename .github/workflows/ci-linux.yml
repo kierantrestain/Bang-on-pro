@@ -64,6 +64,7 @@ jobs:
       - name: Validate packaging scripts, lockfile, CraftConfig.ini & workflow YAML syntax
         run: |
           bash -n packaging/macos/build_macos_arm64.sh
+          bash -n packaging/macos/build_targets.sh
           bash -n packaging/macos/bootstrap_ai_runtime.sh
           python3 -m py_compile packaging/macos/craft_blueprint.py
           python3 -c '
