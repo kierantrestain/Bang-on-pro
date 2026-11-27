@@ -283,3 +283,14 @@ def test_relocator_and_audit_use_space_safe_otool_parsing() -> None:
     assert "awk '{print $1}'" not in text.split("audit_bundle_security_hygiene()")[0].split("relocate_macho_deps()")[1]
     assert text.count("bangonpro_otool_deps_from_text") >= 2
     assert '@loader_path/$(bangonpro_relpath' in text
+
+
+def test_bundled_python_uses_the_real_interpreter_not_the_framework_launcher() -> None:
+    """macOS run 46078752183: python-env/bin/python3 was Homebrew's launcher stub, which re-execs
+    Python.framework/.../Resources/Python.app - absent from the minimal bundled framework."""
+    text = (REPO_ROOT / "packaging" / "macos" / "bootstrap_ai_runtime.sh").read_text(encoding="utf-8")
+    assert '"Resources", "Python.app", "Contents", "MacOS", "Python"' in text
+    relocate = text[text.index("make_venv_relocatable() {"):]
+    assert relocate.index("Python.app") < relocate.index("# 2. On macOS, bundle the Python standard library")
+    res = subprocess.run([BASH, "-n", str(REPO_ROOT / "packaging" / "macos" / "bootstrap_ai_runtime.sh")], capture_output=True, text=True, check=False)
+    assert res.returncode == 0, res.stderr
