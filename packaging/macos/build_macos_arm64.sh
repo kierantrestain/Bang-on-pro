@@ -15,6 +15,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 # shellcheck source=packaging/macos/build_targets.sh
 source "${SCRIPT_DIR}/build_targets.sh"
+# shellcheck source=packaging/macos/framework_bundle.sh
+source "${SCRIPT_DIR}/framework_bundle.sh"
 
 # Defaults
 BUILD_MODE="auto"          # auto | craft | homebrew
@@ -574,7 +576,13 @@ relocate_macho_deps() {
                     fw_bundle_name="${fw_subpath%%/*}"
                     fw_bundle_dir="$(printf '%s' "${dep}" | sed -E 's|(.*\.framework)/.*|\1|')"
                     if [[ ! -d "${frameworks_dir}/${fw_bundle_name}" && -d "${fw_bundle_dir}" ]]; then
-                        cp -R "${fw_bundle_dir}" "${frameworks_dir}/${fw_bundle_name}"
+                        if bangonpro_framework_needs_minimal_copy "${fw_bundle_name}"; then
+                            bangonpro_bundle_minimal_framework "${fw_bundle_dir}" "${frameworks_dir}/${fw_bundle_name}" "${fw_subpath}" || \
+                                die "Unable to bundle ${fw_bundle_name} (linked as ${dep}) as a minimal framework."
+                            log "Bundled minimal ${fw_bundle_name} (${fw_subpath}) without its host Python installation."
+                        else
+                            cp -R "${fw_bundle_dir}" "${frameworks_dir}/${fw_bundle_name}"
+                        fi
                         chmod -R u+w "${frameworks_dir}/${fw_bundle_name}" 2>/dev/null || true
                         if [[ -f "${frameworks_dir}/${fw_subpath}" ]]; then
                             chmod u+w "${frameworks_dir}/${fw_subpath}" 2>/dev/null || true

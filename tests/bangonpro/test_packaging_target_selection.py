@@ -183,3 +183,63 @@ def test_root_cause_reproduces_with_legacy_pipeline(tmp_path: Path) -> None:
     # ...whereas the pipeline-free helper finds it every time.
     ok = _run('bangonpro_ninja_has_target "$(cat "$1")" kdenlive', str(f))
     assert ok.returncode == 0
+
+
+# ----------------------------------------------------------------------------- framework bundling
+FW_HELPER = REPO_ROOT / "packaging" / "macos" / "framework_bundle.sh"
+
+
+def _homebrew_like_python_framework(root: Path) -> Path:
+    """A Homebrew-shaped Python.framework: library + a whole second Python installation + host symlinks."""
+    fw = root / "Python.framework"
+    v = fw / "Versions" / "3.12"
+    (v / "Resources" / "Python.app" / "Contents").mkdir(parents=True)
+    (v / "lib" / "python3.12").mkdir(parents=True)
+    (v / "bin").mkdir()
+    (v / "Python").write_bytes(b"\xcf\xfa\xed\xfe fake mach-o")
+    (v / "Resources" / "Info.plist").write_text("<plist><dict><key>CFBundleExecutable</key><string>Python</string></dict></plist>", encoding="utf-8")
+    (v / "bin" / "python3.12").write_text("#!/bin/sh\n", encoding="utf-8")
+    (v / "lib" / "python3.12" / "site-packages").symlink_to("/opt/homebrew/lib/python3.12/site-packages")
+    (fw / "Versions" / "Current").symlink_to("3.12")
+    (fw / "Python").symlink_to("Versions/Current/Python")
+    (fw / "Resources").symlink_to("Versions/Current/Resources")
+    return fw
+
+
+def _run_fw(snippet: str, *args: str) -> subprocess.CompletedProcess[str]:
+    script = f'set -euo pipefail\nsource "{FW_HELPER}"\n{snippet}\n'
+    return subprocess.run([BASH, "-c", script, "bash", *args], capture_output=True, text=True, timeout=60, check=False)
+
+
+def test_python_framework_is_bundled_minimal_and_self_contained(tmp_path: Path) -> None:
+    src = _homebrew_like_python_framework(tmp_path / "homebrew")
+    dest = tmp_path / "Bang On Pro.app" / "Contents" / "Frameworks" / "Python.framework"
+    dest.parent.mkdir(parents=True)
+    res = _run_fw('bangonpro_framework_needs_minimal_copy Python.framework && bangonpro_bundle_minimal_framework "$1" "$2" "$3"',
+                  str(src), str(dest), "Python.framework/Versions/3.12/Python")
+    assert res.returncode == 0, res.stderr
+    files = sorted(str(p.relative_to(dest)) for p in dest.rglob("*"))
+    assert files == ["Python", "Resources", "Versions", "Versions/3.12", "Versions/3.12/Python", "Versions/3.12/Resources",
+                     "Versions/3.12/Resources/Info.plist", "Versions/Current"]
+    assert os.readlink(dest / "Versions" / "Current") == "3.12"
+    assert os.readlink(dest / "Python") == "Versions/Current/Python"
+    assert os.readlink(dest / "Resources") == "Versions/Current/Resources"
+    assert (dest / "Python").read_bytes() == (src / "Versions" / "3.12" / "Python").read_bytes()
+    for p in dest.rglob("*"):  # no link may leave the bundle (codesign and the leak audit both reject that)
+        if p.is_symlink():
+            assert not os.path.isabs(os.readlink(p)) and p.resolve().is_relative_to(dest.resolve()), p
+
+
+def test_minimal_framework_refuses_missing_or_flat_binaries(tmp_path: Path) -> None:
+    src = _homebrew_like_python_framework(tmp_path / "homebrew")
+    res = _run_fw('bangonpro_bundle_minimal_framework "$1" "$2" "$3"', str(src), str(tmp_path / "out.framework"), "Python.framework/Versions/3.13/Python")
+    assert res.returncode != 0
+    res = _run_fw('bangonpro_bundle_minimal_framework "$1" "$2" "$3"', str(src), str(tmp_path / "out.framework"), "Python.framework/Python")
+    assert res.returncode != 0
+
+
+def test_qt_frameworks_are_still_copied_whole() -> None:
+    for name in ("QtCore.framework", "KF6CoreAddons.framework", "QtQuick.framework"):
+        assert _run_fw('bangonpro_framework_needs_minimal_copy "$1"', name).returncode != 0
+    text = BUILD_SCRIPT.read_text(encoding="utf-8")
+    assert 'source "${SCRIPT_DIR}/framework_bundle.sh"' in text and "bangonpro_bundle_minimal_framework" in text
