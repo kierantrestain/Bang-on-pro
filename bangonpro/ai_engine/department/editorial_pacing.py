@@ -284,6 +284,11 @@ def _target_keep(kind: str, rules: dict[str, Any], dur: float) -> float:
         return dur
     if rules["pause_policy"] == "remove":
         return min(dur, 2.0 * float(rules.get("keep_padding_sec", 0.2)))
+    if kind == "after_question" and rules.get("format") == "podcast" and dur > TURN_BEAT_MAX_SEC:
+        # A long, otherwise silent handover still gets a conversational answer beat.
+        # Allow headroom for acoustic-boundary uncertainty and outward frame rounding
+        # so the actual retained dead air remains within the one-second release gate.
+        return min(dur, float(rules["protected_pause_max_sec"]), 0.85)
     if kind in ("after_question", "before_punchline"):
         return min(dur, float(rules["protected_pause_max_sec"]))
     if kind == "reaction_beat":

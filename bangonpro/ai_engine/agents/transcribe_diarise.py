@@ -47,6 +47,48 @@ from bangonpro.ai_engine.transcript import (
 from bangonpro.show_profiles.loader import get_effective_profile_settings
 
 
+def _retime_silent_word_at_edge(
+    ws: float,
+    we: float,
+    energy_db: np.ndarray,
+    hop_sec: float,
+    sound_db: float,
+    silences: list[tuple[float, float]],
+) -> tuple[float, float]:
+    """Keep recognised text without extending speech into confirmed long silence.
+
+    Only retime a short, entirely inaudible word near a measured gap boundary,
+    and only if adjacent acoustic activity supports the replacement timestamp.
+    Quiet but audible words, short conversational pauses and ambiguous words
+    deep inside a gap are deliberately untouched.
+    """
+    if not 0.0 < we - ws <= 0.8:
+        return ws, we
+    f0 = max(0, int(ws / hop_sec))
+    f1 = min(int(energy_db.size), int(np.ceil(we / hop_sec)))
+    if f1 - f0 < 2 or np.any(energy_db[f0:f1] > sound_db):
+        return ws, we
+    for s0, s1 in silences:
+        if s1 - s0 < 2.0 or ws < s0 - 0.12 or we > s1 + 0.12:
+            continue
+        width = min(0.08, we - ws)
+        if we <= s0 + 0.85:
+            lo = max(0, int(np.ceil((s0 - 0.25) / hop_sec)))
+            hi = min(int(energy_db.size), int(np.floor(s0 / hop_sec)))
+            active = np.flatnonzero(energy_db[lo:hi] > sound_db)
+            if active.size:
+                end = min(s0, (lo + int(active[-1]) + 1) * hop_sec)
+                return max(0.0, end - width), end
+        elif ws >= s1 - 0.85:
+            lo = max(0, int(np.ceil(s1 / hop_sec)))
+            hi = min(int(energy_db.size), int(np.ceil((s1 + 0.25) / hop_sec)))
+            active = np.flatnonzero(energy_db[lo:hi] > sound_db)
+            if active.size:
+                start = (lo + int(active[0])) * hop_sec
+                return start, min(energy_db.size * hop_sec, start + width)
+    return ws, we
+
+
 def detect_available_asr_backends() -> dict[str, bool]:
     """Feature-detect optional ML ASR packages without importing them eagerly."""
     return {
@@ -1121,8 +1163,8 @@ def run_transcribe_diarise_agent(
         # away, leaving dead air. A word side that crosses into an acoustically measured silence
         # (>= the minimum pause; short pauses inside a turn are never touched) is trimmed back to
         # where it still contains sound (6 dB over the noise floor - far below the speech threshold,
-        # so quiet words stay whole), never past the silence's own boundary. Words wholly inside a
-        # silence, or with no sound at all, are left untouched.
+        # so quiet words stay whole), never past the silence's own boundary. A short, inaudible
+        # displaced word near the edge of a long confirmed gap can be retimed to adjacent sound.
         sound_db = (float(np.percentile(max_speech_db, 5)) if n_frames else -80.0) + 6.0
         acoustic_silences = sorted((float(iv.start_sec), float(iv.end_sec)) for iv in silence_intervals)
 
@@ -1133,7 +1175,7 @@ def run_transcribe_diarise_agent(
                 return ws, we
             act = max_speech_db[f0:f1] > sound_db
             if not act.any():
-                return ws, we
+                return _retime_silent_word_at_edge(ws, we, max_speech_db, hop_sec, sound_db, acoustic_silences)
             snd_s = (f0 + int(np.argmax(act))) * hop_sec - 0.05
             snd_e = (f0 + int(act.size - np.argmax(act[::-1]))) * hop_sec + 0.05
             for s0, s1 in acoustic_silences:

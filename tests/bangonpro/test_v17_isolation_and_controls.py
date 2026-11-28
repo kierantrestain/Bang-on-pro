@@ -692,3 +692,39 @@ def test_longform_beep_detector_reports_true_onsets() -> None:
     for got, want in zip(raw, truth):
         assert abs((got - bias) - want) <= 0.0021, (got - bias, want)  # 2 ms analysis hop
     assert lf.AV_TOLERANCE_MS == 1000.0 / lf.FPS / 2 + 5.0  # gate unchanged: half a frame + 5 ms
+
+
+def test_macos_displaced_whisper_word_does_not_protect_long_silence() -> None:
+    """A word recognised wholly in dead air may belong to the adjacent speech."""
+    import numpy as np
+
+    from bangonpro.ai_engine.agents.transcribe_diarise import _retime_silent_word_at_edge
+
+    db = np.full(1200, -80.0)
+    db[470:498] = -30.0
+    db[950:980] = -30.0
+    silences = [(5.0, 9.5)]
+
+    def fix(a: float, b: float) -> tuple[float, float]:
+        return _retime_silent_word_at_edge(a, b, db, 0.01, -74.0, silences)
+
+    a, b = fix(4.99, 5.59)
+    assert 4.7 <= a < b <= 5.0
+    a, b = fix(9.13, 9.37)
+    assert 9.5 <= a < b <= 9.8
+    assert fix(7.0, 7.4) == (7.0, 7.4)
+    assert _retime_silent_word_at_edge(4.99, 5.59, db, 0.01, -74.0, [(5.0, 6.0)]) == (4.99, 5.59)
+    # A quiet utterance still contains measurable sound: do not move it.
+    db[510:515] = -70.0
+    assert fix(4.99, 5.59) == (4.99, 5.59)
+
+
+def test_long_podcast_question_keeps_a_bounded_answer_beat() -> None:
+    from bangonpro.ai_engine.department.editorial_pacing import _target_keep
+
+    rules = {"format": "podcast", "pause_policy": "compress", "protected_pause_max_sec": 1.5}
+    assert 0.8 <= _target_keep("after_question", rules, 4.5) <= 0.85
+    assert _target_keep("after_question", rules, 1.2) == 1.2
+    assert _target_keep("before_punchline", rules, 4.5) == 1.5
+    assert _target_keep("after_question", {**rules, "format": "interview"}, 4.5) == 1.5
+    assert _target_keep("after_question", {**rules, "pause_policy": "keep"}, 4.5) == 4.5
