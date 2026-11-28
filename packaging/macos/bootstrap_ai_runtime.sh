@@ -160,26 +160,6 @@ make_venv_relocatable() {
         fi
     done
 
-    # 1b. macOS framework builds (Homebrew, python.org): bin/python3.X is only a launcher stub that
-    #     re-execs Python.framework/Versions/X/Resources/Python.app/Contents/MacOS/Python. The app
-    #     bundle bundles Python.framework minimally (library + Info.plist), so the stub would have
-    #     nothing to start (macOS run 46078752183: posix_spawn ... Python.app ... failed). Use the
-    #     real interpreter as bin/python3 instead; it links only the framework's Python library.
-    if [[ "$(uname -s)" == "Darwin" ]]; then
-        local fw_interp
-        fw_interp="$("${base_py}" -c 'import os, sys; p = os.path.join(sys.base_prefix, "Resources", "Python.app", "Contents", "MacOS", "Python"); print(p if os.path.isfile(p) else "")' 2>/dev/null || true)"
-        if [[ -n "${fw_interp}" ]]; then
-            for bin_cand in "${venv_dir}/bin/python3" "${venv_dir}/bin/python3.12" "${venv_dir}/bin/python"; do
-                if [[ -e "${bin_cand}" || -L "${bin_cand}" ]]; then
-                    rm -f "${bin_cand}"
-                    cp -f "${fw_interp}" "${bin_cand}"
-                    chmod 755 "${bin_cand}"
-                fi
-            done
-            log "Using the framework's real interpreter (${fw_interp}) instead of its launcher stub."
-        fi
-    fi
-
     # 2. On macOS, bundle the Python standard library + lib-dynload directly inside python-env/lib/pythonX.Y
     #    so the .app runs on Macs without Homebrew Python 3.12 installed.
     if [[ "$(uname -s)" == "Darwin" ]]; then

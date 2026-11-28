@@ -978,6 +978,19 @@ sign_nested_macho_objects() {
             done
     fi
 
+    # Sign app bundles nested inside frameworks (Python.framework's Python.app interpreter) before
+    # the frameworks that contain them
+    if [[ -d "${app_bundle}/Contents/Frameworks" ]]; then
+        find "${app_bundle}/Contents/Frameworks" -type d -name "*.app" -prune -print0 | \
+            while IFS= read -r -d '' nested_app; do
+                if [[ "${hardened_flags}" == "hardened" ]]; then
+                    codesign --force --options runtime --timestamp --sign "${sign_identity}" "${nested_app}"
+                else
+                    codesign --force --sign - "${nested_app}"
+                fi
+            done
+    fi
+
     # Sign bundled frameworks
     if [[ -d "${app_bundle}/Contents/Frameworks" ]]; then
         find "${app_bundle}/Contents/Frameworks" -maxdepth 2 -name "*.framework" -print0 | \

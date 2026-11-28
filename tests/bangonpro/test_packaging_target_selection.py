@@ -193,7 +193,9 @@ def _homebrew_like_python_framework(root: Path) -> Path:
     """A Homebrew-shaped Python.framework: library + a whole second Python installation + host symlinks."""
     fw = root / "Python.framework"
     v = fw / "Versions" / "3.12"
-    (v / "Resources" / "Python.app" / "Contents").mkdir(parents=True)
+    (v / "Resources" / "Python.app" / "Contents" / "MacOS").mkdir(parents=True)
+    (v / "Resources" / "Python.app" / "Contents" / "MacOS" / "Python").write_bytes(b"\xcf\xfa\xed\xfe interpreter")
+    (v / "Resources" / "Python.app" / "Contents" / "Info.plist").write_text("<plist/>", encoding="utf-8")
     (v / "lib" / "python3.12").mkdir(parents=True)
     (v / "bin").mkdir()
     (v / "Python").write_bytes(b"\xcf\xfa\xed\xfe fake mach-o")
@@ -219,8 +221,12 @@ def test_python_framework_is_bundled_minimal_and_self_contained(tmp_path: Path) 
                   str(src), str(dest), "Python.framework/Versions/3.12/Python")
     assert res.returncode == 0, res.stderr
     files = sorted(str(p.relative_to(dest)) for p in dest.rglob("*"))
+    # The library, its Info.plist and the Python.app interpreter the launcher stub re-execs
+    # (macOS run 46078752183) - but none of Homebrew's bin/, lib/ or host symlinks.
     assert files == ["Python", "Resources", "Versions", "Versions/3.12", "Versions/3.12/Python", "Versions/3.12/Resources",
-                     "Versions/3.12/Resources/Info.plist", "Versions/Current"]
+                     "Versions/3.12/Resources/Info.plist", "Versions/3.12/Resources/Python.app", "Versions/3.12/Resources/Python.app/Contents",
+                     "Versions/3.12/Resources/Python.app/Contents/Info.plist", "Versions/3.12/Resources/Python.app/Contents/MacOS",
+                     "Versions/3.12/Resources/Python.app/Contents/MacOS/Python", "Versions/Current"]
     assert os.readlink(dest / "Versions" / "Current") == "3.12"
     assert os.readlink(dest / "Python") == "Versions/Current/Python"
     assert os.readlink(dest / "Resources") == "Versions/Current/Resources"
@@ -285,12 +291,7 @@ def test_relocator_and_audit_use_space_safe_otool_parsing() -> None:
     assert '@loader_path/$(bangonpro_relpath' in text
 
 
-def test_bundled_python_uses_the_real_interpreter_not_the_framework_launcher() -> None:
-    """macOS run 46078752183: python-env/bin/python3 was Homebrew's launcher stub, which re-execs
-    Python.framework/.../Resources/Python.app - absent from the minimal bundled framework."""
-    text = (REPO_ROOT / "packaging" / "macos" / "bootstrap_ai_runtime.sh").read_text(encoding="utf-8")
-    assert '"Resources", "Python.app", "Contents", "MacOS", "Python"' in text
-    relocate = text[text.index("make_venv_relocatable() {"):]
-    assert relocate.index("Python.app") < relocate.index("# 2. On macOS, bundle the Python standard library")
-    res = subprocess.run([BASH, "-n", str(REPO_ROOT / "packaging" / "macos" / "bootstrap_ai_runtime.sh")], capture_output=True, text=True, check=False)
-    assert res.returncode == 0, res.stderr
+def test_nested_framework_apps_are_signed_before_their_framework() -> None:
+    text = BUILD_SCRIPT.read_text(encoding="utf-8")
+    sign = text[text.index("sign_nested_macho_objects() {"):text.index("sign_app_bundle() {")]
+    assert sign.index('-name "*.app"') < sign.index("# Sign bundled frameworks")

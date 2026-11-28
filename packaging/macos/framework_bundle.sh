@@ -54,6 +54,23 @@ bangonpro_bundle_minimal_framework() {
 </plist>
 EOF
     fi
+    # A framework-build python3 is a launcher stub that re-execs the real interpreter in
+    # Versions/<v>/Resources/Python.app (macOS run 46078752183: posix_spawn ... Python.app failed
+    # without it). Bundle that app and point its interpreter at this framework's own library.
+    if [[ -d "${src}/${ver_dir}/Resources/Python.app" ]]; then
+        cp -R "${src}/${ver_dir}/Resources/Python.app" "${dest}/${ver_dir}/Resources/Python.app"
+        rm -rf "${dest}/${ver_dir}/Resources/Python.app/Contents/_CodeSignature"
+        chmod -R u+w "${dest}/${ver_dir}/Resources/Python.app"
+        local interp="${dest}/${ver_dir}/Resources/Python.app/Contents/MacOS/${bin_name}"
+        if [[ -f "${interp}" ]] && command -v otool >/dev/null 2>&1 && command -v install_name_tool >/dev/null 2>&1; then
+            local dep
+            while IFS= read -r dep; do
+                if [[ "${dep}" == *"/${sub}" || "${dep}" == "@rpath/${sub}" ]]; then
+                    install_name_tool -change "${dep}" "@loader_path/../../../../${bin_name}" "${interp}"
+                fi
+            done < <(otool -L "${interp}" | bangonpro_otool_deps_from_text)
+        fi
+    fi
     ln -sfn "${ver}" "${dest}/Versions/Current"
     ln -sfn "Versions/Current/${bin_name}" "${dest}/${bin_name}"
     ln -sfn "Versions/Current/Resources" "${dest}/Resources"
