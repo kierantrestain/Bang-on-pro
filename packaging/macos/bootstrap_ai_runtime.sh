@@ -222,6 +222,32 @@ make_venv_relocatable() {
     [[ -x "${venv_py}" ]] || die "Relocated Python binary missing or not executable: ${venv_py}"
 }
 
+install_ca_trust_store() {
+    # The bundled OpenSSL looks for CA certificates under its build-host OPENSSLDIR, which does not
+    # exist on a user's Mac (release run 46107603951: Model Manager downloads failed with
+    # CERTIFICATE_VERIFY_FAILED). Ship a trust store inside the runtime and point OpenSSL at it at
+    # interpreter start-up through a site-packages .pth hook. An SSL_CERT_FILE the user set wins.
+    local venv_dir="$1" venv_py="$2" ssl_dir purelib certifi_pem=""
+    ssl_dir="${venv_dir}/etc/ssl"
+    mkdir -p "${ssl_dir}"
+    certifi_pem="$("${venv_py}" -s -c 'import certifi; print(certifi.where())' 2>/dev/null || true)"
+    if [[ -n "${certifi_pem}" && -s "${certifi_pem}" ]]; then
+        cp -f "${certifi_pem}" "${ssl_dir}/cert.pem"
+        log "CA trust store: certifi (Mozilla) bundle"
+    elif [[ -r /System/Library/Keychains/SystemRootCertificates.keychain ]] && command -v security >/dev/null 2>&1; then
+        security find-certificate -a -p /System/Library/Keychains/SystemRootCertificates.keychain > "${ssl_dir}/cert.pem"
+        log "CA trust store: macOS system root certificates"
+    else
+        die "No CA certificate source (certifi or macOS system roots) for the bundled runtime"
+    fi
+    [[ "$(grep -c 'BEGIN CERTIFICATE' "${ssl_dir}/cert.pem")" -ge 50 ]] || die "CA trust store has too few certificates: ${ssl_dir}/cert.pem"
+    chmod 644 "${ssl_dir}/cert.pem"
+    purelib="$("${venv_py}" -s -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
+    printf '%s\n' 'import os, sys; _bop_ca = os.path.join(sys.prefix, "etc", "ssl", "cert.pem"); os.path.isfile(_bop_ca) and os.environ.setdefault("SSL_CERT_FILE", _bop_ca); del _bop_ca' \
+        > "${purelib}/bangonpro_ca_trust.pth"
+    env -u SSL_CERT_FILE -u SSL_CERT_DIR "${venv_py}" -s -c 'import os, ssl, sys; p = ssl.get_default_verify_paths().cafile; assert p and os.path.realpath(p).startswith(os.path.realpath(sys.prefix)), p; n = ssl.create_default_context().cert_store_stats()["x509_ca"]; assert n >= 50, n; print("CA trust store OK:", n, "certificates")'
+}
+
 main() {
     sanitize_runtime_env
     SCRATCH_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/bangonpro-pyvenv.XXXXXX")"
@@ -267,6 +293,7 @@ main() {
     fi
 
     make_venv_relocatable "${VENV_DIR}" "${PYTHON_BIN}"
+    install_ca_trust_store "${VENV_DIR}" "${venv_py}"
 
     # Strip cached bytecode & transient caches to minimize .app/.dmg footprint
     find "${VENV_DIR}" -type d -name "__pycache__" -prune -exec rm -rf {} + 2>/dev/null || true

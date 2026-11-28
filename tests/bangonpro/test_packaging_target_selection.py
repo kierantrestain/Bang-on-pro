@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 import shutil
 import stat
 import subprocess
@@ -327,3 +328,23 @@ def test_shared_frameworks_libraries_never_resolve_via_executable_path() -> None
     assert '"${frameworks_dir}/"*' in case_line and "python-env" in case_line, case_line
     pre = (REPO_ROOT / "packaging" / "macos" / "preflight_python_runtime.sh").read_text(encoding="utf-8")
     assert "emulate_macdeployqt_shared_libs" in pre and "@executable_path/../Frameworks/libcrypto.3.dylib" in pre
+
+
+def test_bundled_runtime_ships_its_own_ca_trust_store(tmp_path: Path) -> None:
+    """Release run 46107603951: Model Manager downloads failed with CERTIFICATE_VERIFY_FAILED because
+    the bundled OpenSSL looked for CA certificates under its build-host OPENSSLDIR."""
+    boot = (REPO_ROOT / "packaging" / "macos" / "bootstrap_ai_runtime.sh").read_text(encoding="utf-8")
+    main_body = boot[boot.index("\nmain() {"):]
+    assert main_body.index('make_venv_relocatable "${VENV_DIR}"') < main_body.index('install_ca_trust_store "${VENV_DIR}" "${venv_py}"')
+    fn = boot[boot.index("install_ca_trust_store() {"):boot.index("\nmain() {")]
+    # Run the hook line that install_ca_trust_store writes, against a fake prefix holding a CA bundle.
+    hook = re.search(r"printf '%s\\n' '([^']+)'", fn).group(1)
+    (tmp_path / "etc" / "ssl").mkdir(parents=True)
+    (tmp_path / "etc" / "ssl" / "cert.pem").write_text("x", encoding="utf-8")
+    probe = f"import os, sys; sys.prefix = {str(tmp_path)!r}; os.environ.pop('SSL_CERT_FILE', None)\nexec({hook!r})\nprint(os.environ['SSL_CERT_FILE'])"
+    out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=True).stdout.strip()
+    assert out == str(tmp_path / "etc" / "ssl" / "cert.pem")
+    keep = f"import os, sys; sys.prefix = {str(tmp_path)!r}; os.environ['SSL_CERT_FILE'] = '/user/choice.pem'\nexec({hook!r})\nprint(os.environ['SSL_CERT_FILE'])"
+    assert subprocess.run([sys.executable, "-c", keep], capture_output=True, text=True, check=True).stdout.strip() == "/user/choice.pem"
+    pre = (REPO_ROOT / "packaging" / "macos" / "preflight_python_runtime.sh").read_text(encoding="utf-8")
+    assert "CA bundle outside the app" in pre and "verified HTTPS download path" in pre
