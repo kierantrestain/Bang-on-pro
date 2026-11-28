@@ -367,7 +367,26 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+      actions: read
     steps:
+      - name: Require a successful CI Linux run on this exact commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          # Publishing needs both platforms green on the identical commit; wait for a Linux run still in progress.
+          for attempt in $(seq 1 90); do
+            runs="$(gh run list --repo "${GITHUB_REPOSITORY}" --workflow ci-linux.yml --commit "${RELEASE_SHA}" --limit 20 --json status,conclusion)"
+            if jq -e 'any(.[]; .status == "completed" and .conclusion == "success")' <<< "${runs}" > /dev/null; then
+              echo "CI Linux succeeded on ${RELEASE_SHA}"; exit 0
+            fi
+            if ! jq -e 'any(.[]; .status != "completed")' <<< "${runs}" > /dev/null; then
+              echo "::error::No successful CI Linux run on ${RELEASE_SHA}: ${runs}"; exit 1
+            fi
+            sleep 60
+          done
+          echo "::error::Timed out waiting for CI Linux on ${RELEASE_SHA}"; exit 1
+
       - name: Download macOS arm64 build artifacts
         uses: actions/download-artifact@v4
         with:

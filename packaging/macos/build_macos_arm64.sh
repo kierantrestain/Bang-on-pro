@@ -1537,5 +1537,7 @@ main() {
     log "Done! Self-contained arm64 artifacts available in: ${OUTPUT_DIR}"
 }
 
-main
-
+# packaging/macos/preflight_python_runtime.sh sources this file for its packaging functions only.
+if [[ "${BANGONPRO_PACKAGING_LIB_ONLY:-0}" != "1" ]]; then
+    main
+fi

@@ -66,6 +66,7 @@ jobs:
           bash -n packaging/macos/build_macos_arm64.sh
           bash -n packaging/macos/build_targets.sh
           bash -n packaging/macos/framework_bundle.sh
+          bash -n packaging/macos/preflight_python_runtime.sh
           bash -n packaging/macos/bootstrap_ai_runtime.sh
           python3 -m py_compile packaging/macos/craft_blueprint.py
           python3 -c '

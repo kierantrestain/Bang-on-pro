@@ -295,3 +295,15 @@ def test_nested_framework_apps_are_signed_before_their_framework() -> None:
     text = BUILD_SCRIPT.read_text(encoding="utf-8")
     sign = text[text.index("sign_nested_macho_objects() {"):text.index("sign_app_bundle() {")]
     assert sign.index('-name "*.app"') < sign.index("# Sign bundled frameworks")
+
+
+def test_packaging_preflight_reuses_the_release_functions_and_publish_requires_linux() -> None:
+    pre = (REPO_ROOT / "packaging" / "macos" / "preflight_python_runtime.sh").read_text(encoding="utf-8")
+    for fn in ("bootstrap_ai_runtime.sh", "relocate_macho_deps", "sign_app_bundle", "audit_no_leaked_dylib_paths", "DYLD_PRINT_LIBRARIES", "Relocated Install"):
+        assert fn in pre, fn
+    assert BUILD_SCRIPT.read_text(encoding="utf-8").rstrip().endswith('if [[ "${BANGONPRO_PACKAGING_LIB_ONLY:-0}" != "1" ]]; then\n    main\nfi')
+    wf = (REPO_ROOT / ".github" / "workflows" / "build-macos-arm64.yml").read_text(encoding="utf-8")
+    publish = wf[wf.index("publish-release:"):]
+    assert publish.index("Require a successful CI Linux run on this exact commit") < publish.index("softprops/action-gh-release")
+    res = subprocess.run([BASH, "-n", str(REPO_ROOT / "packaging" / "macos" / "preflight_python_runtime.sh")], capture_output=True, text=True, check=False)
+    assert res.returncode == 0, res.stderr

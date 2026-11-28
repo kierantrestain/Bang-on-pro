@@ -1,0 +1,45 @@
+# SPDX-FileCopyrightText: 2026 Bang On Pro Contributors
+# SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
+
+# Lightweight native Apple Silicon packaging preflight (~10 min, no C++ build): bundled Python
+# runtime, Python.framework/Python.app structure, Mach-O relocation and LC_RPATHs, nested signing,
+# and Homebrew-free execution from a relocated install directory containing spaces. Run before
+# dispatching the full release workflow whenever macOS packaging changes.
+name: macOS Packaging Preflight (arm64)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "bangonpro/**"
+    paths:
+      - "packaging/macos/**"
+      - "requirements-bangonpro.lock"
+      - ".github/workflows/macos-packaging-preflight.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-packaging-preflight-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  preflight:
+    name: Bundled Python runtime preflight (macos-15, arm64)
+    runs-on: macos-15
+    timeout-minutes: 40
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install the release build's Python 3.12
+        run: |
+          test "$(uname -m)" = "arm64"
+          brew install python@3.12
+
+      - name: Run packaging preflight
+        run: ./packaging/macos/preflight_python_runtime.sh --hide-homebrew-python
