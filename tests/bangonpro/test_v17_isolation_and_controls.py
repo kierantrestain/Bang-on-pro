@@ -670,3 +670,25 @@ def test_question_pause_is_protected_only_when_answered_or_short() -> None:
     assert classify_gap((45.0, 46.2), st(resume_short), [], {})[0] == "after_question"  # rhetorical beat
     kind, _ = classify_gap((45.0, 50.0), st(resume_long), [], {})
     assert kind == "dead_air", kind                                                      # unanswered, long
+
+
+def test_longform_beep_detector_reports_true_onsets() -> None:
+    """The A/V gate compares flash frames with beep onsets; the beep detector must report where a
+    beep starts, not where its energy reaches half its peak (that read ~8 ms late on every marker)."""
+    import numpy as np
+
+    import run_v17_longform as lf
+
+    truth = [1.0, 2.37, 4.5013]
+    pcm = 0.0004 * np.random.default_rng(3).standard_normal(6 * lf.SR)
+    beep = lf._beep_waveform()
+    for t in truth:
+        i = int(round(t * lf.SR))
+        pcm[i:i + beep.size] += 0.5 * beep
+    raw = lf._beep_half_energy_points(pcm)
+    bias = lf._beep_onset_bias_sec()
+    assert bias > 0.005  # the uncorrected half-energy point lags the onset by more than the detector allowance
+    assert len(raw) == len(truth)
+    for got, want in zip(raw, truth):
+        assert abs((got - bias) - want) <= 0.0021, (got - bias, want)  # 2 ms analysis hop
+    assert lf.AV_TOLERANCE_MS == 1000.0 / lf.FPS / 2 + 5.0  # gate unchanged: half a frame + 5 ms

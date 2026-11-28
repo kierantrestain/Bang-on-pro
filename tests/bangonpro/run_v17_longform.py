@@ -162,8 +162,7 @@ def synthesise(base: Path, gt: dict[str, Any], *, lexical: bool, guest_gain: flo
     period = 47.0
     blocks = int(round(gt["duration"] / period))
     markers = [round(b * period + off, 2) for b in range(blocks) for off in (5.0, 19.6)]
-    t = np.arange(int(0.04 * SR)) / SR
-    beep = np.sin(2 * np.pi * BEEP_HZ * t) * np.hanning(t.size) ** 0.25
+    beep = _beep_waveform()
     for m in markers:
         place(slate, m, beep, 0.5)
 
@@ -274,8 +273,14 @@ def detect_flashes(path: Path) -> list[float]:
     return merged
 
 
-def detect_beeps(path: Path) -> list[float]:
-    """Onsets of the 40 ms 5.5 kHz sync beeps.
+def _beep_waveform() -> np.ndarray:
+    """The sync beep exactly as ``synthesise`` writes it (40 ms, 5.5 kHz, fast-rising envelope)."""
+    t = np.arange(int(0.04 * SR)) / SR
+    return np.sin(2 * np.pi * BEEP_HZ * t) * np.hanning(t.size) ** 0.25
+
+
+def _beep_half_energy_points(pcm: np.ndarray) -> list[float]:
+    """Times where each beep's narrowband energy first reaches half its peak.
 
     A beep is a pure tone: nearly all of the 3-8 kHz energy sits in a 200 Hz band around 5.5 kHz.
     Sibilants in real speech carry 5.5 kHz energy too but spread it across the whole band, so the
@@ -284,9 +289,6 @@ def detect_beeps(path: Path) -> list[float]:
     """
     from scipy.signal import butter, sosfiltfilt
 
-    from bangonpro.ai_engine.agents.ingest_sync import extract_mono_pcm
-
-    pcm = np.asarray(extract_mono_pcm(path, sample_rate=SR), dtype=np.float64)
     narrow = sosfiltfilt(butter(6, [5400 / (SR / 2), 5600 / (SR / 2)], btype="bandpass", output="sos"), pcm)
     wide = sosfiltfilt(butter(6, [3000 / (SR / 2), 8000 / (SR / 2)], btype="bandpass", output="sos"), pcm)
     hop, win = int(0.002 * SR), int(0.010 * SR)
@@ -300,7 +302,7 @@ def detect_beeps(path: Path) -> list[float]:
     # single 2 ms hops at ~20x. Require both a sustained run and a clear level margin.
     above = (tonal > 0.6) & (level > 200.0 * floor)
     min_run = int(0.020 / 0.002)
-    onsets: list[float] = []
+    points: list[float] = []
     i = 0
     while i < above.size:
         if above[i]:
@@ -309,14 +311,41 @@ def detect_beeps(path: Path) -> list[float]:
                 j += 1
             if j - i + 1 >= min_run:
                 run = en[i:j + 1]
-                k = i + int(np.argmax(run >= 0.5 * float(run.max())))  # centred window: half energy at the beep's start
+                k = i + int(np.argmax(run >= 0.5 * float(run.max())))
                 t0 = k * hop / SR
-                if not onsets or t0 - onsets[-1] > 0.5:
-                    onsets.append(round(float(t0), 4))
+                if not points or t0 - points[-1] > 0.5:
+                    points.append(float(t0))
             i = j + 1
         else:
             i += 1
-    return onsets
+    return points
+
+
+def _beep_onset_bias_sec() -> float:
+    """Lag of the half-energy point behind the true start of the known beep waveform.
+
+    Measured by running the detector on the exact beep this script synthesises, placed at a known
+    sample in a noise floor like the source recordings'. Without this correction every beep read
+    ~8 ms late (a clean WAV with a beep at 2.000 s measured 2.008 s), which consumed the detector
+    allowance in AV_TOLERANCE_MS and made a genuine half-frame camera offset read as 26 ms.
+    """
+    at = 1.0
+    pcm = 0.0004 * np.random.default_rng(7).standard_normal(3 * SR)
+    beep = _beep_waveform()
+    i = int(round(at * SR))
+    pcm[i:i + beep.size] += 0.5 * beep
+    pts = _beep_half_energy_points(pcm)
+    assert len(pts) == 1, pts
+    return pts[0] - at
+
+
+def detect_beeps(path: Path) -> list[float]:
+    """Onsets (true start times) of the 40 ms 5.5 kHz sync beeps in ``path``."""
+    from bangonpro.ai_engine.agents.ingest_sync import extract_mono_pcm
+
+    pcm = np.asarray(extract_mono_pcm(path, sample_rate=SR), dtype=np.float64)
+    bias = _beep_onset_bias_sec()
+    return [round(t - bias, 4) for t in _beep_half_energy_points(pcm)]
 
 
 def expected_marker_times(shots: list[dict[str, Any]], markers: list[float]) -> dict[float, float]:
