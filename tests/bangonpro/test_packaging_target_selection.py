@@ -316,3 +316,14 @@ def test_macdeployqt_never_touches_the_bundled_python_runtime() -> None:
     park, deploy, unpark = fn.index('mv "${py_env}" "${parked}/python-env"'), fn.index('macdeployqt "${app_bundle}"'), fn.index('mv "${parked}/python-env" "${py_env}"')
     assert park < deploy < unpark
     assert '@executable_path/../Frameworks/*' in text  # relocator safeguard for code loaded by the bundled Python
+
+
+def test_shared_frameworks_libraries_never_resolve_via_executable_path() -> None:
+    """Release run 46097185166: macdeployqt's Frameworks/libssl.3.dylib referenced libcrypto via
+    @executable_path, which resolves inside Python.app when the bundled Python loads it."""
+    text = BUILD_SCRIPT.read_text(encoding="utf-8")
+    block = text[text.index('if [[ "${dep}" == @executable_path/../Frameworks/* ]]; then'):]
+    case_line = block.splitlines()[2]
+    assert '"${frameworks_dir}/"*' in case_line and "python-env" in case_line, case_line
+    pre = (REPO_ROOT / "packaging" / "macos" / "preflight_python_runtime.sh").read_text(encoding="utf-8")
+    assert "emulate_macdeployqt_shared_libs" in pre and "@executable_path/../Frameworks/libcrypto.3.dylib" in pre

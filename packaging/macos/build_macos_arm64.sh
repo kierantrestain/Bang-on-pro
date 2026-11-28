@@ -519,11 +519,14 @@ relocate_macho_deps() {
                 # Code loaded by the bundled Python runs under Python.app's interpreter (or the python-env
                 # launcher), not Contents/MacOS, so macdeployqt's @executable_path/../Frameworks/...
                 # references resolve to the wrong place there (release run 46091501746: _sqlite3 looked
-                # for Python.app/Contents/Frameworks/libsqlite3.dylib). They become exact
-                # @loader_path-relative paths into Contents/Frameworks.
+                # for Python.app/Contents/Frameworks/libsqlite3.dylib). Libraries in Contents/Frameworks
+                # are shared by the app and the bundled Python (release run 46097185166: _ssl ->
+                # Frameworks/libssl.3.dylib -> @executable_path/../Frameworks/libcrypto.3.dylib), so
+                # every such reference outside Contents/MacOS becomes an exact @loader_path-relative
+                # path into Contents/Frameworks, which resolves the same for either process.
                 if [[ "${dep}" == @executable_path/../Frameworks/* ]]; then
                     case "${target}" in
-                        "${app_bundle}/Contents/Resources/python-env/"*|"${frameworks_dir}/Python.framework/"*)
+                        "${app_bundle}/Contents/Resources/python-env/"*|"${frameworks_dir}/"*)
                             local ex_rel="${dep#@executable_path/../Frameworks/}"
                             if [[ -e "${frameworks_dir}/${ex_rel}" ]]; then
                                 install_name_tool -change "${dep}" "@loader_path/$(bangonpro_relpath "$(dirname "${target}")" "${frameworks_dir}/${ex_rel}")" "${target}" 2>/dev/null || true
