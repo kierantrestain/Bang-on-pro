@@ -69,6 +69,15 @@ EOF
                     install_name_tool -change "${dep}" "@loader_path/../../../../${bin_name}" "${interp}"
                 fi
             done < <(otool -L "${interp}" | bangonpro_otool_deps_from_text)
+            # Homebrew builds the interpreter with LC_RPATH /opt/homebrew/lib (macOS run 46086140335:
+            # leaked LC_RPATH); it now links only its framework's library by @loader_path, so every
+            # absolute search path is removed.
+            local rp
+            while IFS= read -r rp; do
+                if [[ "${rp}" == /* ]]; then
+                    install_name_tool -delete_rpath "${rp}" "${interp}"
+                fi
+            done < <(otool -l "${interp}" | awk '/cmd LC_RPATH/{f=1; next} f && / path /{print $2; f=0}')
         fi
     fi
     ln -sfn "${ver}" "${dest}/Versions/Current"
