@@ -47,6 +47,11 @@ BUILD_DIR="${WORK}/build"
 STAGE_DIR="${WORK}/install-prefix"
 SOURCE_DIR="${PREFLIGHT_REPO}"
 SIGN_IDENTITY=""
+CRAFT_PREFIX="${CRAFT_PREFIX:-}"
+# Same tool lookup as resolve_prefixes in the release build
+[[ -n "${CRAFT_PREFIX}" && -d "${CRAFT_PREFIX}/dev-utils/bin" ]] && export PATH="${CRAFT_PREFIX}/dev-utils/bin:${PATH}"
+[[ -n "${CRAFT_PREFIX}" && -d "${CRAFT_PREFIX}/bin" ]] && export PATH="${CRAFT_PREFIX}/bin:${PATH}"
+command -v macdeployqt >/dev/null 2>&1 || { echo "[preflight] macdeployqt not found (set CRAFT_PREFIX to the release build's Craft prefix)" >&2; exit 2; }
 mkdir -p "${OUTPUT_DIR}" "${BUILD_DIR}" "${STAGE_DIR}/lib"
 APP="${OUTPUT_DIR}/${APP_NAME}.app"
 
@@ -68,6 +73,9 @@ find "${APP}/Contents/Resources/bangonpro" -type d -name "__pycache__" -prune -e
 
 "${PREFLIGHT_DIR}/bootstrap_ai_runtime.sh" --venv-dir "${APP}/Contents/Resources/python-env" \
     --requirements "${PREFLIGHT_REPO}/requirements-bangonpro.lock" --tier "${BANGONPRO_BUNDLE_AI_TIER:-tier1}"
+# The release runs macdeployqt over the whole bundle before relocation; so does the preflight (with the
+# cached Craft Qt prefix when present), because it rewrites the Python runtime's dependencies too.
+deploy_qt_frameworks "${APP}"
 relocate_macho_deps "${APP}"
 sign_app_bundle
 
@@ -130,7 +138,18 @@ run_clean() {
 }
 
 CHECK_PY='
-import json, math, os, sys, tempfile, wave
+import importlib, json, math, os, sqlite3, sys, sysconfig, tempfile, wave
+# Every compiled standard-library extension must load (release run 46091501746: _sqlite3 did not)
+dyn = os.path.join(sysconfig.get_path("platstdlib"), "lib-dynload")
+bad = []
+for f in sorted(os.listdir(dyn)):
+    if f.endswith(".so"):
+        try:
+            importlib.import_module(f.split(".")[0])
+        except Exception as exc:
+            bad.append(f"{f}: {exc}")
+assert not bad, bad
+sqlite3.connect(":memory:").execute("PRAGMA journal_mode=WAL")
 import numpy, scipy.signal, av, ctranslate2, faster_whisper, onnxruntime, cv2, PIL.Image, opentimelineio
 import bangonpro.ai_engine, bangonpro.ai_engine.department.cli, bangonpro.ai_engine.mcp.reasoning, bangonpro.macos
 app = os.environ["BOP_APP"]

@@ -516,6 +516,24 @@ relocate_macho_deps() {
                     fi
                     continue
                 fi
+                # Code loaded by the bundled Python runs under Python.app's interpreter (or the python-env
+                # launcher), not Contents/MacOS, so macdeployqt's @executable_path/../Frameworks/...
+                # references resolve to the wrong place there (release run 46091501746: _sqlite3 looked
+                # for Python.app/Contents/Frameworks/libsqlite3.dylib). They become exact
+                # @loader_path-relative paths into Contents/Frameworks.
+                if [[ "${dep}" == @executable_path/../Frameworks/* ]]; then
+                    case "${target}" in
+                        "${app_bundle}/Contents/Resources/python-env/"*|"${frameworks_dir}/Python.framework/"*)
+                            local ex_rel="${dep#@executable_path/../Frameworks/}"
+                            if [[ -e "${frameworks_dir}/${ex_rel}" ]]; then
+                                install_name_tool -change "${dep}" "@loader_path/$(bangonpro_relpath "$(dirname "${target}")" "${frameworks_dir}/${ex_rel}")" "${target}" 2>/dev/null || true
+                            else
+                                warn "Dependency '${dep}' of '${target}' is not in Contents/Frameworks"
+                            fi
+                            continue
+                            ;;
+                    esac
+                fi
                 # Skip macOS system libraries and relative loader/executable paths
                 case "${dep}" in
                     /System/Library/*|/usr/lib/*|@executable_path/*|@loader_path/*)
@@ -652,6 +670,23 @@ copy_plugin_dir_if_exists() {
         return 0
     fi
     return 1
+}
+
+# macdeployqt over the whole bundle (also run by preflight_python_runtime.sh). It rewrites the
+# dependencies of every Mach-O it visits - the bundled Python runtime included - to
+# @executable_path/../Frameworks/...; relocate_macho_deps corrects those for code loaded by the
+# bundled Python, whose executable is not Contents/MacOS.
+deploy_qt_frameworks() {
+    local app_bundle="$1"
+    if command -v macdeployqt >/dev/null 2>&1; then
+        log "Running macdeployqt to bundle Qt6 frameworks, plugins, and QML modules..."
+        local deploy_args=()
+        [[ -d "${SOURCE_DIR}/src/timeline2/view/qml" ]] && deploy_args+=("-qmldir=${SOURCE_DIR}/src/timeline2/view/qml")
+        [[ -n "${CRAFT_PREFIX}" && -d "${CRAFT_PREFIX}/lib" ]] && deploy_args+=("-libpath=${CRAFT_PREFIX}/lib")
+        macdeployqt "${app_bundle}" "${deploy_args[@]}" -verbose=1 || warn "macdeployqt reported warnings; continuing with recursive Mach-O relocation."
+    else
+        warn "macdeployqt not found; relying on recursive Mach-O relocation."
+    fi
 }
 
 assemble_app_bundle() {
@@ -890,15 +925,7 @@ EOF
     plutil -lint "${contents_dir}/Info.plist"
 
     # 5.8 Deploy Qt6 frameworks, QML modules, and Qt/KF6 plugins via macdeployqt
-    if command -v macdeployqt >/dev/null 2>&1; then
-        log "Running macdeployqt to bundle Qt6 frameworks, plugins, and QML modules..."
-        local deploy_args=()
-        [[ -d "${SOURCE_DIR}/src/timeline2/view/qml" ]] && deploy_args+=("-qmldir=${SOURCE_DIR}/src/timeline2/view/qml")
-        [[ -n "${CRAFT_PREFIX}" && -d "${CRAFT_PREFIX}/lib" ]] && deploy_args+=("-libpath=${CRAFT_PREFIX}/lib")
-        macdeployqt "${app_bundle}" "${deploy_args[@]}" -verbose=1 || warn "macdeployqt reported warnings; continuing with recursive Mach-O relocation."
-    else
-        warn "macdeployqt not found; relying on recursive Mach-O relocation."
-    fi
+    deploy_qt_frameworks "${app_bundle}"
 
     # Ensure critical Qt6 & KF6 plugin subdirectories are present inside Contents/PlugIns/
     local qt_plug_root=""

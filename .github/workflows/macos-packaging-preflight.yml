@@ -41,5 +41,16 @@ jobs:
           test "$(uname -m)" = "arm64"
           brew install python@3.12
 
+      - name: Restore the release build's KDE Craft Qt6/KF6 prefix cache (macdeployqt)
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ github.workspace }}/CraftRoot
+          key: craft-qt6-master-macos15-arm64-${{ hashFiles('packaging/macos/CraftConfig.ini', 'packaging/macos/craft_blueprint.py', 'CMakeLists.txt') }}
+          restore-keys: |
+            craft-qt6-master-macos15-arm64-
+          fail-on-cache-miss: true
+
       - name: Run packaging preflight
+        env:
+          CRAFT_PREFIX: ${{ github.workspace }}/CraftRoot/macos-arm-clang
         run: ./packaging/macos/preflight_python_runtime.sh --hide-homebrew-python
