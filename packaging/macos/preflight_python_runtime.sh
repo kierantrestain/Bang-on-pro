@@ -202,6 +202,15 @@ assert samples == 16000, samples
 assert "float32" in ctranslate2.get_supported_compute_types("cpu") or ctranslate2.get_supported_compute_types("cpu")
 assert "CPUExecutionProvider" in onnxruntime.get_available_providers()
 assert cv2.GaussianBlur(numpy.zeros((8, 8), numpy.uint8), (3, 3), 0).shape == (8, 8)
+# HTTPS trust store must ship inside the app (release run 46107603951: Model Manager downloads
+# failed with CERTIFICATE_VERIFY_FAILED because OpenSSL looked for CA certificates on the build host)
+import ssl
+vp = ssl.get_default_verify_paths()
+ca = vp.cafile or ""
+assert ca and os.path.isfile(ca), ("no CA bundle for the bundled OpenSSL", vp)
+assert os.path.realpath(ca).startswith(os.path.realpath(app)), ("CA bundle outside the app", vp)
+n_ca = ssl.create_default_context().cert_store_stats()["x509_ca"]
+assert n_ca >= 50, ("too few trusted CA certificates", n_ca)
 v = lambda m: getattr(m, "__version__", "?")
 print(json.dumps({"prefix": sys.prefix, "python": sys.version.split()[0], "numpy": v(numpy), "av": v(av),
                   "faster_whisper": v(faster_whisper), "ctranslate2": v(ctranslate2), "onnxruntime": v(onnxruntime)}))
@@ -220,6 +229,21 @@ else
     fail "images loaded from outside the app (${loaded} seen):"; printf '%s\n' "${foreign}" | head -n 20 >&2
 fi
 if run_clean "${PY}" -s -m bangonpro.ai_engine.cli --help > /dev/null; then pass "AI engine CLI --help"; else fail "AI engine CLI --help"; fi
+# Live verified HTTPS through the default context, as the Model Manager downloads models
+HTTPS_PY='
+import ssl, sys, time, urllib.request
+url = "https://huggingface.co/api/models/Systran/faster-whisper-tiny"
+for attempt in range(3):
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "BangOnPro-Preflight"}), timeout=30) as r:
+            print(r.status, ssl.get_default_verify_paths().cafile); sys.exit(0)
+    except Exception as exc:
+        if isinstance(exc, ssl.SSLError) or isinstance(getattr(exc, "reason", None), ssl.SSLError):
+            raise SystemExit(f"TLS verification failed: {exc}")
+        err = exc; time.sleep(5)
+raise SystemExit(f"network error (not TLS) after retries: {err}")
+'
+if out="$(run_clean "${PY}" -s -c "${HTTPS_PY}" 2>&1)"; then pass "verified HTTPS download path: ${out}"; else fail "verified HTTPS download path: $(printf '%s' "${out}" | tail -n 3)"; fi
 
 restore_brew
 trap - EXIT
