@@ -87,6 +87,29 @@ show_sqlite_deps() {
 show_sqlite_deps "after bootstrap"
 deploy_qt_frameworks "${APP}"
 show_sqlite_deps "after macdeployqt"
+
+# The skeleton has no Qt binaries, so macdeployqt deploys nothing into Contents/Frameworks here. In the
+# full app it deploys Qt's dependencies there - OpenSSL for Qt's TLS backend among them - with their
+# references rewritten to @executable_path/../Frameworks/..., and the bundled Python then reuses those
+# shared copies (release run 46097185166: _ssl -> Frameworks/libssl.3.dylib -> @executable_path/../
+# Frameworks/libcrypto.3.dylib, resolved inside Python.app). Reproduce that layout exactly.
+emulate_macdeployqt_shared_libs() {
+    local fw="${APP}/Contents/Frameworks" ossl lib dep
+    ossl="$(brew --prefix openssl@3)/lib"
+    for lib in libcrypto.3.dylib libssl.3.dylib; do
+        cp -L "${ossl}/${lib}" "${fw}/${lib}"
+        chmod u+w "${fw}/${lib}"
+        install_name_tool -id "@executable_path/../Frameworks/${lib}" "${fw}/${lib}"
+    done
+    while IFS= read -r dep; do
+        if [[ "${dep}" == */libcrypto.3.dylib && "${dep}" != @executable_path/* ]]; then
+            install_name_tool -change "${dep}" "@executable_path/../Frameworks/libcrypto.3.dylib" "${fw}/libssl.3.dylib"
+        fi
+    done < <(otool -L "${fw}/libssl.3.dylib" | bangonpro_otool_deps_from_text)
+    printf '[preflight] emulated macdeployqt OpenSSL deployment:\n'
+    otool -L "${fw}/libssl.3.dylib" | sed 's/^/    /'
+}
+emulate_macdeployqt_shared_libs
 relocate_macho_deps "${APP}"
 show_sqlite_deps "after relocation"
 sign_app_bundle
