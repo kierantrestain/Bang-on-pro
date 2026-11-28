@@ -77,8 +77,8 @@ find "${APP}/Contents/Resources/bangonpro" -type d -name "__pycache__" -prune -e
 
 "${PREFLIGHT_DIR}/bootstrap_ai_runtime.sh" --venv-dir "${APP}/Contents/Resources/python-env" \
     --requirements "${PREFLIGHT_REPO}/requirements-bangonpro.lock" --tier "${BANGONPRO_BUNDLE_AI_TIER:-tier1}"
-# The release runs macdeployqt over the whole bundle before relocation; so does the preflight (with the
-# cached Craft Qt prefix when present), because it rewrites the Python runtime's dependencies too.
+# Same Qt deployment step as the release (it parks the Python runtime outside the bundle while
+# macdeployqt runs, so the runtime sees the same processing whether or not macdeployqt is found).
 show_sqlite_deps() {
     local so
     so="$(find "${APP}/Contents/Resources/python-env/lib" -name '_sqlite3*.so' | head -n 1)"

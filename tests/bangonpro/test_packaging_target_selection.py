@@ -307,3 +307,12 @@ def test_packaging_preflight_reuses_the_release_functions_and_publish_requires_l
     assert publish.index("Require a successful CI Linux run on this exact commit") < publish.index("softprops/action-gh-release")
     res = subprocess.run([BASH, "-n", str(REPO_ROOT / "packaging" / "macos" / "preflight_python_runtime.sh")], capture_output=True, text=True, check=False)
     assert res.returncode == 0, res.stderr
+
+
+def test_macdeployqt_never_touches_the_bundled_python_runtime() -> None:
+    """Release run 46091501746: macdeployqt rewrote python-env extensions to @executable_path/../Frameworks."""
+    text = BUILD_SCRIPT.read_text(encoding="utf-8")
+    fn = text[text.index("deploy_qt_frameworks() {"):text.index("assemble_app_bundle() {")]
+    park, deploy, unpark = fn.index('mv "${py_env}" "${parked}/python-env"'), fn.index('macdeployqt "${app_bundle}"'), fn.index('mv "${parked}/python-env" "${py_env}"')
+    assert park < deploy < unpark
+    assert '@executable_path/../Frameworks/*' in text  # relocator safeguard for code loaded by the bundled Python

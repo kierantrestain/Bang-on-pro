@@ -680,10 +680,23 @@ deploy_qt_frameworks() {
     local app_bundle="$1"
     if command -v macdeployqt >/dev/null 2>&1; then
         log "Running macdeployqt to bundle Qt6 frameworks, plugins, and QML modules..."
+        # macdeployqt walks the whole bundle and rewrote the bundled Python runtime's extension
+        # modules to @executable_path/../Frameworks/... (release run 46091501746: _sqlite3 failed to
+        # load). It only deploys Qt; the Python runtime has its own relocation, so it is parked
+        # outside the bundle while macdeployqt runs.
+        local py_env="${app_bundle}/Contents/Resources/python-env" parked=""
+        if [[ -d "${py_env}" ]]; then
+            parked="$(mktemp -d "${BUILD_DIR}/python-env-parked.XXXXXX")"
+            mv "${py_env}" "${parked}/python-env"
+        fi
         local deploy_args=()
         [[ -d "${SOURCE_DIR}/src/timeline2/view/qml" ]] && deploy_args+=("-qmldir=${SOURCE_DIR}/src/timeline2/view/qml")
         [[ -n "${CRAFT_PREFIX}" && -d "${CRAFT_PREFIX}/lib" ]] && deploy_args+=("-libpath=${CRAFT_PREFIX}/lib")
         macdeployqt "${app_bundle}" "${deploy_args[@]}" -verbose=1 || warn "macdeployqt reported warnings; continuing with recursive Mach-O relocation."
+        if [[ -n "${parked}" ]]; then
+            mv "${parked}/python-env" "${py_env}"
+            rmdir "${parked}"
+        fi
     else
         warn "macdeployqt not found; relying on recursive Mach-O relocation."
     fi
