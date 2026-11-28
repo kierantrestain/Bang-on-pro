@@ -227,13 +227,18 @@ install_ca_trust_store() {
     # exist on a user's Mac (release run 46107603951: Model Manager downloads failed with
     # CERTIFICATE_VERIFY_FAILED). Ship a trust store inside the runtime and point OpenSSL at it at
     # interpreter start-up through a site-packages .pth hook. An SSL_CERT_FILE the user set wins.
-    local venv_dir="$1" venv_py="$2" ssl_dir purelib certifi_pem=""
+    #
+    # Paths come from the venv layout, not from running its interpreter: before the app is relocated,
+    # bin/python3 is still the host launcher stub and reports the host's prefix and site-packages.
+    local venv_dir="$1" ssl_dir purelib
+    local site_dirs=("${venv_dir}"/lib/python3.*/site-packages)
+    [[ ${#site_dirs[@]} -eq 1 && -d "${site_dirs[0]}" ]] || die "Expected exactly one site-packages under ${venv_dir}/lib: ${site_dirs[*]}"
+    purelib="${site_dirs[0]}"
     ssl_dir="${venv_dir}/etc/ssl"
     mkdir -p "${ssl_dir}"
-    certifi_pem="$("${venv_py}" -s -c 'import certifi; print(certifi.where())' 2>/dev/null || true)"
-    if [[ -n "${certifi_pem}" && -s "${certifi_pem}" ]]; then
-        cp -f "${certifi_pem}" "${ssl_dir}/cert.pem"
-        log "CA trust store: certifi (Mozilla) bundle"
+    if [[ -s "${purelib}/certifi/cacert.pem" ]]; then
+        cp -f "${purelib}/certifi/cacert.pem" "${ssl_dir}/cert.pem"
+        log "CA trust store: certifi (Mozilla) bundle from the runtime's own site-packages"
     elif [[ -r /System/Library/Keychains/SystemRootCertificates.keychain ]] && command -v security >/dev/null 2>&1; then
         security find-certificate -a -p /System/Library/Keychains/SystemRootCertificates.keychain > "${ssl_dir}/cert.pem"
         log "CA trust store: macOS system root certificates"
@@ -242,10 +247,11 @@ install_ca_trust_store() {
     fi
     [[ "$(grep -c 'BEGIN CERTIFICATE' "${ssl_dir}/cert.pem")" -ge 50 ]] || die "CA trust store has too few certificates: ${ssl_dir}/cert.pem"
     chmod 644 "${ssl_dir}/cert.pem"
-    purelib="$("${venv_py}" -s -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
     printf '%s\n' 'import os, sys; _bop_ca = os.path.join(sys.prefix, "etc", "ssl", "cert.pem"); os.path.isfile(_bop_ca) and os.environ.setdefault("SSL_CERT_FILE", _bop_ca); del _bop_ca' \
         > "${purelib}/bangonpro_ca_trust.pth"
-    env -u SSL_CERT_FILE -u SSL_CERT_DIR "${venv_py}" -s -c 'import os, ssl, sys; p = ssl.get_default_verify_paths().cafile; assert p and os.path.realpath(p).startswith(os.path.realpath(sys.prefix)), p; n = ssl.create_default_context().cert_store_stats()["x509_ca"]; assert n >= 50, n; print("CA trust store OK:", n, "certificates")'
+    log "CA trust store installed: ${ssl_dir}/cert.pem ($(grep -c 'BEGIN CERTIFICATE' "${ssl_dir}/cert.pem") certificates), start-up hook ${purelib}/bangonpro_ca_trust.pth"
+    # Resolution through the default SSL context is verified from the relocated, Homebrew-free app by
+    # preflight_python_runtime.sh.
 }
 
 main() {
@@ -293,7 +299,7 @@ main() {
     fi
 
     make_venv_relocatable "${VENV_DIR}" "${PYTHON_BIN}"
-    install_ca_trust_store "${VENV_DIR}" "${venv_py}"
+    install_ca_trust_store "${VENV_DIR}"
 
     # Strip cached bytecode & transient caches to minimize .app/.dmg footprint
     find "${VENV_DIR}" -type d -name "__pycache__" -prune -exec rm -rf {} + 2>/dev/null || true

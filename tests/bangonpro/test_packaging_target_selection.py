@@ -335,7 +335,7 @@ def test_bundled_runtime_ships_its_own_ca_trust_store(tmp_path: Path) -> None:
     the bundled OpenSSL looked for CA certificates under its build-host OPENSSLDIR."""
     boot = (REPO_ROOT / "packaging" / "macos" / "bootstrap_ai_runtime.sh").read_text(encoding="utf-8")
     main_body = boot[boot.index("\nmain() {"):]
-    assert main_body.index('make_venv_relocatable "${VENV_DIR}"') < main_body.index('install_ca_trust_store "${VENV_DIR}" "${venv_py}"')
+    assert main_body.index('make_venv_relocatable "${VENV_DIR}"') < main_body.index('install_ca_trust_store "${VENV_DIR}"')
     fn = boot[boot.index("install_ca_trust_store() {"):boot.index("\nmain() {")]
     # Run the hook line that install_ca_trust_store writes, against a fake prefix holding a CA bundle.
     hook = re.search(r"printf '%s\\n' '([^']+)'", fn).group(1)
