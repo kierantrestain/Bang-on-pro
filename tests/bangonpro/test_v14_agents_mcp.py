@@ -459,9 +459,16 @@ def test_reasoning_authorisation_and_client_configuration(tmp_path: Path, monkey
     assert reasoning.extract_json('Sure:\n```json\n{"steps": []}\n```') == {"steps": []}
 
 
-def test_live_app_connection_failure_and_simulated_native_server(tmp_path: Path) -> None:
+def test_live_app_connection_failure_and_simulated_native_server() -> None:
     """Simulated: a Python stand-in speaking TimelineCommandServer's NDJSON protocol (the C++ app is not run here)."""
+    import tempfile
+
     from bangonpro.ai_engine.mcp.live import LiveClient
+
+    # macOS limits AF_UNIX paths to 104 bytes and pytest's tmp_path on macOS runners exceeds it
+    # (macOS run 46102334615: 'AF_UNIX path too long' binding the stand-in server); the app's own
+    # socket (~/Library/Application Support/bangonpro-timeline-v1.sock) is well within the limit.
+    tmp_path = Path(tempfile.mkdtemp(prefix="bop", dir="/tmp"))
 
     assert LiveClient(tmp_path / "missing.sock").status() == {"running": False, "reason": f"Bang On Pro is not running (no socket at {tmp_path / 'missing.sock'})"}
     path = tmp_path / "s.sock"
